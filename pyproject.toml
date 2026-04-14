@@ -1,0 +1,172 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "friese-mcp"
+version = "0.1.0"
+description = "Django MCP gateway plugin with runtime API introspection and permission-aware tool scoping"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Jeremy Friese", email = "your-email@trifriesellc.com" },
+]
+keywords = ["mcp", "django", "model-context-protocol", "agentic-ai", "drf"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Django",
+    "Framework :: Django :: 5.0",
+    "Framework :: Django :: 5.1",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "django>=5.0",
+    "djangorestframework>=3.14",
+    "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+    "mypy",
+    "pylint",
+    "pylint-django",
+    "ruff",
+    "pre-commit",
+    "pytest",
+    "pytest-django",
+    "django-stubs",
+    "djangorestframework-stubs",
+]
+
+[project.urls]
+Homepage = "https://github.com/Jeremy-Friese/friese-mcp"
+Repository = "https://github.com/Jeremy-Friese/friese-mcp"
+"Bug Tracker" = "https://github.com/Jeremy-Friese/friese-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/friese_mcp"]
+
+# ---------------------------------------------------------------------------
+# black
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312", "py313"]
+
+# ---------------------------------------------------------------------------
+# isort
+# ---------------------------------------------------------------------------
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["friese_mcp"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "S",   # flake8-bandit (security)
+    "ANN", # flake8-annotations
+    "D",   # pydocstyle
+]
+ignore = [
+    "D100", # Missing docstring in public module — covered by __init__.py docstring
+    "D104", # Missing docstring in public package
+    "D203", # one-blank-line-before-class (conflicts with D211)
+    "D212", # multi-line-summary-first-line (conflicts with D213)
+    "ANN401", # Dynamically typed Any — unavoidable for JSON dispatch
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["friese_mcp"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/friese_mcp/__init__.py" = ["D"]
+"tests/**" = [
+    "S101",    # assert statements are idiomatic in tests
+    "ANN201",  # missing return type on public function (test functions)
+    "D103",    # missing docstring in public function (parametrize helpers)
+    "D401",    # first line of docstring should be in imperative mood (too prescriptive for helpers)
+    "PLC0415", # import-outside-toplevel (fixture-scoped imports are intentional)
+]
+"tests/urls.py" = [
+    "E402",    # module-level import not at top of file (URL routing imports)
+    "D401",    # imperative mood — test fixture ViewSet docstrings
+]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["mypy_django_plugin.main"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "rest_framework.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# pytest fixtures use untyped decorators; relax strict decorator checking for tests.
+disallow_untyped_decorators = false
+
+[tool.django-stubs]
+django_settings_module = "friese_mcp.test_settings"
+
+# ---------------------------------------------------------------------------
+# pylint
+# ---------------------------------------------------------------------------
+[tool.pylint.main]
+load-plugins = ["pylint_django"]
+django-settings-module = "friese_mcp.test_settings"
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.design]
+max-returns = 15
+max-branches = 15
+
+[tool.pylint.messages_control]
+disable = [
+    "missing-module-docstring",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-positional-arguments",
+]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "friese_mcp.test_settings"
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+testpaths = ["tests"]
