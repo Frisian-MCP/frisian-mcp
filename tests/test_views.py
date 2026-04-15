@@ -307,6 +307,36 @@ class TestToolsCall:
 
         assert data["result"]["isError"] is True
 
+    def test_tools_call_schema_validation_failure_returns_invalid_params(
+        self, rf: RequestFactory
+    ) -> None:
+        """tools/call with arguments failing JSON Schema returns INVALID_PARAMS error."""
+        isolated = ToolRegistry()
+        isolated.register(
+            "typed",
+            lambda a, r: None,
+            "Typed",
+            {
+                "type": "object",
+                "properties": {"count": {"type": "integer"}},
+                "required": ["count"],
+            },
+        )
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            # Pass a string where an integer is required — should fail schema validation.
+            data = _response_data(
+                _call(
+                    rf,
+                    "tools/call",
+                    {"name": "typed", "arguments": {"count": "not-an-int"}},
+                )
+            )
+
+        assert "error" in data
+        assert data["error"]["code"] == INVALID_PARAMS
+        assert data["error"]["message"] == "Invalid arguments"
+
     def test_tools_call_null_arguments_defaults_to_empty(self, rf: RequestFactory) -> None:
         """tools/call with null 'arguments' defaults to an empty dict."""
         isolated = ToolRegistry()

@@ -18,9 +18,14 @@ from typing import Any
 
 from django.contrib.auth.models import AnonymousUser
 from django.http import HttpRequest
+
+# RequestFactory is part of Django's stable public API and is safe to use in
+# production code.  DRF's APIRequestFactory is a test-only subclass that adds
+# a `format=` kwarg convenience; we don't use that feature, so the plain
+# Django factory is the correct dependency here.
+from django.test import RequestFactory as _RequestFactory
 from rest_framework.request import Request
 from rest_framework.settings import api_settings
-from rest_framework.test import APIRequestFactory
 
 from friese_mcp.backends.base import BaseInvocationBackend, ToolDefinition, ToolResult
 
@@ -87,7 +92,7 @@ class SyncInvocation(BaseInvocationBackend):
     by forwarding the already-authenticated user from the original MCP request.
     """
 
-    _factory: APIRequestFactory = APIRequestFactory()
+    _factory: _RequestFactory = _RequestFactory()
 
     def invoke(
         self,

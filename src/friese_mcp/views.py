@@ -33,7 +33,7 @@ from friese_mcp.protocol import (
     JsonDict,
     JsonRpcId,
 )
-from friese_mcp.registry import tool_registry
+from friese_mcp.registry import ToolInputError, tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,8 @@ def _handle_tools_call(
         result = tool_registry.dispatch(request, tool_name, arguments)
     except LookupError as exc:
         return _jsonrpc_error(request_id, INVALID_PARAMS, "Unknown tool", str(exc))
+    except ToolInputError as exc:
+        return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc))
     except PermissionError as exc:
         return _jsonrpc_error(request_id, INVALID_PARAMS, "Permission denied", str(exc))
     except Exception as exc:  # pylint: disable=broad-exception-caught

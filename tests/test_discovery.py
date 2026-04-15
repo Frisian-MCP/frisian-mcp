@@ -282,9 +282,19 @@ class TestActionDescription:
     """Tests for the _action_description() helper."""
 
     def test_list_action_description(self) -> None:
-        """List action produces a human-readable description."""
+        """List action produces a human-readable description with the resource name."""
         desc = _action_description(UserViewSet, "list")
-        assert "list" in desc.lower() or "List" in desc
+        # Must contain the class-derived resource name — not "None".
+        # ViewSetMixin defines basename=None as a class attribute; the fallback
+        # must use the class name instead.
+        assert "None" not in desc
+        assert "User" in desc
+
+    def test_retrieve_action_description(self) -> None:
+        """Retrieve action description contains the resource name and is not 'None'."""
+        desc = _action_description(UserViewSet, "retrieve")
+        assert "None" not in desc
+        assert "User" in desc
 
     def test_unknown_action_falls_back_to_generic(self) -> None:
         """An action name not in the label map produces a generic description."""

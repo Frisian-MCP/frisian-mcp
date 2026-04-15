@@ -53,6 +53,7 @@ class FrieseMcpConfig(AppConfig):
     name = "friese_mcp"
     verbose_name = "Friese MCP Gateway"
     default_auto_field = "django.db.models.BigAutoField"
+    _mcp_ready: bool = False
 
     def ready(self) -> None:
         """
@@ -74,7 +75,20 @@ class FrieseMcpConfig(AppConfig):
         under the name ``{resource}.{action}`` (e.g. ``"users.list"``), with the
         ViewSet's ``permission_classes`` inherited verbatim.  ViewSets and
         individual actions decorated with ``@mcp_ignore`` are skipped.
+
+        This method is **idempotent**: a second call (e.g. from a test runner
+        that reloads apps, or from ``@override_settings``) is a no-op.
+
         """
+        # Idempotency guard: test runners, @override_settings, and reload scenarios
+        # can call ready() more than once.  A second call would re-register all
+        # auto-discovered tools, silently overwriting existing registrations and
+        # producing duplicate log entries.  Guard against this with a simple flag.
+        if self._mcp_ready:
+            logger.debug("friese_mcp ready() called again — skipping duplicate auto-discovery")
+            return
+        self._mcp_ready = True
+
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             logger.debug("friese_mcp disabled — skipping auto-discovery")
             return

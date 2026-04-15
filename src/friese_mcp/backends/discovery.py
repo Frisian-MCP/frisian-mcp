@@ -60,6 +60,9 @@ _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_upda
 # Actions that do not require request body data (read-only actions).
 _READ_ONLY_ACTIONS: frozenset[str] = frozenset({"list", "retrieve"})
 
+# Standard actions that carry a request body and benefit from serializer introspection.
+_BODY_ACTIONS: frozenset[str] = frozenset({"create", "update", "partial_update"})
+
 
 class DRFSyncDiscovery(BaseDiscoveryBackend):
     """
@@ -115,17 +118,28 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             if action != "partial_update":
                 schema["required"] = ["id"]
 
-        # Write actions: try to derive additional properties from serializer.
-        if action not in _READ_ONLY_ACTIONS:
+        # Body-carrying actions: try to derive additional properties from serializer.
+        # Only introspect the serializer for actions that send a request body —
+        # standard write actions (create, update, partial_update) and custom
+        # @action methods whose HTTP mapping includes a body-carrying method.
+        # Excludes: destroy (DELETE, no body), list/retrieve (GET), custom GET actions.
+        action_func = getattr(view_class, action, None)
+        action_mapping: dict[str, str] = getattr(action_func, "mapping", {})
+        has_body = action in _BODY_ACTIONS or (
+            action_mapping and any(m in ("post", "put", "patch") for m in action_mapping)
+        )
+        if has_body:
             serializer_schema = self._schema_from_viewset(view_class, action)
             existing = schema.setdefault("properties", {})
             existing.update(serializer_schema.get("properties", {}))
             # Merge required lists, preserving id if present.
-            extra_required: list[str] = serializer_schema.get("required", [])
-            if extra_required:
-                current_required: list[str] = schema.get("required", [])
-                merged = list({*current_required, *extra_required})
-                schema["required"] = merged
+            # partial_update (PATCH) makes all body fields optional — skip required merge.
+            if action != "partial_update":
+                extra_required: list[str] = serializer_schema.get("required", [])
+                if extra_required:
+                    current_required: list[str] = schema.get("required", [])
+                    merged = list({*current_required, *extra_required})
+                    schema["required"] = merged
 
         return schema
 
@@ -244,7 +258,9 @@ def _resource_from_path(path: str) -> str:
 
 def _action_description(view_class: type, action: str) -> str:
     """Build a human-readable tool description from the ViewSet and action."""
-    resource = getattr(view_class, "basename", view_class.__name__.replace("ViewSet", ""))
+    # ViewSetMixin defines `basename = None` as a class attribute, so getattr's
+    # default never fires — use `or` to fall back when the attribute is falsy.
+    resource = getattr(view_class, "basename", None) or view_class.__name__.replace("ViewSet", "")
     action_labels: dict[str, str] = {
         "list": f"List {resource} objects",
         "retrieve": f"Retrieve a {resource} object by ID",
