@@ -105,8 +105,14 @@ known-first-party = ["friese_mcp"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/friese_mcp/__init__.py" = ["D"]
+"src/**/migrations/**" = [
+    "D",       # docstrings not required in auto-generated migration files
+    "E501",    # long lines in auto-generated help_text strings are acceptable
+]
 "tests/**" = [
     "S101",    # assert statements are idiomatic in tests
+    "S105",    # hardcoded "password" strings in assert comparisons are test data, not secrets
+    "S106",    # hardcoded test passwords are intentional
     "ANN201",  # missing return type on public function (test functions)
     "D103",    # missing docstring in public function (parametrize helpers)
     "D401",    # first line of docstring should be in imperative mood (too prescriptive for helpers)
@@ -144,6 +150,7 @@ django_settings_module = "friese_mcp.test_settings"
 [tool.pylint.main]
 load-plugins = ["pylint_django"]
 django-settings-module = "friese_mcp.test_settings"
+ignore-paths = ["src/.*/migrations/"]
 
 [tool.pylint.format]
 max-line-length = 100
@@ -158,6 +165,7 @@ disable = [
     "too-few-public-methods",
     "too-many-arguments",
     "too-many-positional-arguments",
+    "duplicate-code",  # contrib.tokens and contrib.oauth share similar Bearer header parsing — intentional
 ]
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,9 @@ friese-mcp exposes your existing Django REST Framework ViewSets as [Model Contex
 - [Quickstart](#quickstart)
 - [Settings reference](#settings-reference)
 - [Authentication and permissions](#authentication-and-permissions)
+- [Built-in authentication](#built-in-authentication)
+  - [contrib.tokens — static Bearer tokens](#contribtokens--static-bearer-tokens)
+  - [contrib.oauth — OAuth 2.0 client credentials](#contriboauth--oauth-20-client-credentials)
 - [Auto-discovery](#auto-discovery)
 - [Decorators](#decorators)
 - [ToolRegistry API](#toolregistry-api)
@@ -260,6 +263,312 @@ FRIESE_MCP_PERMISSION_CLASSES = [
     "rest_framework.permissions.IsAuthenticated",
 ]
 ```
+
+### BYOA — Bring Your Own Auth
+
+The two contrib modules (`contrib.tokens`, `contrib.oauth`) are strictly optional conveniences. If your project already has auth infrastructure — Cognito JWTs, API keys, a custom token model, OAuth via `python-oauth2` — skip contrib entirely and plug your own class into `FRIESE_MCP_AUTHENTICATION_CLASSES`:
+
+```python
+FRIESE_MCP_AUTHENTICATION_CLASSES = [
+    "myapp.authentication.MCPTokenAuthentication",  # your own class
+]
+FRIESE_MCP_PERMISSION_CLASSES = [
+    "rest_framework.permissions.IsAuthenticated",
+]
+```
+
+Any DRF `BaseAuthentication` subclass works. The [Built-in authentication](#built-in-authentication) section below documents what contrib provides if you want it.
+
+---
+
+## Built-in authentication
+
+friese-mcp ships two opt-in auth modules under `friese_mcp.contrib`. Both are strict opt-ins — add them to `INSTALLED_APPS` only if you want to use them. Projects with existing auth (custom tokens, OAuth, API keys) skip contrib entirely and plug their own classes into `FRIESE_MCP_AUTHENTICATION_CLASSES`.
+
+### `contrib.tokens` — static Bearer tokens
+
+The simplest auth option. Create a token per client in Django admin, distribute it, and done. No expiry, no handshake — good for internal agents and scripted automation.
+
+#### Setup
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "friese_mcp",
+    "friese_mcp.contrib.tokens",
+]
+
+FRIESE_MCP_AUTHENTICATION_CLASSES = [
+    "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication",
+]
+FRIESE_MCP_PERMISSION_CLASSES = [
+    "rest_framework.permissions.IsAuthenticated",
+]
+```
+
+```bash
+python manage.py migrate
+```
+
+No URL configuration required — `contrib.tokens` only provides models and an authentication class.
+
+#### Creating tokens
+
+**Django admin:** Open `/admin/`, navigate to **Friese MCP Tokens**, and click **Add**. Set a `name` (e.g. `"claude-agent"`), leave `token` blank (auto-generated), and save. Copy the token value from the detail page.
+
+**Shell:**
+```python
+from friese_mcp.contrib.tokens.models import FrieseMcpToken
+
+# Token linked to a user
+token = FrieseMcpToken.objects.create(name="claude-agent", user=my_user)
+
+# Service token — no user
+token = FrieseMcpToken.objects.create(name="ci-pipeline")
+
+print(token.token)  # 64-hex-char secret — copy it now
+```
+
+#### Using tokens
+
+Include the token as a Bearer header:
+
+```
+POST /mcp/
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+```
+
+#### `FrieseMcpToken` model
+
+| Field | Type | Description |
+|---|---|---|
+| `token` | `CharField(64)` | Auto-generated 64-hex-char secret. Read-only after creation. |
+| `name` | `CharField(200)` | Human-readable label (e.g. `"claude-agent"`). |
+| `is_active` | `BooleanField` | Set to `False` to revoke. Inactive tokens are rejected. |
+| `user` | `ForeignKey(AUTH_USER_MODEL, null=True)` | Optional user. `None` for service tokens. |
+| `created_at` | `DateTimeField` | Auto-set on creation. |
+| `last_used_at` | `DateTimeField(null=True)` | Updated on each successful authentication (queryset update, no signals). |
+
+#### `FrieseMcpTokenAuthentication`
+
+Reads `Authorization: Bearer <token>`. Returns `(user, token)` on success, where `user` is the associated Django user or `AnonymousUser` for service tokens. Raises `AuthenticationFailed` on invalid or inactive tokens. Returns `None` (passes to next authenticator) when the `Authorization` header is absent or uses a different scheme.
+
+> **Service tokens and `IsAuthenticated`:** A service token with no linked user sets `request.user` to `AnonymousUser`. `AnonymousUser.is_authenticated` is `False`, so `IsAuthenticated` will deny the request. Either link service tokens to a user, or use a custom permission class that allows `AnonymousUser`.
+
+---
+
+### `contrib.oauth` — OAuth 2.0 client credentials
+
+Full OAuth 2.0 `client_credentials` grant for AI agent clients (Claude, GPT, etc.). Clients exchange `client_id` + `client_secret` for a short-lived Bearer token. Tokens expire and must be refreshed. Includes RFC 8414 authorization server metadata and MCP-spec protected resource metadata for automatic client discovery.
+
+#### Setup
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "friese_mcp",
+    "friese_mcp.contrib.oauth",
+]
+
+FRIESE_MCP_AUTHENTICATION_CLASSES = [
+    "friese_mcp.contrib.oauth.authentication.OAuthTokenAuthentication",
+]
+FRIESE_MCP_PERMISSION_CLASSES = [
+    "rest_framework.permissions.IsAuthenticated",
+]
+
+# Optional — defaults shown
+FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 3600   # 1 hour
+FRIESE_MCP_OAUTH_REGISTRATION_OPEN = False      # disable dynamic client registration
+```
+
+```python
+# urls.py
+from django.urls import include, path
+
+urlpatterns = [
+    path("oauth/", include("friese_mcp.contrib.oauth.urls")),
+    path(".well-known/", include("friese_mcp.contrib.oauth.wellknown_urls")),
+    path("mcp/", include("friese_mcp.urls")),
+]
+```
+
+```bash
+python manage.py migrate
+```
+
+#### Managing OAuth clients
+
+**Django admin:** Open `/admin/`, navigate to **OAuth Clients**, and click **Add**. Set a name and scope. `client_id` and `client_secret` are auto-generated on save. Copy both values from the detail page.
+
+**Shell:**
+```python
+from friese_mcp.contrib.oauth.models import OAuthClient
+
+client = OAuthClient.objects.create(name="claude-agent")
+print(client.client_id)     # 32-hex-char client identifier
+print(client.client_secret) # 64-hex-char secret
+```
+
+#### OAuth flow
+
+**Step 1 — Exchange credentials for a token:**
+
+```
+POST /oauth/token/
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id=<id>&client_secret=<secret>
+```
+
+JSON body is also accepted:
+
+```json
+{
+  "grant_type": "client_credentials",
+  "client_id": "<id>",
+  "client_secret": "<secret>"
+}
+```
+
+Response:
+
+```json
+{
+  "access_token": "<64-hex-char token>",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "mcp"
+}
+```
+
+**Step 2 — Use the token:**
+
+```
+POST /mcp/
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+```
+
+**Step 3 — Refresh when expired:** Repeat step 1 to get a new token. There is no refresh token in the `client_credentials` grant — re-authenticate with the client credentials.
+
+#### HTTP endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/oauth/token/` | Issue an access token (RFC 6749 §4.4). Form-encoded or JSON. |
+| `POST` | `/oauth/register/` | Dynamic client registration (RFC 7591). Disabled unless `FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True`. |
+| `GET` | `/.well-known/oauth-authorization-server` | Authorization server metadata (RFC 8414). |
+| `GET` | `/.well-known/oauth-protected-resource` | Protected resource metadata (MCP spec). |
+
+#### Token endpoint errors
+
+| `error` | HTTP | Cause |
+|---|---|---|
+| `unsupported_grant_type` | 400 | `grant_type` is not `client_credentials` |
+| `invalid_request` | 400 | `client_id` or `client_secret` missing |
+| `invalid_client` | 401 | Credentials not found, or client is inactive |
+
+#### Dynamic client registration
+
+When `FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True`, clients can self-register:
+
+```
+POST /oauth/register/
+Content-Type: application/json
+
+{"client_name": "my-agent", "scope": "mcp"}
+```
+
+Response (`201`):
+```json
+{
+  "client_id": "<32-hex>",
+  "client_secret": "<64-hex>",
+  "client_name": "my-agent",
+  "scope": "mcp"
+}
+```
+
+> **Security note:** Dynamic registration is disabled by default. Enable it only in controlled environments where you want to allow clients to self-register. Any caller with network access can create a client.
+
+#### Well-known discovery
+
+MCP clients that support OAuth discovery can auto-configure by fetching:
+
+- `GET /.well-known/oauth-protected-resource` — returns the MCP resource URL and authorization server base URL.
+- `GET /.well-known/oauth-authorization-server` — returns the token endpoint, supported grant types, and (if enabled) the registration endpoint.
+
+Use `FRIESE_MCP_OAUTH_ISSUER` to set an explicit base URL when the server is behind a reverse proxy:
+
+```python
+FRIESE_MCP_OAUTH_ISSUER = "https://api.example.com"
+```
+
+#### `OAuthTokenAuthentication`
+
+Reads `Authorization: Bearer <token>`. Looks up the token in `OAuthAccessToken`, checks expiry and client active status. Returns `(OAuthServicePrincipal(), access_token)` on success. Raises `AuthenticationFailed` on invalid, expired, or inactive-client tokens. Returns `None` when the header is absent.
+
+`OAuthServicePrincipal` is a minimal principal object with `is_authenticated = True` and no linked Django user. This means `rest_framework.permissions.IsAuthenticated` works correctly — the MCP client is authenticated as a service, not as a user account.
+
+#### `OAuthClient` model
+
+| Field | Type | Description |
+|---|---|---|
+| `client_id` | `CharField(32)` | Auto-generated 32-hex-char identifier. |
+| `client_secret` | `CharField(64)` | Auto-generated 64-hex-char secret. |
+| `name` | `CharField(200)` | Human-readable label. |
+| `is_active` | `BooleanField` | Set to `False` to revoke all token issuance. Existing tokens are also rejected. |
+| `scope` | `CharField(200)` | Space-separated scopes (default `"mcp"`). |
+| `created_at` | `DateTimeField` | Auto-set on creation. |
+
+#### `OAuthAccessToken` model
+
+| Field | Type | Description |
+|---|---|---|
+| `token` | `CharField(64)` | Auto-generated 64-hex-char Bearer token. |
+| `client` | `ForeignKey(OAuthClient)` | Issuing client. Cascade-deletes with client. |
+| `expires_at` | `DateTimeField` | Defaults to `now() + FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS`. |
+| `scope` | `CharField(200)` | Scopes granted (copied from client at issuance). |
+| `created_at` | `DateTimeField` | Auto-set on creation. |
+
+`is_expired()` method returns `True` if `now() >= expires_at`.
+
+> **Token cleanup:** Expired tokens are not automatically deleted. Add a management command or scheduled task (e.g. Celery beat) to periodically run `OAuthAccessToken.objects.filter(expires_at__lt=now()).delete()`.
+
+#### contrib.oauth settings
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS` | `int` | `3600` | Access token lifetime in seconds. |
+| `FRIESE_MCP_OAUTH_REGISTRATION_OPEN` | `bool` | `False` | Enable RFC 7591 dynamic client registration. |
+| `FRIESE_MCP_OAUTH_ISSUER` | `str` | auto-detected | Base URL used in well-known metadata. Set explicitly behind a reverse proxy. |
+| `FRIESE_MCP_OAUTH_TOKEN_PATH` | `str` | `"/oauth/token/"` | Token endpoint path in well-known metadata. |
+| `FRIESE_MCP_OAUTH_REGISTER_PATH` | `str` | `"/oauth/register/"` | Registration endpoint path in well-known metadata. |
+| `FRIESE_MCP_PATH` | `str` | `"/mcp/"` | MCP gateway path used in protected-resource metadata. |
+
+#### Using both contrib modules together
+
+List `OAuthTokenAuthentication` first so OAuth tokens are tried before static tokens:
+
+```python
+FRIESE_MCP_AUTHENTICATION_CLASSES = [
+    "friese_mcp.contrib.oauth.authentication.OAuthTokenAuthentication",
+    "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication",
+]
+FRIESE_MCP_PERMISSION_CLASSES = [
+    "rest_framework.permissions.IsAuthenticated",
+]
+```
+
+DRF tries each authenticator in order and uses the first that succeeds.
 
 ---
 
@@ -690,46 +999,86 @@ The gateway is HTTP POST + JSON response only. Server-Sent Events (SSE) and stre
 
 Rate limiting is the host application's concern and is not provided by friese-mcp. Apply rate limiting at the API gateway, reverse proxy, or Django middleware layer.
 
-### OAuth 2.0 auth layer
-
-An OAuth 2.0 / token issuance layer is deferred to v2. v1 inherits whatever authentication the host app attaches to the incoming HTTP request.
-
 ---
 
 ## Troubleshooting
 
-### `ModuleNotFoundError: No module named 'friese_mcp'` after `pip install -e .` on macOS with Python 3.13
+### `ModuleNotFoundError: No module named 'friese_mcp'` after `pip install -e .` on macOS
+
+> **Scope:** This only affects editable installs (`pip install -e`). A regular `pip install friese-mcp` from PyPI copies files directly into site-packages — no `.pth` file is involved and this bug does not apply.
 
 **Symptom:** `pip install -e ../friese-mcp` completes without error, but `import friese_mcp` raises `ModuleNotFoundError` at runtime.
 
-**Root cause:** Python 3.13.0 on macOS has a bug where `site.addpackage()` silently skips `.pth` files that carry the `UF_HIDDEN` filesystem flag. Files created in certain site-packages directories on macOS can receive this flag automatically. Hatchling's editable install writes `__editable__.friese-mcp-0.1.0.pth` to site-packages; if that file is hidden, Python never processes it.
+**Root cause:** Python 3.13 on macOS has a bug where `site.addpackage()` silently skips `.pth` files that carry the `UF_HIDDEN` filesystem flag. Hatchling's editable install writes `__editable__.friese-mcp-0.1.0.pth` to site-packages; if that file gets the hidden flag, Python never processes it and the package is invisible to the interpreter.
 
-**Fix 1 — Upgrade to Python 3.13.1+** (recommended)
+This bug affects Homebrew-managed Python 3.13 even after upgrading to 3.13.1 — the upstream fix does not apply to Homebrew builds. `chflags nohidden` also does not reliably stick across reinstalls.
 
-Python 3.13.1 (released December 2024) removes the `UF_HIDDEN` check. Upgrade your Python interpreter:
+**Recommended fix — `sys.path.insert`**
 
-```bash
-brew upgrade python@3.13
-# or: pyenv install 3.13.1
-```
-
-**Fix 2 — Clear the hidden flag manually**
-
-```bash
-# Find the .pth file — adjust site-packages path for your environment
-chflags nohidden $(python3 -c "import site; print(site.getsitepackages()[0])")/__editable__.friese-mcp-*.pth
-```
-
-**Fix 3 — `sys.path.insert` workaround**
-
-Add this before `DJANGO_SETTINGS_MODULE` is set in your `manage.py`, `wsgi.py`, or `asgi.py`:
+Add the `src/` directory to `sys.path` before Django loads. This bypasses the `.pth` mechanism entirely and works on all Python 3.13.x builds including Homebrew:
 
 ```python
+# manage.py (and wsgi.py / asgi.py)
 import sys
 sys.path.insert(0, "/path/to/friese-mcp/src")
+
+# ... rest of manage.py
 ```
 
-This bypasses the `.pth` mechanism entirely and works on all Python 3.13.x versions.
+**Verify the fix:**
+
+```bash
+python -c "import friese_mcp; print(friese_mcp.__file__)"
+# Expected: /path/to/friese-mcp/src/friese_mcp/__init__.py
+```
+
+If you still see `ModuleNotFoundError`, the path in `sys.path.insert` is wrong — check that it points to the `src/` directory that contains the `friese_mcp/` package folder, not the repo root.
+
+**Alternative — pyenv Python 3.11 or 3.12**
+
+Switch to a non-Homebrew Python where editable installs work reliably:
+
+```bash
+pyenv install 3.12.9
+pyenv local 3.12.9
+pip install -e ../friese-mcp
+```
+
+### Migrating from a custom MCP implementation — auth model lifecycle
+
+If you are adopting friese-mcp to replace a custom MCP implementation in an existing host app, you may run into a Django model lifecycle problem: your existing MCP auth models (tokens, OAuth clients) live inside the old app. When you want to fully remove the old app from `INSTALLED_APPS`, Django will complain about orphaned migrations — you can't drop the app while its tables still hold data your new setup depends on.
+
+**Symptom:** You want to decommission `myapp.mcp` but `myapp.mcp.models` still contains `MCPToken` or `OAuthClient`. Removing `"myapp.mcp"` from `INSTALLED_APPS` breaks migrations; keeping it means the old app never fully goes away.
+
+**Recommended approach — extract auth models before migrating:**
+
+Before adopting friese-mcp, move your MCP auth models to a small, standalone app that has no dependency on the old MCP tool logic:
+
+```python
+# mcp_auth/models.py
+# Moved from myapp.mcp — minimal app, no tool logic, just the auth tables
+
+from django.db import models
+
+class MCPToken(models.Model):
+    # ... same fields as before
+```
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "mcp_auth",       # new standalone app — owns the auth tables
+    "friese_mcp",     # new MCP gateway
+    # "myapp.mcp",    # removed — no longer needed
+]
+```
+
+Write a Django data migration to copy rows from the old table to the new one, then remove the old app.
+
+**If you use `contrib.tokens` or `contrib.oauth`:** These modules ship their own models (`FrieseMcpToken`, `OAuthClient`, `OAuthAccessToken`) with their own migrations. If you need to preserve existing tokens during migration, write a data migration that copies from your old auth table to the relevant `friese_mcp.contrib.*` table.
+
+**Key principle:** Decouple the model lifecycle from the tool logic before switching. A standalone `mcp_auth` app with no tool dependencies can stay in `INSTALLED_APPS` indefinitely (it's tiny) while you iterate on the MCP gateway, and can be removed in a future cycle once auth is fully migrated.
 
 ### Auto-discovery registers 0 tools
 

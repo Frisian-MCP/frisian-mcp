@@ -7,6 +7,8 @@ INSTALLED_APPS = [
     "django.contrib.auth",
     "rest_framework",
     "friese_mcp",
+    "friese_mcp.contrib.tokens",
+    "friese_mcp.contrib.oauth",
 ]
 
 DATABASES = {
