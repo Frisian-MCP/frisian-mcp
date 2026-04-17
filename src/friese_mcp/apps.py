@@ -118,4 +118,10 @@ class FrieseMcpConfig(AppConfig):
                 permission_classes=list(tool_def.permission_classes),
             )
 
-        logger.info("friese_mcp: auto-discovery registered %d tools", len(tool_defs))
+        if tool_defs:
+            logger.info("friese_mcp: auto-discovery registered %d tools", len(tool_defs))
+        else:
+            logger.warning(
+                "friese_mcp: auto-discovery found 0 tools. "
+                "If your project uses @api_view FBVs, use @mcp_tool for manual registration."
+            )

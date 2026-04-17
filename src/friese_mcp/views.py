@@ -14,6 +14,18 @@ Supported methods
 * ``resources/list``   — stub (returns empty list in v1)
 * ``resources/read``   — stub (returns METHOD_NOT_FOUND in v1)
 * ``ping``             — liveness check
+
+Authentication & permissions
+-----------------------------
+``McpEndpointView`` extends DRF's :class:`~rest_framework.views.APIView`, which
+means host projects can gate the MCP surface using standard DRF mechanisms:
+
+* ``FRIESE_MCP_AUTHENTICATION_CLASSES`` — list of dotted-path strings *or*
+  class objects; falls back to DRF's ``DEFAULT_AUTHENTICATION_CLASSES``.
+* ``FRIESE_MCP_PERMISSION_CLASSES``    — list of dotted-path strings *or*
+  class objects; defaults to ``[]`` (no gateway-level permission check) for
+  backwards compatibility.  Tool-level ``permission_classes`` are enforced
+  separately by :data:`~friese_mcp.registry.tool_registry`.
 """
 
 import json
@@ -22,7 +34,9 @@ from typing import Any
 
 from django.conf import settings
 from django.http import HttpRequest, JsonResponse
-from django.views.decorators.csrf import csrf_exempt
+from django.utils.module_loading import import_string
+from rest_framework.request import Request as DRFRequest
+from rest_framework.views import APIView
 
 from friese_mcp.protocol import (
     INTERNAL_ERROR,
@@ -58,6 +72,30 @@ def _jsonrpc_error(
     if data is not None:
         error["data"] = data
     return JsonResponse({"jsonrpc": "2.0", "id": request_id, "error": error})
+
+
+# ---------------------------------------------------------------------------
+# Settings helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_classes(setting_name: str) -> list[Any] | None:
+    """
+    Resolve a settings list of class paths or class objects.
+
+    Returns ``None`` when the setting is absent (caller should fall back to
+    DRF defaults).  Returns an empty list when the setting is explicitly ``[]``.
+
+    Each element may be:
+
+    * A dotted-path string (e.g. ``"rest_framework.authentication.SessionAuthentication"``).
+    * A class object already imported by the host project.
+
+    """
+    raw = getattr(settings, setting_name, None)
+    if raw is None:
+        return None
+    return [import_string(cls) if isinstance(cls, str) else cls for cls in raw]
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +214,9 @@ def _handle_resources_read(request_id: JsonRpcId, params: JsonDict) -> JsonRespo
 
 def _parse_and_dispatch(request: HttpRequest) -> JsonResponse:
     """Parse the POST body and dispatch to the appropriate method handler."""
+    # DRF wraps the Django HttpRequest in a rest_framework.request.Request.
+    # _parse_and_dispatch only needs request.body and request.user — both are
+    # proxied transparently by the DRF wrapper, so no unwrapping is needed.
     try:
         body: Any = json.loads(request.body)
     except json.JSONDecodeError as exc:
@@ -215,14 +256,84 @@ def _parse_and_dispatch(request: HttpRequest) -> JsonResponse:
 
 
 # ---------------------------------------------------------------------------
-# Main endpoint
+# Main endpoint — DRF APIView
 # ---------------------------------------------------------------------------
 
 
-@csrf_exempt
-def mcp_endpoint(request: HttpRequest) -> JsonResponse:
-    """MCP gateway — single HTTP POST endpoint for all JSON-RPC 2.0 traffic."""
-    if request.method != "POST":
+class McpEndpointView(APIView):
+    """
+    MCP gateway — single HTTP POST endpoint for all JSON-RPC 2.0 traffic.
+
+    Extends DRF :class:`~rest_framework.views.APIView` so that host projects
+    can apply standard DRF authentication and permission classes to the MCP
+    surface without requiring custom middleware.
+
+    Configuration (all optional)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    ``FRIESE_MCP_AUTHENTICATION_CLASSES``
+        List of dotted-path strings or class objects.  When absent, DRF's
+        ``DEFAULT_AUTHENTICATION_CLASSES`` are used.
+
+    ``FRIESE_MCP_PERMISSION_CLASSES``
+        List of dotted-path strings or class objects.  Defaults to ``[]``
+        (no gateway-level permission check) to preserve backwards
+        compatibility.  Individual tools still enforce their own
+        ``permission_classes`` via :data:`~friese_mcp.registry.tool_registry`.
+
+    Example (JWT-gated MCP surface)::
+
+        # settings.py
+        FRIESE_MCP_AUTHENTICATION_CLASSES = [
+            "rest_framework_simplejwt.authentication.JWTAuthentication",
+        ]
+        FRIESE_MCP_PERMISSION_CLASSES = [
+            "rest_framework.permissions.IsAuthenticated",
+        ]
+
+    """
+
+    def get_authenticators(self) -> list[Any]:
+        """
+        Return authenticator instances for this view.
+
+        Reads ``FRIESE_MCP_AUTHENTICATION_CLASSES`` from settings.  When the
+        setting is absent, delegates to the DRF default.
+        """
+        classes = _resolve_classes("FRIESE_MCP_AUTHENTICATION_CLASSES")
+        if classes is None:
+            return super().get_authenticators()
+        return [cls() for cls in classes]
+
+    def get_permissions(self) -> list[Any]:
+        """
+        Return permission instances for this view.
+
+        Reads ``FRIESE_MCP_PERMISSION_CLASSES`` from settings.  Defaults to
+        ``[]`` when the setting is absent (backward compatible — no gateway
+        permission check; tool-level permissions still apply).
+        """
+        classes = _resolve_classes("FRIESE_MCP_PERMISSION_CLASSES")
+        if classes is None:
+            return []
+        return [cls() for cls in classes]
+
+    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse:
+        """Handle POST — the only allowed HTTP method."""
+        if not getattr(settings, "FRIESE_MCP_ENABLED", True):
+            return JsonResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": INTERNAL_ERROR, "message": "MCP gateway is disabled"},
+                },
+                status=503,
+            )
+        return _parse_and_dispatch(request)
+
+    def http_method_not_allowed(  # type: ignore[override]
+        self, request: DRFRequest, *args: Any, **kwargs: Any
+    ) -> JsonResponse:
+        """Return a JSON-RPC 2.0 error for non-POST methods."""
         return JsonResponse(
             {
                 "jsonrpc": "2.0",
@@ -231,13 +342,3 @@ def mcp_endpoint(request: HttpRequest) -> JsonResponse:
             },
             status=405,
         )
-    if not getattr(settings, "FRIESE_MCP_ENABLED", True):
-        return JsonResponse(
-            {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": INTERNAL_ERROR, "message": "MCP gateway is disabled"},
-            },
-            status=503,
-        )
-    return _parse_and_dispatch(request)

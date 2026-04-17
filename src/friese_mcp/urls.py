@@ -16,10 +16,10 @@ all JSON-RPC 2.0 traffic over HTTP POST.
 
 from django.urls import URLPattern, path
 
-from friese_mcp.views import mcp_endpoint
+from friese_mcp.views import McpEndpointView
 
 app_name: str = "friese_mcp"
 
 urlpatterns: list[URLPattern] = [
-    path("", mcp_endpoint, name="gateway"),
+    path("", McpEndpointView.as_view(), name="gateway"),
 ]
