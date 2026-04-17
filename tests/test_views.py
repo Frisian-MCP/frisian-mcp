@@ -18,7 +18,9 @@ from friese_mcp.protocol import (
     METHOD_NOT_FOUND,
 )
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import mcp_endpoint
+from friese_mcp.views import McpEndpointView
+
+_view = McpEndpointView.as_view()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,7 +48,7 @@ def _call(rf: RequestFactory, method: str, params: dict[str, Any] | None = None)
     """Helper: POST a well-formed JSON-RPC request and call the view."""
     request = _post(rf, _jsonrpc(method, params))
     request.user = _anon_user()
-    return mcp_endpoint(request)
+    return _view(request)
 
 
 def _anon_user() -> AnonymousUser:
@@ -65,20 +67,20 @@ def _response_data(response: Any) -> dict[str, Any]:
 
 
 class TestHttpGuards:
-    """Tests for HTTP-method and feature-flag guards in mcp_endpoint."""
+    """Tests for HTTP-method and feature-flag guards in McpEndpointView."""
 
     def test_get_returns_405(self, rf: RequestFactory) -> None:
         """GET requests to the MCP endpoint return 405 Method Not Allowed."""
         request = rf.get("/mcp/")
         request.user = _anon_user()
-        response = mcp_endpoint(request)
+        response = _view(request)
         assert response.status_code == 405
 
     def test_get_body_is_json_rpc_error(self, rf: RequestFactory) -> None:
         """A 405 response has a JSON-RPC error body."""
         request = rf.get("/mcp/")
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["error"]["code"] == INVALID_REQUEST
 
     def test_disabled_returns_503(self, rf: RequestFactory, settings: Any) -> None:
@@ -86,7 +88,7 @@ class TestHttpGuards:
         settings.FRIESE_MCP_ENABLED = False
         request = _post(rf, _jsonrpc("ping"))
         request.user = _anon_user()
-        response = mcp_endpoint(request)
+        response = _view(request)
         assert response.status_code == 503
 
     def test_disabled_body_is_json_rpc_error(self, rf: RequestFactory, settings: Any) -> None:
@@ -94,7 +96,7 @@ class TestHttpGuards:
         settings.FRIESE_MCP_ENABLED = False
         request = _post(rf, _jsonrpc("ping"))
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["error"]["code"] == INTERNAL_ERROR
 
 
@@ -110,35 +112,35 @@ class TestJsonRpcParsing:
         """Malformed JSON produces a JSON-RPC parse error."""
         request = rf.post("/mcp/", data=b"not json", content_type="application/json")
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["error"]["code"] == -32700
 
     def test_non_object_json_returns_invalid_request(self, rf: RequestFactory) -> None:
         """A JSON array (not object) produces INVALID_REQUEST."""
         request = _post(rf, [1, 2, 3])
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["error"]["code"] == INVALID_REQUEST
 
     def test_wrong_jsonrpc_version_returns_invalid_request(self, rf: RequestFactory) -> None:
         """Jsonrpc != '2.0' produces INVALID_REQUEST."""
         request = _post(rf, {"jsonrpc": "1.0", "id": 1, "method": "ping"})
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["error"]["code"] == INVALID_REQUEST
 
     def test_non_string_method_returns_invalid_request(self, rf: RequestFactory) -> None:
         """A non-string method field produces INVALID_REQUEST."""
         request = _post(rf, {"jsonrpc": "2.0", "id": 1, "method": 42})
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["error"]["code"] == INVALID_REQUEST
 
     def test_non_object_params_returns_invalid_params(self, rf: RequestFactory) -> None:
         """A non-object params field produces INVALID_PARAMS."""
         request = _post(rf, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": [1, 2]})
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["error"]["code"] == INVALID_PARAMS
 
 
@@ -194,7 +196,7 @@ class TestMethodHandlers:
         """The response id field matches the request id."""
         request = _post(rf, _jsonrpc("ping", req_id=42))
         request.user = _anon_user()
-        data = _response_data(mcp_endpoint(request))
+        data = _response_data(_view(request))
         assert data["id"] == 42
 
 

@@ -14,12 +14,14 @@ friese-mcp exposes your existing Django REST Framework ViewSets as [Model Contex
 - [Installation](#installation)
 - [Quickstart](#quickstart)
 - [Settings reference](#settings-reference)
+- [Authentication and permissions](#authentication-and-permissions)
 - [Auto-discovery](#auto-discovery)
 - [Decorators](#decorators)
 - [ToolRegistry API](#toolregistry-api)
 - [MCP gateway endpoint](#mcp-gateway-endpoint)
 - [Pluggable backend architecture](#pluggable-backend-architecture)
 - [Known limitations and design decisions](#known-limitations-and-design-decisions)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -166,6 +168,37 @@ FRIESE_MCP_INVOCATION_BACKEND = "myapp.backends.AsyncInvocation"
 
 The referenced class must subclass `friese_mcp.backends.BaseInvocationBackend`.
 
+### `FRIESE_MCP_AUTHENTICATION_CLASSES`
+
+**Type:** `list[str | type]` | **Default:** DRF's `DEFAULT_AUTHENTICATION_CLASSES`
+
+Authentication classes applied to every request reaching the MCP gateway endpoint. Each entry may be a dotted-path string or a class object. When absent, DRF's `DEFAULT_AUTHENTICATION_CLASSES` is used unchanged.
+
+```python
+FRIESE_MCP_AUTHENTICATION_CLASSES = [
+    "rest_framework_simplejwt.authentication.JWTAuthentication",
+    "rest_framework.authentication.SessionAuthentication",
+]
+```
+
+Use this to attach a token type (e.g. MCPToken, API key) specifically to the MCP surface without affecting the rest of your API.
+
+### `FRIESE_MCP_PERMISSION_CLASSES`
+
+**Type:** `list[str | type]` | **Default:** `[]` (no gateway-level permission check)
+
+Permission classes applied to every request reaching the MCP gateway endpoint before any method handler or tool is invoked. Defaults to `[]` for backwards compatibility — host apps that already gate `/mcp/` at the infrastructure level are unaffected.
+
+Each entry may be a dotted-path string or a class object.
+
+```python
+FRIESE_MCP_PERMISSION_CLASSES = [
+    "rest_framework.permissions.IsAuthenticated",
+]
+```
+
+> **Note:** `FRIESE_MCP_PERMISSION_CLASSES` gates the entire MCP endpoint (all methods). Individual tools still enforce their own `permission_classes` via `ToolRegistry.dispatch()` regardless of this setting.
+
 ### `FRIESE_MCP_SERVER_NAME`
 
 **Type:** `str` | **Default:** `"friese-mcp"`
@@ -174,6 +207,58 @@ The `serverInfo.name` field returned in the `initialize` handshake response.
 
 ```python
 FRIESE_MCP_SERVER_NAME = "my-product-mcp"
+```
+
+---
+
+## Authentication and permissions
+
+`McpEndpointView` extends DRF's `APIView`. This means authentication and permission enforcement happen at the DRF layer, before any method handler or tool is invoked.
+
+### Gateway-level vs tool-level enforcement
+
+friese-mcp has two independent permission enforcement points:
+
+| Level | What it controls | How to configure |
+|---|---|---|
+| **Gateway** | Access to the entire `/mcp/` endpoint (all methods: ping, initialize, tools/list, tools/call, …) | `FRIESE_MCP_PERMISSION_CLASSES` |
+| **Tool** | Access to a specific tool within `tools/call` | `permission_classes` on the ViewSet or `@mcp_tool` |
+
+A request denied at gateway level receives a DRF 403 response before it reaches the JSON-RPC handler. A request denied at tool level receives a JSON-RPC `INVALID_PARAMS` error with `"Permission denied"`.
+
+### Example: JWT-gated MCP surface
+
+```python
+# settings.py
+FRIESE_MCP_AUTHENTICATION_CLASSES = [
+    "rest_framework_simplejwt.authentication.JWTAuthentication",
+]
+FRIESE_MCP_PERMISSION_CLASSES = [
+    "rest_framework.permissions.IsAuthenticated",
+]
+```
+
+All MCP traffic now requires a valid JWT. Tools still enforce their own per-tool `permission_classes` on top of this.
+
+### Example: separate auth for MCP and REST API
+
+```python
+# settings.py
+
+# Standard REST API uses session auth
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+    ]
+}
+
+# MCP surface uses a custom token — doesn't affect the REST API
+FRIESE_MCP_AUTHENTICATION_CLASSES = [
+    "myapp.authentication.MCPTokenAuthentication",
+]
+FRIESE_MCP_PERMISSION_CLASSES = [
+    "rest_framework.permissions.IsAuthenticated",
+]
 ```
 
 ---
@@ -553,7 +638,7 @@ Builds a synthetic DRF `Request` from the tool arguments, instantiates the ViewS
 
 - Works with any standard DRF ViewSet under a synchronous WSGI server (gunicorn, uWSGI).
 - The original request's `user` is forwarded to the synthetic inner request so host-app middleware state (JWT payload, tenant scope) remains accessible.
-- Uses `rest_framework.test.APIRequestFactory` to construct the inner request. This is a production use of a test utility — it is the only clean way to build a synthetic DRF request without a live server, and is intentional.
+- Uses `django.test.RequestFactory` to construct the inner request. This is a legitimate production use of Django's stable public API; DRF's `APIRequestFactory` is a test-only subclass that adds a `format=` kwarg convenience that is not needed here.
 - **Not suitable for async ViewSets.** Use a custom `BaseInvocationBackend` pointed at `FRIESE_MCP_INVOCATION_BACKEND` for async or Celery-delegated invocation.
 
 ### `RequestContext`
@@ -595,7 +680,7 @@ When a tool raises an unhandled exception, `tools/call` returns `{"isError": tru
 
 ### CSRF and session authentication
 
-The MCP endpoint is `@csrf_exempt`. If a host app uses session-cookie authentication, browser-based CSRF attacks against the MCP endpoint become possible. MCP clients should use token authentication (Bearer / API key), not session cookies.
+`McpEndpointView` extends DRF's `APIView`. DRF exempts `APIView` from Django's CSRF middleware by default. However, if `SessionAuthentication` is in `FRIESE_MCP_AUTHENTICATION_CLASSES`, DRF will enforce CSRF for session-authenticated requests (standard DRF behaviour). MCP clients should use token authentication (Bearer / API key) rather than session cookies to avoid this complexity.
 
 ### No SSE / streaming in v1
 
@@ -608,3 +693,54 @@ Rate limiting is the host application's concern and is not provided by friese-mc
 ### OAuth 2.0 auth layer
 
 An OAuth 2.0 / token issuance layer is deferred to v2. v1 inherits whatever authentication the host app attaches to the incoming HTTP request.
+
+---
+
+## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'friese_mcp'` after `pip install -e .` on macOS with Python 3.13
+
+**Symptom:** `pip install -e ../friese-mcp` completes without error, but `import friese_mcp` raises `ModuleNotFoundError` at runtime.
+
+**Root cause:** Python 3.13.0 on macOS has a bug where `site.addpackage()` silently skips `.pth` files that carry the `UF_HIDDEN` filesystem flag. Files created in certain site-packages directories on macOS can receive this flag automatically. Hatchling's editable install writes `__editable__.friese-mcp-0.1.0.pth` to site-packages; if that file is hidden, Python never processes it.
+
+**Fix 1 — Upgrade to Python 3.13.1+** (recommended)
+
+Python 3.13.1 (released December 2024) removes the `UF_HIDDEN` check. Upgrade your Python interpreter:
+
+```bash
+brew upgrade python@3.13
+# or: pyenv install 3.13.1
+```
+
+**Fix 2 — Clear the hidden flag manually**
+
+```bash
+# Find the .pth file — adjust site-packages path for your environment
+chflags nohidden $(python3 -c "import site; print(site.getsitepackages()[0])")/__editable__.friese-mcp-*.pth
+```
+
+**Fix 3 — `sys.path.insert` workaround**
+
+Add this before `DJANGO_SETTINGS_MODULE` is set in your `manage.py`, `wsgi.py`, or `asgi.py`:
+
+```python
+import sys
+sys.path.insert(0, "/path/to/friese-mcp/src")
+```
+
+This bypasses the `.pth` mechanism entirely and works on all Python 3.13.x versions.
+
+### Auto-discovery registers 0 tools
+
+If you see a log warning like:
+
+```
+WARNING friese_mcp: auto-discovery found 0 tools. If your project uses @api_view FBVs, use @mcp_tool for manual registration.
+```
+
+Common causes:
+- Your ViewSets are not yet registered in the URL patterns at startup time (e.g. missing `include()` in `ROOT_URLCONF`).
+- All ViewSets are decorated with `@mcp_ignore`.
+- `FRIESE_MCP_AUTODISCOVER = False` — auto-discovery is disabled. Register tools manually with `@mcp_tool`.
+- Your app uses function-based views (`@api_view`) rather than ViewSets — use `@mcp_tool` for those.
