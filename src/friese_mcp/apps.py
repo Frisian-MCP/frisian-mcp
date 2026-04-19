@@ -16,6 +16,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _apply_tool_filters(tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
+    """
+    Apply settings-based allowlist / denylist filters to discovered tool definitions.
+
+    * ``FRIESE_MCP_TOOL_ALLOWLIST`` — when present, only tool names in this list
+      are retained.  All others are silently dropped.
+    * ``FRIESE_MCP_TOOL_DENYLIST``  — tool names in this list are dropped.
+      Applied after the allowlist so that denylisting an allowed name still removes it.
+
+    Both settings accept exact tool names (e.g. ``"users.destroy"``).
+
+    Args:
+        tool_defs: The raw list of tool definitions returned by discovery.
+
+    Returns:
+        A filtered list; the original *tool_defs* list is not mutated.
+
+    """
+    raw_allowlist: list[str] | None = getattr(settings, "FRIESE_MCP_TOOL_ALLOWLIST", None)
+    raw_denylist: list[str] | None = getattr(settings, "FRIESE_MCP_TOOL_DENYLIST", None)
+
+    result: list[ToolDefinition] = list(tool_defs)
+    if raw_allowlist is not None:
+        allowed: frozenset[str] = frozenset(raw_allowlist)
+        result = [t for t in result if t.name in allowed]
+        logger.debug("friese_mcp: ALLOWLIST applied — %d tools retained", len(result))
+    if raw_denylist:
+        denied: frozenset[str] = frozenset(raw_denylist)
+        result = [t for t in result if t.name not in denied]
+        logger.debug("friese_mcp: DENYLIST applied — %d tools retained", len(result))
+    return result
+
+
 def _make_invocation_fn(
     tool_def: ToolDefinition,
     invocation: BaseInvocationBackend,
@@ -107,7 +140,7 @@ class FrieseMcpConfig(AppConfig):
 
         discovery = get_discovery_backend()
         invocation = get_invocation_backend()
-        tool_defs = discovery.discover_tools()
+        tool_defs = _apply_tool_filters(discovery.discover_tools())
 
         for tool_def in tool_defs:
             tool_registry.register(

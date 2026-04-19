@@ -7,7 +7,9 @@ from typing import Any
 from unittest.mock import patch
 
 from django.contrib.auth.models import AnonymousUser
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import RequestFactory
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import BasePermission
 
 from friese_mcp.protocol import (
@@ -47,6 +49,16 @@ def _jsonrpc(method: str, params: dict[str, Any] | None = None, req_id: Any = 1)
 def _call(rf: RequestFactory, method: str, params: dict[str, Any] | None = None) -> Any:
     """Helper: POST a well-formed JSON-RPC request and call the view."""
     request = _post(rf, _jsonrpc(method, params))
+    request.user = _anon_user()
+    return _view(request)
+
+
+def _notify(rf: RequestFactory, method: str, params: dict[str, Any] | None = None) -> Any:
+    """Helper: POST a JSON-RPC 2.0 notification (no 'id' field) and call the view."""
+    msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    if params is not None:
+        msg["params"] = params
+    request = _post(rf, msg)
     request.user = _anon_user()
     return _view(request)
 
@@ -173,9 +185,21 @@ class TestMethodHandlers:
         assert data["result"]["serverInfo"]["name"] == "my-gateway"
 
     def test_initialized_returns_empty_result(self, rf: RequestFactory) -> None:
-        """Initialized returns a success response with an empty result."""
+        """Initialized sent as a request (with id) returns a success response."""
         data = _response_data(_call(rf, "initialized"))
         assert data["result"] == {}
+
+    def test_initialized_notification_returns_202(self, rf: RequestFactory) -> None:
+        """Initialized sent as a notification (no id) returns HTTP 202 per Streamable HTTP spec."""
+        response = _notify(rf, "initialized")
+        assert response.status_code == 202
+        assert not response.content
+
+    def test_unknown_notification_returns_202(self, rf: RequestFactory) -> None:
+        """Any JSON-RPC notification (no id) returns HTTP 202 Accepted."""
+        response = _notify(rf, "notifications/cancelled", {"requestId": 1, "reason": "user"})
+        assert response.status_code == 202
+        assert not response.content
 
     def test_resources_list_returns_empty(self, rf: RequestFactory) -> None:
         """resources/list returns an empty resources list in v1."""
@@ -250,7 +274,7 @@ class TestToolsCall:
         assert content == {"ok": True}
 
     def test_tools_call_unknown_tool(self, rf: RequestFactory) -> None:
-        """tools/call with an unknown tool name returns INVALID_PARAMS."""
+        """tools/call with an unknown tool name returns METHOD_NOT_FOUND."""
         isolated = ToolRegistry()
 
         with patch("friese_mcp.views.tool_registry", isolated):
@@ -258,7 +282,7 @@ class TestToolsCall:
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
 
-        assert data["error"]["code"] == INVALID_PARAMS
+        assert data["error"]["code"] == METHOD_NOT_FOUND
 
     def test_tools_call_missing_name(self, rf: RequestFactory) -> None:
         """tools/call without a 'name' field returns INVALID_PARAMS."""
@@ -279,7 +303,7 @@ class TestToolsCall:
         assert data["error"]["code"] == INVALID_PARAMS
 
     def test_tools_call_permission_denied(self, rf: RequestFactory) -> None:
-        """tools/call returns INVALID_PARAMS when a permission class denies access."""
+        """Permission denial returns isError=True content block, not a JSON-RPC protocol error."""
 
         class _DenyAll(BasePermission):
             def has_permission(self, request: Any, view: Any) -> bool:
@@ -292,7 +316,11 @@ class TestToolsCall:
         with patch("friese_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "locked", "arguments": {}}))
 
-        assert data["error"]["code"] == INVALID_PARAMS
+        # Permission denial is a tool-level error, not a protocol-level error.
+        assert "error" not in data
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert "error" in content
 
     def test_tools_call_exception_returns_is_error_true(self, rf: RequestFactory) -> None:
         """tools/call wraps an unexpected tool exception in isError=True response."""
@@ -411,3 +439,270 @@ class TestValueErrorSurfacing:
         assert data["result"]["isError"] is True
         content = json.loads(data["result"]["content"][0]["text"])
         assert content["error"] == "Internal tool error"
+
+
+# ---------------------------------------------------------------------------
+# IT-8: DRF ValidationError surfacing with structured field-level detail
+# ---------------------------------------------------------------------------
+
+
+class TestDRFValidationErrorSurfacing:
+    """IT-8: DRFValidationError from tool handlers returns isError=True with structured detail."""
+
+    def test_drf_field_error_returns_is_error_true(self, rf: RequestFactory) -> None:
+        """DRFValidationError from a tool handler produces isError=True in the result."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises DRFValidationError with field detail."""
+            raise DRFValidationError({"name": ["This field is required."]})
+
+        isolated = ToolRegistry()
+        isolated.register("bad.drf", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.drf", "arguments": {}}))
+
+        assert data["result"]["isError"] is True
+
+    def test_drf_field_error_structured_detail(self, rf: RequestFactory) -> None:
+        """IT-8: Field-level DRFValidationError detail is returned as a structured dict."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises DRFValidationError with field detail."""
+            raise DRFValidationError({"email": ["Enter a valid email address."]})
+
+        isolated = ToolRegistry()
+        isolated.register("bad.email", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.email", "arguments": {}}))
+
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "Validation failed"
+        assert "email" in content["detail"]
+        assert "Enter a valid email address." in content["detail"]["email"]
+
+    def test_drf_non_field_error_returns_error_string(self, rf: RequestFactory) -> None:
+        """IT-8: Non-field DRFValidationError (list detail) returns a plain error string."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises DRFValidationError with non-field error."""
+            raise DRFValidationError(["Invalid input."])
+
+        isolated = ToolRegistry()
+        isolated.register("bad.nonfield", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(
+                _call(rf, "tools/call", {"name": "bad.nonfield", "arguments": {}})
+            )
+
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert "Invalid input." in content["error"]
+
+    def test_drf_validation_error_not_json_rpc_error(self, rf: RequestFactory) -> None:
+        """IT-8: DRFValidationError produces a result (not a JSON-RPC error code)."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises DRFValidationError."""
+            raise DRFValidationError({"title": ["Too short."]})
+
+        isolated = ToolRegistry()
+        isolated.register("bad.title", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.title", "arguments": {}}))
+
+        # Must be a result (isError=True), NOT a JSON-RPC error response.
+        assert "result" in data
+        assert "error" not in data
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: DRFValidationError from SyncInvocation-backed tools surfaces correctly
+# ---------------------------------------------------------------------------
+
+
+class TestSyncInvocationValidationSurfacing:
+    """Finding 1: Validation errors from auto-discovered tools reach the caller."""
+
+    def test_drf_validation_bubbles_through_invocation_fn(self, rf: RequestFactory) -> None:
+        """Finding 1: DRFValidationError raised inside a tool fn surfaces as isError=True."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Simulates a DRFValidationError from a ViewSet write action."""
+            raise DRFValidationError({"name": ["This field is required."]})
+
+        isolated = ToolRegistry()
+        isolated.register("auto.create", _bad, "Create", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "auto.create", "arguments": {}}))
+
+        # Must NOT be "Internal tool error" — must be the structured validation detail.
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "Validation failed"
+        assert "name" in content["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: Unknown tool returns METHOD_NOT_FOUND, not INVALID_PARAMS
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownToolCode:
+    """Finding 3: LookupError for an unknown tool name uses METHOD_NOT_FOUND (-32601)."""
+
+    def test_unknown_tool_returns_method_not_found(self, rf: RequestFactory) -> None:
+        """Finding 3: An unknown tool name returns -32601 METHOD_NOT_FOUND."""
+        isolated = ToolRegistry()
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(
+                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
+            )
+
+        assert data["error"]["code"] == METHOD_NOT_FOUND
+
+    def test_unknown_tool_not_invalid_params(self, rf: RequestFactory) -> None:
+        """Finding 3: An unknown tool name does NOT use INVALID_PARAMS (-32602)."""
+        isolated = ToolRegistry()
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(
+                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
+            )
+
+        assert data["error"]["code"] != INVALID_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# Agent-friendly help method
+# ---------------------------------------------------------------------------
+
+
+class TestHelpMethod:
+    """Tests for the ``help`` JSON-RPC method."""
+
+    def test_help_returns_success(self, rf: RequestFactory) -> None:
+        """Help method returns a success response."""
+        data = _response_data(_call(rf, "help"))
+        assert "result" in data
+        assert "error" not in data
+
+    def test_help_result_has_server_field(self, rf: RequestFactory) -> None:
+        """Help result includes a server name."""
+        data = _response_data(_call(rf, "help"))
+        assert "server" in data["result"]
+
+    def test_help_result_has_methods_list(self, rf: RequestFactory) -> None:
+        """Help result includes a list of supported methods."""
+        data = _response_data(_call(rf, "help"))
+        methods = data["result"]["methods"]
+        assert "tools/list" in methods
+        assert "tools/call" in methods
+        assert "help" in methods
+
+    def test_help_result_has_hints(self, rf: RequestFactory) -> None:
+        """Help result includes usage hints for agents."""
+        data = _response_data(_call(rf, "help"))
+        assert "hints" in data["result"]
+        hints = data["result"]["hints"]
+        assert "discovery" in hints
+        assert "errors" in hints
+
+    def test_help_server_name_from_settings(self, rf: RequestFactory, settings: Any) -> None:
+        """Help uses FRIESE_MCP_SERVER_NAME when configured."""
+        settings.FRIESE_MCP_SERVER_NAME = "my-server"
+        data = _response_data(_call(rf, "help"))
+        assert data["result"]["server"] == "my-server"
+
+
+# ---------------------------------------------------------------------------
+# Tool-not-found suggestions
+# ---------------------------------------------------------------------------
+
+
+class TestToolNotFoundSuggestions:
+    """Tool-not-found errors include close-match suggestions."""
+
+    def test_typo_in_tool_name_includes_suggestion(self, rf: RequestFactory) -> None:
+        """A near-typo in the tool name produces a suggestion in error data."""
+        isolated = ToolRegistry()
+        isolated.register("users.create", lambda a, r: None, "Create", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "users.creat", "arguments": {}}))
+
+        assert data["error"]["code"] == METHOD_NOT_FOUND
+        assert "users.create" in data["error"]["data"]
+
+    def test_no_suggestion_for_unrelated_name(self, rf: RequestFactory) -> None:
+        """A completely unrelated tool name produces no suggestion."""
+        isolated = ToolRegistry()
+        isolated.register("users.create", lambda a, r: None, "Create", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "zzz.qqq.xxx", "arguments": {}}))
+
+        assert data["error"]["code"] == METHOD_NOT_FOUND
+        # No suggestion appended when nothing is close enough.
+        assert "Did you mean" not in data["error"]["data"]
+
+
+# ---------------------------------------------------------------------------
+# DjangoValidationError as isError=True
+# ---------------------------------------------------------------------------
+
+
+class TestDjangoValidationErrorSurfacing:
+    """DjangoValidationError from tool handlers returns isError=True, not a JSON-RPC error."""
+
+    def test_django_validation_error_is_error_true(self, rf: RequestFactory) -> None:
+        """DjangoValidationError returns isError=True in the content block."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises DjangoValidationError."""
+            raise DjangoValidationError("Value must be positive.")
+
+        isolated = ToolRegistry()
+        isolated.register("bad.django", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.django", "arguments": {}}))
+
+        assert data["result"]["isError"] is True
+
+    def test_django_validation_error_message_surfaced(self, rf: RequestFactory) -> None:
+        """DjangoValidationError message reaches the caller via content block."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises DjangoValidationError."""
+            raise DjangoValidationError("Value must be positive.")
+
+        isolated = ToolRegistry()
+        isolated.register("bad.django2", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.django2", "arguments": {}}))
+
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert "Value must be positive" in content["error"]
+
+    def test_django_validation_error_not_json_rpc_error(self, rf: RequestFactory) -> None:
+        """DjangoValidationError does NOT return a JSON-RPC error code."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises DjangoValidationError."""
+            raise DjangoValidationError("Bad value.")
+
+        isolated = ToolRegistry()
+        isolated.register("bad.django3", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.django3", "arguments": {}}))
+
+        assert "result" in data
+        assert "error" not in data
