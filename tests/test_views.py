@@ -354,3 +354,60 @@ class TestToolsCall:
             _call(rf, "tools/call", {"name": "cap", "arguments": None})
 
         assert captured == [{}]
+
+
+# ---------------------------------------------------------------------------
+# IT-3: ValueError from @mcp_tool handlers is surfaced to the caller
+# ---------------------------------------------------------------------------
+
+
+class TestValueErrorSurfacing:
+    """IT-3: ValueError raised by tool handlers surfaces the message, not 'Internal tool error'."""
+
+    def test_value_error_returns_is_error_true(self, rf: RequestFactory) -> None:
+        """ValueError from a tool handler produces isError=True in the result."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises ValueError."""
+            raise ValueError("Invalid UUID for 'id': 'not-a-uuid'")
+
+        isolated = ToolRegistry()
+        isolated.register("bad.uuid", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.uuid", "arguments": {}}))
+
+        assert data["result"]["isError"] is True
+
+    def test_value_error_message_is_surfaced(self, rf: RequestFactory) -> None:
+        """ValueError message from the handler reaches the caller (not 'Internal tool error')."""
+
+        def _bad(arguments: dict[str, Any], request: Any) -> None:
+            """Raises ValueError."""
+            raise ValueError("Invalid UUID for 'id': 'not-a-uuid'")
+
+        isolated = ToolRegistry()
+        isolated.register("bad.uuid", _bad, "Bad", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "bad.uuid", "arguments": {}}))
+
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "Invalid UUID for 'id': 'not-a-uuid'"
+
+    def test_unexpected_exception_still_returns_generic_message(self, rf: RequestFactory) -> None:
+        """Unexpected exceptions (non-ValueError) still return the safe generic message."""
+
+        def _boom(arguments: dict[str, Any], request: Any) -> None:
+            """Raises unexpected internal error."""
+            raise RuntimeError("DB column 'secret_internal_field' missing")
+
+        isolated = ToolRegistry()
+        isolated.register("boom", _boom, "Boom", {})
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
+
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "Internal tool error"

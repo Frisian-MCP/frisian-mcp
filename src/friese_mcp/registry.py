@@ -2,14 +2,35 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable
 from typing import Any
 
 import jsonschema
 import jsonschema.exceptions
+from django.conf import settings
 from django.http import HttpRequest
 from rest_framework.permissions import BasePermission
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert a camelCase or PascalCase identifier to snake_case."""
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
+def _normalize_argument_keys(arguments: Any) -> Any:
+    """
+    Recursively convert all dict keys from camelCase to snake_case.
+
+    Controlled by the ``FRIESE_MCP_NORMALIZE_INPUT_CASE`` Django setting
+    (default ``True``).  Values are passed through unchanged so that string
+    field content (e.g. exercise names) is never mutated.
+    """
+    if not isinstance(arguments, dict):
+        return arguments
+    return {_camel_to_snake(k): _normalize_argument_keys(v) for k, v in arguments.items()}
 
 
 class ToolNotFoundError(LookupError):
@@ -142,6 +163,13 @@ class ToolRegistry:
 
         if entry is None:
             raise ToolNotFoundError(f"No tool registered with name {name!r}")
+
+        # IT-1: Normalize camelCase argument keys to snake_case so that MCP
+        # clients (e.g. Claude) can send either convention and always reach the
+        # underlying Django serializer fields.  Opt out by setting
+        # FRIESE_MCP_NORMALIZE_INPUT_CASE = False in Django settings.
+        if getattr(settings, "FRIESE_MCP_NORMALIZE_INPUT_CASE", True):
+            arguments = _normalize_argument_keys(arguments)
 
         try:
             jsonschema.validate(instance=arguments, schema=entry.input_schema)

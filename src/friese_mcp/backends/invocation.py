@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from django.contrib.auth.models import AnonymousUser
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpRequest
 
 # RequestFactory is part of Django's stable public API and is safe to use in
@@ -24,12 +25,38 @@ from django.http import HttpRequest
 # a `format=` kwarg convenience; we don't use that feature, so the plain
 # Django factory is the correct dependency here.
 from django.test import RequestFactory as _RequestFactory
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.request import Request
 from rest_framework.settings import api_settings
 
 from friese_mcp.backends.base import BaseInvocationBackend, ToolDefinition, ToolResult
 
 logger = logging.getLogger(__name__)
+
+
+def _format_drf_validation_error(exc: DRFValidationError) -> str:
+    """
+    Flatten a DRF ``ValidationError.detail`` tree into a readable string.
+
+    DRF ``detail`` can be a list of ``ErrorDetail``, a dict of field → errors,
+    or a nested combination.  This function produces a concise human-readable
+    summary suitable for returning to an MCP caller.
+    """
+    detail = exc.detail
+
+    def _flatten(obj: Any) -> list[str]:
+        if isinstance(obj, list):
+            return [str(item) for item in obj]
+        if isinstance(obj, dict):
+            parts = []
+            for field, errors in obj.items():
+                errs = _flatten(errors)
+                parts.append(f"{field}: {', '.join(errs)}")
+            return parts
+        return [str(obj)]
+
+    return "; ".join(_flatten(detail))
+
 
 # ViewSet actions that need a primary-key URL kwarg.
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
@@ -147,6 +174,15 @@ class SyncInvocation(BaseInvocationBackend):
 
         try:
             response = getattr(viewset, tool.action)(drf_request, **view_kwargs)
+        except DRFValidationError as exc:
+            # IT-3: Surface DRF validation errors — they describe invalid user
+            # input and are safe to return to the caller.
+            msg = _format_drf_validation_error(exc)
+            return ToolResult(content={"error": msg}, is_error=True)
+        except DjangoValidationError as exc:
+            # IT-3: Surface Django model/form validation errors.
+            msg = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
+            return ToolResult(content={"error": msg}, is_error=True)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.exception(
                 "SyncInvocation error",
