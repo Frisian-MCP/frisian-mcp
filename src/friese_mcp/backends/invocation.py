@@ -174,15 +174,14 @@ class SyncInvocation(BaseInvocationBackend):
 
         try:
             response = getattr(viewset, tool.action)(drf_request, **view_kwargs)
-        except DRFValidationError as exc:
-            # IT-3: Surface DRF validation errors — they describe invalid user
-            # input and are safe to return to the caller.
-            msg = _format_drf_validation_error(exc)
-            return ToolResult(content={"error": msg}, is_error=True)
-        except DjangoValidationError as exc:
-            # IT-3: Surface Django model/form validation errors.
-            msg = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
-            return ToolResult(content={"error": msg}, is_error=True)
+        except (DRFValidationError, DjangoValidationError):
+            # Let validation errors bubble to the protocol layer (views.py) where
+            # they are caught, formatted, and returned as structured isError=True
+            # content.  Catching them here and converting to ToolResult.is_error
+            # would route them through apps.py's RuntimeError wrapper, causing
+            # the actionable field messages to be silently replaced with
+            # "Internal tool error".
+            raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.exception(
                 "SyncInvocation error",

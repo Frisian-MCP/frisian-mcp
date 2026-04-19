@@ -5,10 +5,12 @@ SECRET_KEY = "friese-mcp-test-secret-key-not-for-production"  # noqa: S105
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
+    "django.contrib.admin",
     "rest_framework",
     "friese_mcp",
     "friese_mcp.contrib.tokens",
     "friese_mcp.contrib.oauth",
+    "friese_mcp.contrib.agents",
 ]
 
 DATABASES = {

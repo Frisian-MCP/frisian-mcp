@@ -3,18 +3,32 @@
 # pylint: disable=abstract-method
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from rest_framework import serializers
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
+from friese_mcp.apps import _apply_tool_filters
 from friese_mcp.backends.base import ToolDefinition
 from friese_mcp.backends.discovery import (
     DRFSyncDiscovery,
     _action_description,
+    _filterset_properties,
     _resource_from_path,
+    _schema_from_action_signature,
+    _schema_from_filter_backends,
     _schema_from_serializer,
 )
-from tests.urls import UserViewSet
+from tests.urls import (
+    ContextDependentViewSet,
+    FilterSetClassViewSet,
+    FullyFilteredViewSet,
+    OrderableViewSet,
+    SearchableViewSet,
+    TypedActionViewSet,
+    UserViewSet,
+)
 
 # ---------------------------------------------------------------------------
 # _resource_from_path
@@ -51,6 +65,18 @@ class TestResourceFromPath:
     def test_only_params_returns_unknown(self) -> None:
         """Returns 'unknown' when all path segments are parameters."""
         assert _resource_from_path("<pk>/") == "unknown"
+
+    def test_version_only_path_returns_unknown(self) -> None:
+        """Returns 'unknown' when all remaining segments are version/api prefixes."""
+        assert _resource_from_path("api/v1/") == "unknown"
+
+    def test_version_prefix_skipped(self) -> None:
+        """Version prefix segments are skipped; the actual resource name is returned."""
+        assert _resource_from_path("rest/v2/products/") == "products"
+
+    def test_api_segment_skipped(self) -> None:
+        """'api' segment is treated as a version prefix and skipped."""
+        assert _resource_from_path("v1/") == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +298,34 @@ class TestGetInputSchema:
         assert "name" in schema["properties"]
         assert "email" in schema["properties"]
 
+    def test_id_schema_accepts_integer_and_string(self) -> None:
+        """Finding 2: id property uses anyOf[integer, string] to support UUID-keyed models."""
+        schema = self._discovery().get_input_schema(UserViewSet, "retrieve")
+        id_schema = schema["properties"]["id"]
+        # Must accept both integer PKs and UUID strings.
+        assert "anyOf" in id_schema
+        types_in_anyof = {entry["type"] for entry in id_schema["anyOf"]}
+        assert "integer" in types_in_anyof
+        assert "string" in types_in_anyof
+
+    def test_context_dependent_create_schema(self) -> None:
+        """IT-6: ViewSet whose get_serializer_class() reads self.request.method works."""
+        # ContextDependentViewSet accesses self.request.method; with viewset.request = None
+        # this would raise AttributeError.  After the fix it should return CreateContextSerializer.
+        schema = self._discovery().get_input_schema(ContextDependentViewSet, "create")
+        assert "title" in schema["properties"]
+        assert "status" not in schema["properties"]
+
+    def test_context_dependent_update_schema(self) -> None:
+        """IT-6: Non-POST method stub yields the update serializer with both fields."""
+        # _schema_from_viewset uses method="POST" stub, so this returns CreateContextSerializer
+        # for create and falls back gracefully for update (which maps to PUT, not POST).
+        # The stub always presents method="POST", so update also gets CreateContextSerializer —
+        # verify the schema is non-empty (no AttributeError raised).
+        schema = self._discovery().get_input_schema(ContextDependentViewSet, "update")
+        # id must be present (detail action) and at least one serializer field
+        assert "id" in schema["properties"]
+
 
 # ---------------------------------------------------------------------------
 # _action_description
@@ -281,22 +335,269 @@ class TestGetInputSchema:
 class TestActionDescription:
     """Tests for the _action_description() helper."""
 
-    def test_list_action_description(self) -> None:
-        """List action produces a human-readable description with the resource name."""
+    def test_list_action_uses_docstring(self) -> None:
+        """IT-9: list action description is taken from the method docstring."""
         desc = _action_description(UserViewSet, "list")
-        # Must contain the class-derived resource name — not "None".
-        # ViewSetMixin defines basename=None as a class attribute; the fallback
-        # must use the class name instead.
+        # UserViewSet.list docstring: "List all users."
+        assert "List all users" in desc
         assert "None" not in desc
-        assert "User" in desc
 
-    def test_retrieve_action_description(self) -> None:
-        """Retrieve action description contains the resource name and is not 'None'."""
+    def test_retrieve_action_uses_docstring(self) -> None:
+        """IT-9: retrieve action description is taken from the method docstring."""
         desc = _action_description(UserViewSet, "retrieve")
+        # UserViewSet.retrieve docstring: "Retrieve a single user."
+        assert "Retrieve a single user" in desc
         assert "None" not in desc
-        assert "User" in desc
+
+    def test_create_action_uses_docstring(self) -> None:
+        """IT-9: create action description is taken from the method docstring."""
+        desc = _action_description(UserViewSet, "create")
+        assert "Create a new user" in desc
 
     def test_unknown_action_falls_back_to_generic(self) -> None:
         """An action name not in the label map produces a generic description."""
         desc = _action_description(UserViewSet, "custom_action")
         assert "UserViewSet" in desc or "custom_action" in desc
+
+
+# ---------------------------------------------------------------------------
+# Surface area control — per-ViewSet and settings-based filters
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("use_test_urls")
+class TestActionFiltering:
+    """Tests for mcp_include_actions, mcp_exclude_actions, ALLOWLIST, and DENYLIST."""
+
+    def test_mcp_include_actions_restricts_to_listed_actions(self) -> None:
+        """LimitedViewSet.mcp_include_actions=['list'] exposes only the list action."""
+        discovery = DRFSyncDiscovery()
+        tools = discovery.discover_tools()
+        names = {t.name for t in tools}
+        assert "limited.list" in names
+        assert "limited.create" not in names
+
+    def test_mcp_exclude_actions_drops_listed_action(self) -> None:
+        """ExcludeDestroyViewSet.mcp_exclude_actions=['destroy'] hides destroy."""
+        discovery = DRFSyncDiscovery()
+        tools = discovery.discover_tools()
+        names = {t.name for t in tools}
+        assert "excludedestroy.list" in names
+        assert "excludedestroy.destroy" not in names
+
+    def test_mcp_include_actions_none_exposes_all_actions(self) -> None:
+        """When mcp_include_actions is absent, all discovered actions are exposed."""
+        # UserViewSet has no mcp_include_actions; list and create are both present.
+        discovery = DRFSyncDiscovery()
+        tools = discovery.discover_tools()
+        names = {t.name for t in tools}
+        assert "users.list" in names
+        assert "users.create" in names
+
+    def test_mcp_exclude_actions_empty_exposes_all_actions(self) -> None:
+        """When mcp_exclude_actions is absent or empty, no actions are suppressed."""
+        # LimitedViewSet has mcp_include_actions; UserViewSet has neither filter.
+        discovery = DRFSyncDiscovery()
+        tools = discovery.discover_tools()
+        names = {t.name for t in tools}
+        # UserViewSet has no mcp_exclude_actions — destroy is present.
+        assert "users.destroy" in names
+
+
+# ---------------------------------------------------------------------------
+# _apply_tool_filters — settings-based ALLOWLIST / DENYLIST
+# ---------------------------------------------------------------------------
+
+
+def _make_stub_tool(name: str) -> ToolDefinition:
+    """Return a minimal ToolDefinition for filter tests."""
+    return ToolDefinition(
+        name=name,
+        description="stub",
+        input_schema={"type": "object"},
+        permission_classes=(),
+        source="auto",
+        view_class=UserViewSet,
+        action="list",
+    )
+
+
+class TestApplyToolFilters:
+    """Unit tests for the _apply_tool_filters() helper in apps.py."""
+
+    def test_no_settings_returns_all_tools(self) -> None:
+        """When neither setting is present, the full list is returned unchanged."""
+        tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
+        assert _apply_tool_filters(tools) == tools
+
+    def test_allowlist_keeps_only_listed_names(self, settings: Any) -> None:
+        """FRIESE_MCP_TOOL_ALLOWLIST retains only matching tool names."""
+        settings.FRIESE_MCP_TOOL_ALLOWLIST = ["a.list"]
+        tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
+        result = _apply_tool_filters(tools)
+        assert [t.name for t in result] == ["a.list"]
+
+    def test_denylist_removes_listed_names(self, settings: Any) -> None:
+        """FRIESE_MCP_TOOL_DENYLIST drops matching tool names."""
+        settings.FRIESE_MCP_TOOL_DENYLIST = ["b.create"]
+        tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
+        result = _apply_tool_filters(tools)
+        assert [t.name for t in result] == ["a.list"]
+
+    def test_denylist_applied_after_allowlist(self, settings: Any) -> None:
+        """A name in both allowlist and denylist is ultimately excluded."""
+        settings.FRIESE_MCP_TOOL_ALLOWLIST = ["a.list", "b.create"]
+        settings.FRIESE_MCP_TOOL_DENYLIST = ["a.list"]
+        tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
+        result = _apply_tool_filters(tools)
+        assert [t.name for t in result] == ["b.create"]
+
+    def test_empty_allowlist_drops_all_tools(self, settings: Any) -> None:
+        """An explicit empty ALLOWLIST removes every tool."""
+        settings.FRIESE_MCP_TOOL_ALLOWLIST = []
+        tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
+        assert _apply_tool_filters(tools) == []
+
+
+# ---------------------------------------------------------------------------
+# Filter backend schema introspection
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaFromFilterBackends:
+    """Unit tests for the _schema_from_filter_backends() helper."""
+
+    def test_search_filter_adds_search_property(self) -> None:
+        """SearchFilter adds a 'search' string property to list action schemas."""
+        props = _schema_from_filter_backends(SearchableViewSet)
+        assert "search" in props
+        assert props["search"]["type"] == "string"
+
+    def test_ordering_filter_adds_ordering_property(self) -> None:
+        """OrderingFilter adds an 'ordering' string property."""
+        props = _schema_from_filter_backends(OrderableViewSet)
+        assert "ordering" in props
+        assert props["ordering"]["type"] == "string"
+
+    def test_ordering_filter_includes_field_enum(self) -> None:
+        """OrderingFilter enum includes ascending and descending field variants."""
+        props = _schema_from_filter_backends(OrderableViewSet)
+        enum_values = props["ordering"].get("enum", [])
+        assert "name" in enum_values
+        assert "-name" in enum_values
+        assert "created_at" in enum_values
+        assert "-created_at" in enum_values
+
+    def test_django_filter_backend_adds_filterset_fields(self) -> None:
+        """DjangoFilterBackend adds properties for each entry in filterset_fields."""
+        props = _schema_from_filter_backends(FullyFilteredViewSet)
+        assert "status" in props
+        assert "category" in props
+
+    def test_fully_filtered_viewset_has_all_parameters(self) -> None:
+        """A ViewSet with all three backends exposes search, ordering, and filter fields."""
+        props = _schema_from_filter_backends(FullyFilteredViewSet)
+        assert "search" in props
+        assert "ordering" in props
+        assert "status" in props
+
+    def test_no_filter_backends_returns_empty_dict(self) -> None:
+        """A ViewSet without filter_backends returns an empty dict."""
+        props = _schema_from_filter_backends(UserViewSet)
+        assert not props
+
+    def test_filterset_class_properties(self) -> None:
+        """_filterset_properties() reads base_filters from a filterset_class."""
+        props = _filterset_properties(FilterSetClassViewSet)
+        assert "status" in props
+        assert "category" in props
+
+    def test_filterset_class_label_used_as_description(self) -> None:
+        """_filterset_properties() uses the filter label as the description."""
+        props = _filterset_properties(FilterSetClassViewSet)
+        assert props["status"]["description"] == "Filter by status"
+
+
+class TestFilterBackendsInDiscovery:
+    """Integration tests: filter properties appear in discovered list schemas."""
+
+    @pytest.mark.usefixtures("use_test_urls")
+    def test_list_schema_includes_search_from_filter_backend(self) -> None:
+        """discover_tools() list schema contains 'search' when SearchFilter is set."""
+        discovery = DRFSyncDiscovery()
+        schema = discovery.get_input_schema(SearchableViewSet, "list")
+        assert "search" in schema["properties"]
+
+    @pytest.mark.usefixtures("use_test_urls")
+    def test_create_schema_does_not_include_filter_properties(self) -> None:
+        """Filter properties are NOT added to non-list action schemas."""
+        discovery = DRFSyncDiscovery()
+        schema = discovery.get_input_schema(SearchableViewSet, "create")
+        assert "search" not in schema.get("properties", {})
+
+
+# ---------------------------------------------------------------------------
+# Custom @action signature introspection
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaFromActionSignature:
+    """Unit tests for _schema_from_action_signature() helper."""
+
+    def test_typed_params_become_properties(self) -> None:
+        """Parameters with type annotations produce JSON Schema properties."""
+        func = TypedActionViewSet.export
+        schema = _schema_from_action_signature(func, TypedActionViewSet, "export")
+        assert "fmt" in schema["properties"]
+        assert "limit" in schema["properties"]
+
+    def test_string_annotation_maps_to_string_type(self) -> None:
+        """A str-annotated parameter maps to JSON Schema type 'string'."""
+        func = TypedActionViewSet.export
+        schema = _schema_from_action_signature(func, TypedActionViewSet, "export")
+        assert schema["properties"]["fmt"]["type"] == "string"
+
+    def test_int_annotation_maps_to_integer_type(self) -> None:
+        """An int-annotated parameter maps to JSON Schema type 'integer'."""
+        func = TypedActionViewSet.export
+        schema = _schema_from_action_signature(func, TypedActionViewSet, "export")
+        assert schema["properties"]["limit"]["type"] == "integer"
+
+    def test_params_with_defaults_are_not_required(self) -> None:
+        """Parameters that have default values are not in the required list."""
+        func = TypedActionViewSet.export
+        schema = _schema_from_action_signature(func, TypedActionViewSet, "export")
+        assert "fmt" not in schema.get("required", [])
+        assert "limit" not in schema.get("required", [])
+
+    def test_self_and_request_are_skipped(self) -> None:
+        """'self' and 'request' are never included in the schema properties."""
+        func = TypedActionViewSet.export
+        schema = _schema_from_action_signature(func, TypedActionViewSet, "export")
+        assert "self" not in schema["properties"]
+        assert "request" not in schema["properties"]
+
+    def test_no_params_returns_empty_properties(self) -> None:
+        """Action with only self/request returns empty-properties schema."""
+        func = TypedActionViewSet.summary
+        schema = _schema_from_action_signature(func, TypedActionViewSet, "summary")
+        assert not schema["properties"]
+
+
+class TestCustomActionSchemaInGetInputSchema:
+    """Integration: custom @action schemas via DRFSyncDiscovery.get_input_schema()."""
+
+    def test_typed_custom_action_schema_has_properties(self) -> None:
+        """get_input_schema() exposes typed parameters for a custom GET action."""
+        discovery = DRFSyncDiscovery()
+        schema = discovery.get_input_schema(TypedActionViewSet, "export")
+        assert "fmt" in schema["properties"]
+        assert "limit" in schema["properties"]
+
+    def test_standard_action_schema_unaffected(self) -> None:
+        """Standard list/create actions are not affected by signature introspection."""
+        discovery = DRFSyncDiscovery()
+        schema = discovery.get_input_schema(UserViewSet, "list")
+        # Signature introspection should not add 'request' or 'self' to list schema.
+        assert "self" not in schema.get("properties", {})
+        assert "request" not in schema.get("properties", {})

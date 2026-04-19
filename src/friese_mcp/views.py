@@ -14,6 +14,7 @@ Supported methods
 * ``resources/list``   — stub (returns empty list in v1)
 * ``resources/read``   — stub (returns METHOD_NOT_FOUND in v1)
 * ``ping``             — liveness check
+* ``help``             — server metadata and usage hints for AI agents
 
 Authentication & permissions
 -----------------------------
@@ -28,19 +29,20 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
   separately by :data:`~friese_mcp.registry.tool_registry`.
 """
 
+import difflib
 import json
 import logging
 from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.http import HttpRequest, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.utils import timezone
 from django.utils.module_loading import import_string
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.request import Request as DRFRequest
 from rest_framework.views import APIView
 
-from friese_mcp.backends.invocation import _format_drf_validation_error
 from friese_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -78,6 +80,36 @@ def _jsonrpc_error(
 
 
 # ---------------------------------------------------------------------------
+# Error content builders
+# ---------------------------------------------------------------------------
+
+
+def _build_drf_error_content(exc: DRFValidationError) -> dict[str, Any]:
+    """
+    Convert a DRF ``ValidationError`` into a structured tool-error dict.
+
+    * Field errors (dict detail) → ``{"error": "Validation failed", "detail": {field: [msgs]}}``
+    * Non-field errors (list detail) → ``{"error": "<joined messages>"}``
+    * Scalar detail → ``{"error": "<string>"}``
+
+    The result is safe to JSON-serialise and return to the MCP caller inside
+    an ``isError=True`` content block.
+    """
+    detail = exc.detail
+    if isinstance(detail, dict):
+        return {
+            "error": "Validation failed",
+            "detail": {
+                field: [str(e) for e in (errors if isinstance(errors, list) else [errors])]
+                for field, errors in detail.items()
+            },
+        }
+    if isinstance(detail, list):
+        return {"error": "; ".join(str(e) for e in detail)}
+    return {"error": str(detail)}
+
+
+# ---------------------------------------------------------------------------
 # Settings helpers
 # ---------------------------------------------------------------------------
 
@@ -99,6 +131,59 @@ def _resolve_classes(setting_name: str) -> list[Any] | None:
     if raw is None:
         return None
     return [import_string(cls) if isinstance(cls, str) else cls for cls in raw]
+
+
+def _get_agent_connection(request: Any) -> Any | None:
+    """
+    Return the active AgentConnection for ``request.auth``, or ``None``.
+
+    Looks up :class:`~friese_mcp.contrib.agents.models.AgentConnection`
+    for ``request.auth``.
+
+    Resolution order:
+
+    1. If ``friese_mcp.contrib.agents`` is not installed → ``None``.
+    2. If ``request.auth`` is a
+       :class:`~friese_mcp.contrib.tokens.models.FrieseMcpToken` → look up the
+       first active ``AgentConnection`` linked via ``token``.
+    3. If ``request.auth`` is an
+       :class:`~friese_mcp.contrib.oauth.models.OAuthAccessToken` → look up the
+       first active ``AgentConnection`` linked via ``oauth_client``.
+    4. Otherwise → ``None``.
+
+    Returns ``None`` when no matching ``AgentConnection`` exists, allowing all
+    registered tools to be accessible.
+    """
+    from django.apps import apps as django_apps  # pylint: disable=import-outside-toplevel
+
+    if not django_apps.is_installed("friese_mcp.contrib.agents"):
+        return None
+
+    auth = getattr(request, "auth", None)
+    if auth is None:
+        return None
+
+    try:
+        from friese_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            FrieseMcpToken,
+        )
+
+        if isinstance(auth, FrieseMcpToken):
+            return auth.agent_connections.filter(is_active=True).first()
+    except ImportError:
+        pass
+
+    try:
+        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+            OAuthAccessToken,
+        )
+
+        if isinstance(auth, OAuthAccessToken):
+            return auth.client.agent_connections.filter(is_active=True).first()
+    except ImportError:
+        pass
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -139,18 +224,27 @@ def _handle_initialized(request_id: JsonRpcId) -> JsonResponse:
     return _jsonrpc_success(request_id, {})
 
 
-def _handle_tools_list(request_id: JsonRpcId) -> JsonResponse:
+def _handle_tools_list(request_id: JsonRpcId, request: Any) -> JsonResponse:
     """
     Handle ``tools/list`` — return the tool manifest from the registry.
 
-    **Auth note:** This handler returns the full tool manifest to any caller without
-    performing any authentication or permission checks.  This is intentional: friese-mcp
-    does not own authentication or authorisation.  The host application is responsible
-    for placing auth-gating in front of the MCP endpoint at the infrastructure level
-    (e.g. API gateway, reverse proxy, Django middleware, DRF authentication classes on
-    the URL include).  Refer to the friese-mcp documentation for recommended patterns.
+    When ``friese_mcp.contrib.agents`` is installed and ``request.auth`` maps to
+    an active :class:`~friese_mcp.contrib.agents.models.AgentConnection` with a
+    non-null ``allowed_tools`` list, only those tools are included in the
+    response.  All other callers receive the full manifest.
+
+    **Auth note:** Beyond per-agent filtering, this handler does not perform
+    additional authentication or permission checks.  The host application is
+    responsible for gateway-level auth-gating via
+    ``FRIESE_MCP_AUTHENTICATION_CLASSES`` / ``FRIESE_MCP_PERMISSION_CLASSES`` or
+    upstream infrastructure.
     """
-    return _jsonrpc_success(request_id, {"tools": tool_registry.list_tools()})
+    tools = tool_registry.list_tools()
+    conn = _get_agent_connection(request)
+    if conn is not None and conn.allowed_tools is not None:
+        allowed: frozenset[str] = frozenset(conn.allowed_tools)
+        tools = [t for t in tools if t["name"] in allowed]
+    return _jsonrpc_success(request_id, {"tools": tools})
 
 
 def _handle_tools_call(
@@ -169,23 +263,91 @@ def _handle_tools_call(
             request_id, INVALID_PARAMS, "Invalid params", "'arguments' must be an object"
         )
 
+    # Per-agent tool allowlist: when an active AgentConnection with a non-null
+    # allowed_tools list is linked to the caller's credential, reject any tool
+    # name not in that list before reaching the registry.
+    conn = _get_agent_connection(request)
+    if conn is not None and conn.allowed_tools is not None:
+        if tool_name not in frozenset(conn.allowed_tools):
+            return _jsonrpc_success(
+                request_id,
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "error": (
+                                        f"Tool {tool_name!r} is not permitted "
+                                        "for this agent connection"
+                                    )
+                                }
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
+            )
+
+    # Record last_seen_at for this agent connection (fire-and-forget UPDATE).
+    if conn is not None:
+        from friese_mcp.contrib.agents.models import (  # pylint: disable=import-outside-toplevel
+            AgentConnection,
+        )
+
+        AgentConnection.objects.filter(pk=conn.pk).update(last_seen_at=timezone.now())
+
     try:
         result = tool_registry.dispatch(request, tool_name, arguments)
     except LookupError as exc:
-        return _jsonrpc_error(request_id, INVALID_PARAMS, "Unknown tool", str(exc))
+        # JSON-RPC 2.0: -32601 METHOD_NOT_FOUND is the correct code for an unknown
+        # tool name.  -32602 INVALID_PARAMS is reserved for structural argument
+        # errors; using it for a missing tool misleads clients into thinking their
+        # call format is wrong rather than the tool name.
+        #
+        # Append close-match suggestions so agents can self-correct without an
+        # extra tools/list round-trip.
+        known_names = [t["name"] for t in tool_registry.list_tools()]
+        suggestions = difflib.get_close_matches(tool_name, known_names, n=3, cutoff=0.6)
+        data = str(exc)
+        if suggestions:
+            data += f". Did you mean: {', '.join(suggestions)}?"
+        return _jsonrpc_error(request_id, METHOD_NOT_FOUND, "Unknown tool", data)
     except ToolInputError as exc:
         return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc))
     except PermissionError as exc:
-        return _jsonrpc_error(request_id, INVALID_PARAMS, "Permission denied", str(exc))
+        # Return as isError=True tool-level content, not a JSON-RPC protocol error.
+        # INVALID_PARAMS (-32602) is reserved for argument structure failures; using
+        # it for auth denial misleads agents into thinking their call format is wrong.
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                "isError": True,
+            },
+        )
     except DRFValidationError as exc:
-        # IT-3: Surface DRF validation errors raised by @mcp_tool functions —
-        # they describe invalid input and are safe to return to the caller.
-        msg = _format_drf_validation_error(exc)
-        return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", msg)
+        # IT-8: Surface DRF field-level validation errors with structured detail so
+        # the caller can display per-field messages without parsing a flat string.
+        content = _build_drf_error_content(exc)
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps(content)}],
+                "isError": True,
+            },
+        )
     except DjangoValidationError as exc:
-        # IT-3: Surface Django model/form validation errors raised by @mcp_tool functions.
+        # Surface Django model/form validation errors as structured isError=True content
+        # so agents receive actionable feedback in the same format as DRFValidationError.
         msg = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
-        return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", msg)
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps({"error": msg})}],
+                "isError": True,
+            },
+        )
     except ValueError as exc:
         # IT-3: Surface ValueError raised by @mcp_tool handlers — the convention is to
         # raise ValueError for user-correctable input problems (e.g. invalid UUID, bad
@@ -236,7 +398,51 @@ def _handle_resources_read(request_id: JsonRpcId, params: JsonDict) -> JsonRespo
     )
 
 
-def _parse_and_dispatch(request: HttpRequest) -> JsonResponse:
+def _handle_help(request_id: JsonRpcId) -> JsonResponse:
+    """
+    Handle ``help`` — return server metadata and usage hints for AI agents.
+
+    Returns a structured summary of available methods, error formats, and
+    navigation tips so that agents can self-orient without out-of-band
+    documentation.
+    """
+    server_name: str = getattr(settings, "FRIESE_MCP_SERVER_NAME", "friese-mcp")
+    return _jsonrpc_success(
+        request_id,
+        {
+            "server": server_name,
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "methods": [
+                "initialize",
+                "initialized",
+                "tools/list",
+                "tools/call",
+                "resources/list",
+                "ping",
+                "help",
+            ],
+            "hints": {
+                "discovery": (
+                    "Call tools/list to enumerate available tools and their inputSchema."
+                ),
+                "invocation": ("Call tools/call with {name, arguments} to invoke a tool."),
+                "errors": (
+                    "Tool errors return isError=true with content[0].text as JSON. "
+                    "Check the 'error' key for the message and 'detail' for field-level hints."
+                ),
+                "unknown_tool": (
+                    "If tools/call returns -32601, the tool name is unrecognised. "
+                    "Re-run tools/list for the correct name — suggestions are included in "
+                    "the error data field."
+                ),
+            },
+        },
+    )
+
+
+def _parse_and_dispatch(  # pylint: disable=too-many-branches
+    request: HttpRequest | DRFRequest,
+) -> JsonResponse | HttpResponse:
     """Parse the POST body and dispatch to the appropriate method handler."""
     # DRF wraps the Django HttpRequest in a rest_framework.request.Request.
     # _parse_and_dispatch only needs request.body and request.user — both are
@@ -260,6 +466,18 @@ def _parse_and_dispatch(request: HttpRequest) -> JsonResponse:
     if not isinstance(params, dict):
         return _jsonrpc_error(request_id, INVALID_PARAMS, "'params' must be an object")
 
+    # MCP Streamable HTTP (2025-03-26) §transport: when a POST body contains only
+    # JSON-RPC *notifications* (messages without an ``id`` field), the server MUST
+    # return HTTP 202 Accepted with no body.  Notifications have no ``id`` key at all
+    # (distinct from an explicit ``"id": null`` on a request).
+    is_notification = "id" not in body
+    if is_notification:
+        if method == "initialized":
+            logger.info("mcp_initialized")
+        else:
+            logger.debug("mcp_notification", extra={"method": method})
+        return HttpResponse(status=202)
+
     logger.debug("mcp_request", extra={"method": method, "request_id": request_id})
 
     if method == "ping":
@@ -269,13 +487,15 @@ def _parse_and_dispatch(request: HttpRequest) -> JsonResponse:
     if method == "initialized":
         return _handle_initialized(request_id)
     if method == "tools/list":
-        return _handle_tools_list(request_id)
+        return _handle_tools_list(request_id, request)
     if method == "tools/call":
         return _handle_tools_call(request, request_id, params)
     if method == "resources/list":
         return _handle_resources_list(request_id)
     if method == "resources/read":
         return _handle_resources_read(request_id, params)
+    if method == "help":
+        return _handle_help(request_id)
     return _jsonrpc_error(request_id, METHOD_NOT_FOUND, f"Method not found: {method!r}")
 
 
@@ -341,7 +561,7 @@ class McpEndpointView(APIView):
             return []
         return [cls() for cls in classes]
 
-    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse:
+    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse:
         """Handle POST — the only allowed HTTP method."""
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             return JsonResponse(

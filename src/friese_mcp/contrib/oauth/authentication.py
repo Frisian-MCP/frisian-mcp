@@ -3,7 +3,7 @@ OAuthTokenAuthentication — DRF authentication class for OAuth 2.0 Bearer token
 
 Reads the ``Authorization: Bearer <token>`` header, looks up the token in
 :class:`~friese_mcp.contrib.oauth.models.OAuthAccessToken`, checks expiry and
-client active status, and returns ``(AnonymousUser, access_token)`` on success.
+client active status, and returns ``(OAuthServicePrincipal, access_token)`` on success.
 
 Wire into the MCP gateway via settings::
 
@@ -57,7 +57,7 @@ class OAuthTokenAuthentication(BaseAuthentication):
     All other requests return ``None`` so that DRF can try the next
     configured authenticator.
 
-    On success, returns ``(AnonymousUser, access_token)`` where *access_token*
+    On success, returns ``(OAuthServicePrincipal, access_token)`` where *access_token*
     is the :class:`~friese_mcp.contrib.oauth.models.OAuthAccessToken` instance.
 
     On failure (token not found, expired, or client inactive), raises
@@ -68,7 +68,7 @@ class OAuthTokenAuthentication(BaseAuthentication):
         """
         Authenticate the request from an OAuth 2.0 Bearer token.
 
-        Returns ``(AnonymousUser, access_token)`` on success, ``None`` when the
+        Returns ``(OAuthServicePrincipal, access_token)`` on success, ``None`` when the
         header is absent, or raises
         :class:`~rest_framework.exceptions.AuthenticationFailed` when the token
         is invalid, expired, or the issuing client is inactive.

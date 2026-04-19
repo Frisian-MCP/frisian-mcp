@@ -3,7 +3,7 @@
 from typing import Any
 
 # MCP protocol version advertised during the initialize handshake.
-MCP_PROTOCOL_VERSION: str = "2024-11-05"
+MCP_PROTOCOL_VERSION: str = "2025-03-26"
 
 # JSON-RPC 2.0 type aliases.
 JsonRpcId = int | str | None
