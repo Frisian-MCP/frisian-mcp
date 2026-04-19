@@ -33,11 +33,14 @@ import logging
 from typing import Any
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpRequest, JsonResponse
 from django.utils.module_loading import import_string
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.request import Request as DRFRequest
 from rest_framework.views import APIView
 
+from friese_mcp.backends.invocation import _format_drf_validation_error
 from friese_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -174,6 +177,27 @@ def _handle_tools_call(
         return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc))
     except PermissionError as exc:
         return _jsonrpc_error(request_id, INVALID_PARAMS, "Permission denied", str(exc))
+    except DRFValidationError as exc:
+        # IT-3: Surface DRF validation errors raised by @mcp_tool functions —
+        # they describe invalid input and are safe to return to the caller.
+        msg = _format_drf_validation_error(exc)
+        return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", msg)
+    except DjangoValidationError as exc:
+        # IT-3: Surface Django model/form validation errors raised by @mcp_tool functions.
+        msg = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
+        return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", msg)
+    except ValueError as exc:
+        # IT-3: Surface ValueError raised by @mcp_tool handlers — the convention is to
+        # raise ValueError for user-correctable input problems (e.g. invalid UUID, bad
+        # enum value).  Return as a tool-level isError response so the caller gets
+        # actionable feedback without a full JSON-RPC error.
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                "isError": True,
+            },
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.exception("tool_execution_error", extra={"tool": tool_name, "error": str(exc)})
         # Do NOT surface the raw exception message to the caller — it may contain

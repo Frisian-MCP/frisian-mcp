@@ -239,3 +239,77 @@ class TestThreadSafety:
 
         assert not errors
         assert len(registry.list_tools()) == 20
+
+
+# ---------------------------------------------------------------------------
+# IT-1: camelCase → snake_case input normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestCamelCaseNormalization:
+    """IT-1: camelCase argument keys are normalised to snake_case before dispatch."""
+
+    def test_camel_key_reaches_handler(self, registry: ToolRegistry) -> None:
+        """CamelCase key sent by caller is converted to snake_case before handler call."""
+        schema = {
+            "type": "object",
+            "properties": {"muscle_groups": {"type": "array", "items": {"type": "string"}}},
+        }
+        captured: list[dict] = []
+
+        def _capture(arguments: dict, _request: Any) -> None:
+            captured.append(dict(arguments))
+
+        registry.register("ex.create", _capture, "Create", schema)
+        registry.dispatch(_build_request(), "ex.create", {"muscleGroups": ["Chest"]})
+        assert captured == [{"muscle_groups": ["Chest"]}]
+
+    def test_mixed_case_keys_all_normalised(self, registry: ToolRegistry) -> None:
+        """Multiple camelCase keys in a single call are all normalised."""
+        captured: list[dict] = []
+
+        def _capture(arguments: dict, _request: Any) -> None:
+            captured.append(dict(arguments))
+
+        registry.register("prog.create", _capture, "Prog", {})
+        registry.dispatch(
+            _build_request(),
+            "prog.create",
+            {"estimatedMinutes": 30, "isActive": True, "muscleGroups": ["Legs"]},
+        )
+        assert captured == [{"estimated_minutes": 30, "is_active": True, "muscle_groups": ["Legs"]}]
+
+    def test_snake_case_key_passes_through_unchanged(self, registry: ToolRegistry) -> None:
+        """snake_case keys sent directly are not double-converted."""
+        captured: list[dict] = []
+
+        def _capture(arguments: dict, _request: Any) -> None:
+            captured.append(dict(arguments))
+
+        registry.register("ex.update", _capture, "Update", {})
+        registry.dispatch(_build_request(), "ex.update", {"muscle_groups": ["Back"]})
+        assert captured == [{"muscle_groups": ["Back"]}]
+
+    def test_normalisation_disabled_by_setting(self, registry: ToolRegistry, settings: Any) -> None:
+        """When FRIESE_MCP_NORMALIZE_INPUT_CASE=False, camelCase keys reach the handler as-is."""
+        settings.FRIESE_MCP_NORMALIZE_INPUT_CASE = False
+        captured: list[dict] = []
+
+        def _capture(arguments: dict, _request: Any) -> None:
+            captured.append(dict(arguments))
+
+        registry.register("raw.tool", _capture, "Raw", {})
+        registry.dispatch(_build_request(), "raw.tool", {"muscleGroups": ["Chest"]})
+        assert captured == [{"muscleGroups": ["Chest"]}]
+
+    def test_schema_validated_after_normalisation(self, registry: ToolRegistry) -> None:
+        """JSON Schema validation runs against normalised keys (camelCase → snake_case)."""
+        schema = {
+            "type": "object",
+            "properties": {"muscle_groups": {"type": "array", "items": {"type": "string"}}},
+            "required": ["muscle_groups"],
+        }
+        registry.register("ex.strict", _echo_tool, "Strict", schema)
+        # Sending camelCase — should normalise and pass validation.
+        result = registry.dispatch(_build_request(), "ex.strict", {"muscleGroups": ["Chest"]})
+        assert result == {"muscle_groups": ["Chest"]}

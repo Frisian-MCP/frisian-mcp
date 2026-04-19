@@ -7,7 +7,6 @@ import friese_mcp.contrib.oauth.models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = []
