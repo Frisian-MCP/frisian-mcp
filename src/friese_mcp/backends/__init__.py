@@ -7,7 +7,6 @@ Public API::
         BaseDiscoveryBackend,
         BaseInvocationBackend,
         DRFSyncDiscovery,
-        RequestContext,
         SyncInvocation,
         ToolDefinition,
         ToolResult,
@@ -26,7 +25,6 @@ from django.conf import settings
 from friese_mcp.backends.base import (
     BaseDiscoveryBackend,
     BaseInvocationBackend,
-    RequestContext,
     ToolDefinition,
     ToolResult,
 )
@@ -96,7 +94,6 @@ __all__ = [
     "BaseDiscoveryBackend",
     "BaseInvocationBackend",
     "DRFSyncDiscovery",
-    "RequestContext",
     "SyncInvocation",
     "ToolDefinition",
     "ToolResult",
@@ -109,7 +106,6 @@ _REEXPORTED: tuple[Any, ...] = (
     BaseDiscoveryBackend,
     BaseInvocationBackend,
     DRFSyncDiscovery,
-    RequestContext,
     SyncInvocation,
     ToolDefinition,
     ToolResult,

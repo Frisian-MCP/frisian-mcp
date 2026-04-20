@@ -23,8 +23,6 @@ import dataclasses
 from abc import ABC, abstractmethod
 from typing import Any, Literal
 
-from django.contrib.auth.base_user import AbstractBaseUser
-from django.contrib.auth.models import AnonymousUser
 from django.http import HttpRequest
 from rest_framework.permissions import BasePermission
 
@@ -80,30 +78,6 @@ class ToolResult:
 
     content: Any
     is_error: bool = False
-
-
-@dataclasses.dataclass
-class RequestContext:
-    """
-    Caller context passed to invocation backends.
-
-    Constructed from the incoming MCP HTTP request.  Backends may use
-    ``tenant`` and ``extras`` to carry application-specific state (e.g. a
-    Nautobot tenant object).
-
-    Attributes:
-        request: The raw Django :class:`~django.http.HttpRequest` that
-            arrived at the MCP gateway endpoint.
-        user: The authenticated user (or ``AnonymousUser``).
-        tenant: Optional application-specific tenant object.
-        extras: Arbitrary key/value context provided by host-app middleware.
-
-    """
-
-    request: HttpRequest
-    user: AbstractBaseUser | AnonymousUser
-    tenant: Any = None
-    extras: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

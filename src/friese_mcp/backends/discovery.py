@@ -284,7 +284,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             tools.append(
                 ToolDefinition(
                     name=f"{resource}.{action_name}",
-                    description=_action_description(cls, action_name),
+                    description=_action_description(cls, action_name, resource),
                     input_schema=self.get_input_schema(cls, action_name),
                     permission_classes=perm_classes,
                     source="auto",
@@ -568,7 +568,7 @@ def _resource_from_path(path: str) -> str:
     return "unknown"
 
 
-def _action_description(view_class: type, action: str) -> str:
+def _action_description(view_class: type, action: str, resource: str | None = None) -> str:
     """
     Build a human-readable tool description from the ViewSet and action.
 
@@ -576,8 +576,20 @@ def _action_description(view_class: type, action: str) -> str:
 
     1. First non-empty line of the action method's docstring — specific and
        authored by the developer.
-    2. Generic label derived from the class name and action — used when no
-       docstring is present or the action is not in the standard label map.
+    2. Generic label derived from *resource* (or the class name when *resource*
+       is not supplied) and the action name.
+
+    Args:
+        view_class: The DRF ViewSet class.
+        action: The action name (e.g. ``"list"``, ``"summary"``).
+        resource: The canonical resource name already computed by the caller
+            (e.g. ``"users"``).  When ``None`` the name is derived from the
+            ViewSet class name as a fallback — useful for direct calls outside
+            the discovery pipeline (e.g. tests).
+
+    Returns:
+        A non-empty, non-null description string.
+
     """
     # Priority 1: action method docstring.
     action_method = getattr(view_class, action, None)
@@ -587,10 +599,14 @@ def _action_description(view_class: type, action: str) -> str:
         if first_line:
             return first_line
 
-    # Priority 2: generic label from class name.
-    # ViewSetMixin defines `basename = None` as a class attribute, so getattr's
-    # default never fires — use `or` to fall back when the attribute is falsy.
-    resource = getattr(view_class, "basename", None) or view_class.__name__.replace("ViewSet", "")
+    # Priority 2: generic label from the canonical resource name.
+    # When resource is not supplied (e.g. direct test calls), derive from the
+    # class name.  Guard against an empty result (e.g. a class named "ViewSet")
+    # by falling back to the full class name.
+    if resource is None:
+        resource = (
+            view_class.__name__.replace("ViewSet", "") or view_class.__name__
+        )
     action_labels: dict[str, str] = {
         "list": f"List {resource} objects",
         "retrieve": f"Retrieve a {resource} object by ID",

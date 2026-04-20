@@ -14,17 +14,13 @@ from __future__ import annotations
 
 import json
 import logging
+from io import BytesIO
 from typing import Any
+from urllib.parse import urlencode
 
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.http import HttpRequest
-
-# RequestFactory is part of Django's stable public API and is safe to use in
-# production code.  DRF's APIRequestFactory is a test-only subclass that adds
-# a `format=` kwarg convenience; we don't use that feature, so the plain
-# Django factory is the correct dependency here.
-from django.test import RequestFactory as _RequestFactory
+from django.http import HttpRequest, QueryDict
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.request import Request
 from rest_framework.settings import api_settings
@@ -118,8 +114,6 @@ class SyncInvocation(BaseInvocationBackend):
     so the synthetic request bypasses DRF's authentication/permission pipeline
     by forwarding the already-authenticated user from the original MCP request.
     """
-
-    _factory: _RequestFactory = _RequestFactory()
 
     def invoke(
         self,
@@ -255,24 +249,29 @@ class SyncInvocation(BaseInvocationBackend):
             DRF :class:`~rest_framework.request.Request`.
 
         """
-        make = getattr(self._factory, http_method)
+        req = HttpRequest()
+        req.method = http_method.upper()
+        req.path = "/"
+        req.META["SERVER_NAME"] = "localhost"
+        req.META["SERVER_PORT"] = "80"
 
-        if http_method in _GET_METHODS:
-            inner: HttpRequest = make("/", data=query_args or None)
-        elif http_method == "delete":
-            inner = make("/")
+        qs = urlencode(query_args, doseq=True) if query_args else ""
+        req.META["QUERY_STRING"] = qs
+        req.GET = QueryDict(qs)
+
+        if http_method not in _GET_METHODS and http_method != "delete" and body_args:
+            body_bytes = json.dumps(body_args).encode("utf-8")
+            req.META["CONTENT_TYPE"] = "application/json"
+            req.META["CONTENT_LENGTH"] = str(len(body_bytes))
+            req._stream = BytesIO(body_bytes)  # type: ignore[attr-defined]  # pylint: disable=protected-access
         else:
-            inner = make(
-                "/",
-                data=json.dumps(body_args),
-                content_type="application/json",
-            )
+            req._stream = BytesIO(b"")  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
         # Forward the authenticated user from the original MCP gateway request.
         # Fall back to AnonymousUser when AuthenticationMiddleware has not been
         # configured (e.g. minimal test setups without middleware).
-        inner.user = getattr(original, "user", AnonymousUser())
-        return inner
+        req.user = getattr(original, "user", AnonymousUser())
+        return req
 
     @staticmethod
     def _extract_data(response: Any) -> Any:
