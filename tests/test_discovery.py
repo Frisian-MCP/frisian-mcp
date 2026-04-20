@@ -359,6 +359,66 @@ class TestActionDescription:
         desc = _action_description(UserViewSet, "custom_action")
         assert "UserViewSet" in desc or "custom_action" in desc
 
+    def test_no_docstring_viewset_produces_non_null_description(self) -> None:
+        """ViewSet with no docstrings yields a non-null, non-empty description without 'None'."""
+        from rest_framework.response import Response  # pylint: disable=import-outside-toplevel
+        from rest_framework.viewsets import ViewSet  # pylint: disable=import-outside-toplevel
+
+        class NodocViewSet(ViewSet):  # pylint: disable=missing-class-docstring
+            # pylint: disable=missing-function-docstring
+            def list(self, request: Any) -> Response:
+                return Response([])
+
+        desc = _action_description(NodocViewSet, "list")
+        assert desc is not None
+        assert desc != ""
+        assert "None" not in desc
+
+    def test_explicit_resource_used_in_generic_label(self) -> None:
+        """When resource is supplied it appears in the generic label instead of the class name."""
+        from rest_framework.response import Response  # pylint: disable=import-outside-toplevel
+        from rest_framework.viewsets import ViewSet  # pylint: disable=import-outside-toplevel
+
+        class OrderViewSet(ViewSet):  # pylint: disable=missing-class-docstring
+            def list(self, request: Any) -> Response:
+                """List orders."""
+                return Response([])
+
+        desc = _action_description(OrderViewSet, "list", resource="orders")
+        assert "orders" in desc
+        assert "None" not in desc
+
+    def test_description_never_null_for_all_standard_actions(self) -> None:
+        """Every standard action on a no-docstring ViewSet produces a non-null description."""
+        from rest_framework.response import Response  # pylint: disable=import-outside-toplevel
+        from rest_framework.viewsets import ViewSet  # pylint: disable=import-outside-toplevel
+
+        class BarebonesViewSet(ViewSet):  # pylint: disable=missing-class-docstring
+            # pylint: disable=missing-function-docstring
+            def list(self, request: Any) -> Response:
+                return Response([])
+
+            def create(self, request: Any) -> Response:
+                return Response({})
+
+            def retrieve(self, request: Any, _pk: str | None = None) -> Response:
+                return Response({})
+
+            def update(self, request: Any, _pk: str | None = None) -> Response:
+                return Response({})
+
+            def partial_update(self, request: Any, _pk: str | None = None) -> Response:
+                return Response({})
+
+            def destroy(self, request: Any, _pk: str | None = None) -> Response:
+                return Response(status=204)
+
+        for action in ("list", "create", "retrieve", "update", "partial_update", "destroy"):
+            desc = _action_description(BarebonesViewSet, action, resource="items")
+            assert desc is not None, f"description is None for {action}"
+            assert desc != "", f"description is empty for {action}"
+            assert "None" not in desc, f"description contains 'None' for {action}: {desc!r}"
+
 
 # ---------------------------------------------------------------------------
 # Surface area control — per-ViewSet and settings-based filters

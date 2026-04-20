@@ -18,6 +18,7 @@ friese-mcp exposes your existing Django REST Framework ViewSets as [Model Contex
 - [Built-in authentication](#built-in-authentication)
   - [contrib.tokens — static Bearer tokens](#contribtokens--static-bearer-tokens)
   - [contrib.oauth — OAuth 2.0 client credentials](#contriboauth--oauth-20-client-credentials)
+  - [contrib.agents — per-agent tool allowlists](#contribagents--per-agent-tool-allowlists)
 - [Auto-discovery](#auto-discovery)
 - [Decorators](#decorators)
 - [ToolRegistry API](#toolregistry-api)
@@ -212,6 +213,45 @@ The `serverInfo.name` field returned in the `initialize` handshake response.
 FRIESE_MCP_SERVER_NAME = "my-product-mcp"
 ```
 
+### `FRIESE_MCP_TOOL_ALLOWLIST`
+
+**Type:** `list[str]` | **Default:** absent (all tools visible)
+
+When present, only the tool names in this list are registered at startup. All other auto-discovered tools are dropped before reaching the registry. Names are exact matches (e.g. `"users.destroy"`).
+
+```python
+FRIESE_MCP_TOOL_ALLOWLIST = [
+    "users.list",
+    "users.retrieve",
+    "workouts.create",
+]
+```
+
+Use this to expose a minimal, stable tool surface for production AI agents without modifying your ViewSets.
+
+### `FRIESE_MCP_TOOL_DENYLIST`
+
+**Type:** `list[str]` | **Default:** absent (no tools suppressed)
+
+Tool names in this list are dropped at startup. Applied after the allowlist, so denylisting an allowlisted name still removes it.
+
+```python
+FRIESE_MCP_TOOL_DENYLIST = [
+    "users.destroy",
+    "admin.delete_all",
+]
+```
+
+### `FRIESE_MCP_NORMALIZE_INPUT_CASE`
+
+**Type:** `bool` | **Default:** `False`
+
+When `True`, incoming `tools/call` argument keys are normalised from camelCase to snake_case before dispatch. Useful when the calling agent (e.g. a GPT plugin) sends `userId` instead of `user_id`.
+
+```python
+FRIESE_MCP_NORMALIZE_INPUT_CASE = True
+```
+
 ---
 
 ## Authentication and permissions
@@ -227,7 +267,7 @@ friese-mcp has two independent permission enforcement points:
 | **Gateway** | Access to the entire `/mcp/` endpoint (all methods: ping, initialize, tools/list, tools/call, …) | `FRIESE_MCP_PERMISSION_CLASSES` |
 | **Tool** | Access to a specific tool within `tools/call` | `permission_classes` on the ViewSet or `@mcp_tool` |
 
-A request denied at gateway level receives a DRF 403 response before it reaches the JSON-RPC handler. A request denied at tool level receives a JSON-RPC `INVALID_PARAMS` error with `"Permission denied"`.
+A request denied at gateway level receives a DRF 403 response before it reaches the JSON-RPC handler. A request denied at tool level receives an `isError: true` tool-level content response — not a JSON-RPC protocol error code. This keeps the JSON-RPC session alive so the agent can inspect the error and retry or call a different tool.
 
 ### Example: JWT-gated MCP surface
 
@@ -572,6 +612,83 @@ DRF tries each authenticator in order and uses the first that succeeds.
 
 ---
 
+### `contrib.agents` — per-agent tool allowlists
+
+An optional app that lets you register named AI agent profiles in Django admin and restrict each agent to a specific subset of MCP tools. Useful when multiple agents (Claude Code, Cursor, GPT) share the same MCP server but should see different tool surfaces.
+
+#### Setup
+
+Requires `contrib.tokens` and/or `contrib.oauth` — `AgentConnection` links to either credential type.
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "friese_mcp",
+    "friese_mcp.contrib.tokens",    # and/or contrib.oauth
+    "friese_mcp.contrib.agents",
+]
+```
+
+```bash
+python manage.py migrate
+```
+
+No URL configuration required.
+
+#### Creating agent connections
+
+**Django admin:** Open `/admin/`, navigate to **Agent Connections**, and click **Add**. Set a name (e.g. `"Claude Code — production"`), choose the agent type, link a `FrieseMcpToken` or `OAuthClient`, and optionally fill in `allowed_tools`.
+
+**Shell:**
+```python
+from friese_mcp.contrib.tokens.models import FrieseMcpToken
+from friese_mcp.contrib.agents.models import AgentConnection
+
+token = FrieseMcpToken.objects.create(name="claude-agent")
+AgentConnection.objects.create(
+    name="Claude Code — production",
+    agent_type="claude-code",
+    token=token,
+    allowed_tools=["users.list", "workouts.create"],
+)
+```
+
+#### How it works
+
+When a request arrives at `tools/list` or `tools/call`, the gateway calls `_get_agent_connection(request)`:
+
+1. If `friese_mcp.contrib.agents` is not installed → no filtering, all tools visible.
+2. If `request.auth` is a `FrieseMcpToken` → look up the first active `AgentConnection` linked via `token`.
+3. If `request.auth` is an `OAuthAccessToken` → look up the first active `AgentConnection` linked via `oauth_client`.
+4. No matching connection → no filtering, all tools visible.
+
+When a matching connection is found and `allowed_tools` is a non-null list:
+
+- `tools/list` returns only the tools in `allowed_tools`.
+- `tools/call` rejects calls to tools not in `allowed_tools` with `isError: true`.
+- `last_seen_at` is stamped on the connection record on each successful `tools/call`.
+
+Setting `allowed_tools` to `null` (the Django admin default) disables per-agent filtering for that connection — the agent sees all registered tools.
+
+#### `AgentConnection` model
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `CharField(200)` | Human-readable label (e.g. `"Claude Code — production"`). |
+| `agent_type` | `CharField(50)` | Agent type: `claude-code`, `cursor`, `gpt`, `github-copilot`, `generic`. |
+| `is_active` | `BooleanField` | Set to `False` to disable per-agent filtering for this entry without deleting it. |
+| `allowed_tools` | `JSONField(null=True)` | JSON array of permitted tool names. `null` → unrestricted (all tools visible). |
+| `token` | `ForeignKey(FrieseMcpToken, null=True)` | Linked static Bearer token credential. |
+| `oauth_client` | `ForeignKey(OAuthClient, null=True)` | Linked OAuth 2.0 client credential. |
+| `last_seen_at` | `DateTimeField(null=True)` | Updated on each `tools/call` from this agent. |
+| `notes` | `TextField` | Optional free-text notes (owner, purpose, rotation schedule). |
+| `created_at` | `DateTimeField` | Auto-set on creation. |
+
+> **`is_active` behaviour:** When `is_active = False`, the `AgentConnection` is ignored by the gateway entirely. The linked credential remains valid and the agent can still call any tool — the per-agent filtering is simply not applied.
+
+---
+
 ## Auto-discovery
 
 When `FRIESE_MCP_ENABLED` and `FRIESE_MCP_AUTODISCOVER` are both `True`, `FrieseMcpConfig.ready()` runs the following sequence:
@@ -589,6 +706,30 @@ When `FRIESE_MCP_ENABLED` and `FRIESE_MCP_AUTODISCOVER` are both `True`, `Friese
 
 Each `(ViewSet class, action)` pair is registered at most once. When the same ViewSet appears at multiple URL patterns (e.g. list route `/users/` and detail route `/users/<pk>/`), duplicate `(cls, action_name)` pairs are deduplicated via a `seen` set.
 
+### Surface area control per ViewSet
+
+Use `mcp_include_actions` and `mcp_exclude_actions` to control which actions are registered for a specific ViewSet without touching `@mcp_ignore` or settings-level lists:
+
+```python
+class UserViewSet(ModelViewSet):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+
+    # Only these two actions become MCP tools — all others are suppressed.
+    mcp_include_actions = ["list", "retrieve"]
+
+class AuditLogViewSet(ReadOnlyModelViewSet):
+    queryset = AuditLog.objects.all()
+
+    # All actions except destroy are registered.
+    mcp_exclude_actions = ["destroy"]
+```
+
+- `mcp_include_actions` — explicit allowlist for this ViewSet. Only the listed action names are registered. All others are silently skipped.
+- `mcp_exclude_actions` — denylist for this ViewSet. Listed action names are skipped; all others are registered.
+- Both may be present; `mcp_include_actions` is applied first (an action not in the include list is never registered even if it is not in the exclude list).
+- Neither attribute is inherited — they must be declared on the concrete ViewSet class.
+
 ### Tool naming
 
 Tool names follow the pattern `{resource}.{action}`, where:
@@ -602,9 +743,10 @@ Tool names follow the pattern `{resource}.{action}`, where:
 
 `DRFSyncDiscovery.get_input_schema()` builds a JSON Schema (draft-07) for each action:
 
-- **Detail actions** (`retrieve`, `update`, `partial_update`, `destroy`): always includes an `"id"` property of type `integer`. `id` is required for all detail actions except `partial_update`.
+- **Detail actions** (`retrieve`, `update`, `partial_update`, `destroy`): always includes an `"id"` property. `id` accepts either an integer or a string (`anyOf: [{type: integer}, {type: string}]`) so that UUID-keyed models work without schema validation errors. `id` is required for all detail actions except `partial_update`.
 - **Write actions** (`create`, `update`, `partial_update`): instantiates the ViewSet's serializer via `get_serializer_class()` and maps each non-read-only field to a JSON Schema type. Required serializer fields become required schema properties.
-- **Read actions** (`list`, `retrieve`): no body schema; arguments are passed as query parameters.
+- **List actions** with filter backends: introspects `filter_backends` on the ViewSet and adds query-parameter properties for `SearchFilter` (`search`), `OrderingFilter` (`ordering` with optional enum of valid field names), and `DjangoFilterBackend` (`filterset_fields` or `filterset_class.base_filters`). See [Filter and search parameters](#filter-and-search-parameters) below.
+- **Custom GET `@action` methods**: extracts typed parameters from the method signature using `inspect.signature()` + `typing.get_type_hints()`. Parameters with defaults are optional; those without are required. Parameters named `self`, `request`, `pk`, `format`, `args`, or `kwargs` are skipped.
 - **Fallback**: `{"type": "object"}` when serializer introspection fails (no `get_serializer_class`, read-only ViewSet, serializer requires an active request, etc.).
 
 DRF field → JSON Schema type mapping:
@@ -618,6 +760,56 @@ DRF field → JSON Schema type mapping:
 | `ListField` | `array` |
 | `DictField`, `JSONField` | `object` |
 | All others | `string` (fallback) |
+
+### Filter and search parameters
+
+When a ViewSet declares `filter_backends`, auto-discovery adds the corresponding query-parameter properties to the `list` action schema:
+
+```python
+from rest_framework.filters import OrderingFilter, SearchFilter
+from django_filters.rest_framework import DjangoFilterBackend
+
+class UserViewSet(ModelViewSet):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    filter_backends = [SearchFilter, OrderingFilter, DjangoFilterBackend]
+    search_fields = ["username", "email"]
+    ordering_fields = ["username", "created_at"]
+    filterset_fields = ["is_active", "role"]
+```
+
+This produces a `users.list` schema that includes `search`, `ordering` (with `enum` values `["username", "-username", "created_at", "-created_at"]`), `is_active`, and `role` as optional string parameters.
+
+The three supported backends:
+
+| Backend class | Parameter added | Notes |
+|---|---|---|
+| `SearchFilter` | `search: string` | Full-text search term |
+| `OrderingFilter` | `ordering: string` | Comma-separated field names. Prefix `-` for descending. Includes `enum` when `ordering_fields` is not `"__all__"`. |
+| `DjangoFilterBackend` | One entry per filterset field | Reads `filterset_fields` (list or dict) then falls back to `filterset_class.base_filters`. django-filter is an optional dependency; detected by class name. |
+
+Custom filter backends beyond these three are not introspected. Add them via `@mcp_tool` if you need richer schemas.
+
+### Custom `@action` GET schema example
+
+Typed parameters on a custom GET action are automatically surfaced as schema properties:
+
+```python
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+class ReportViewSet(ModelViewSet):
+    ...
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request, format: str = "json", limit: int = 100):
+        """Return a summary report."""
+        ...
+```
+
+This produces a `reports.summary` tool with optional `format` (string) and `limit` (integer) properties. Parameters without annotations fall back to type `string`.
+
+> **Tip:** For complex custom actions, use `@mcp_tool` to declare an explicit schema. Auto-derived schemas from signatures are a convenience for simple read-only actions.
 
 ---
 
@@ -740,9 +932,9 @@ Validate, authorise, and invoke a registered tool. Thread-safe. Steps:
 ## MCP gateway endpoint
 
 **URL:** configured by the host app — default `POST /mcp/`
-**Protocol:** JSON-RPC 2.0 over HTTP POST
+**Protocol:** JSON-RPC 2.0 / MCP `2025-03-26` (Streamable HTTP) over HTTP POST
 **Content-Type:** `application/json`
-**CSRF:** exempt (machine-to-machine endpoint)
+**CSRF:** exempt — `McpEndpointView` extends DRF `APIView`, which bypasses Django's CSRF middleware
 
 All requests and responses follow [JSON-RPC 2.0](https://www.jsonrpc.org/specification). The endpoint handles all MCP traffic through a single URL.
 
@@ -771,7 +963,7 @@ MCP protocol handshake. Call once before issuing other requests.
   "id": 1,
   "method": "initialize",
   "params": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-03-26",
     "clientInfo": {"name": "my-client", "version": "1.0"}
   }
 }
@@ -781,20 +973,33 @@ MCP protocol handshake. Call once before issuing other requests.
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-03-26",
     "serverInfo": {"name": "friese-mcp", "version": "0.1.0"},
     "capabilities": {"tools": {}, "resources": {}}
   }
 }
 ```
 
+The server always responds with its own `protocolVersion` (`2025-03-26`) regardless of what the client sends.
+
 #### `initialized`
 
-Client confirmation notification. Send after `initialize`. Returns an empty result.
+Client confirmation notification. Send after `initialize`.
+
+Per the MCP Streamable HTTP spec (2025-03-26), `initialized` is a **notification** — a JSON-RPC message with no `"id"` field. The server returns HTTP 202 Accepted with an empty body (see [Notifications](#notifications) below).
+
+```
+POST /mcp/
+Content-Type: application/json
+
+{"jsonrpc": "2.0", "method": "initialized"}
+
+→ HTTP 202 (empty body)
+```
 
 #### `tools/list`
 
-Enumerate all registered MCP tools. See [Auth and tools/list](#auth-and-toolslist) for the auth model.
+Enumerate registered MCP tools. When `contrib.agents` is installed and the caller's credential is linked to an active `AgentConnection` with a non-null `allowed_tools` list, only those tools are returned. See [Auth and tools/list](#auth-and-toolslist) for the full auth model.
 
 ```json
 // Request
@@ -863,6 +1068,75 @@ Returns an empty list in v1. Resources are not implemented.
 
 Returns `METHOD_NOT_FOUND` in v1.
 
+#### `help`
+
+Returns server metadata and usage hints. Designed for AI agents that need to self-orient without out-of-band documentation.
+
+```json
+// Request
+{"jsonrpc": "2.0", "id": 5, "method": "help"}
+
+// Response
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "server": "friese-mcp",
+    "protocolVersion": "2025-03-26",
+    "methods": ["initialize", "initialized", "tools/list", "tools/call", "resources/list", "ping", "help"],
+    "hints": {
+      "discovery": "Call tools/list to enumerate available tools and their inputSchema.",
+      "invocation": "Call tools/call with {name, arguments} to invoke a tool.",
+      "errors": "Tool errors return isError=true with content[0].text as JSON. Check the 'error' key for the message and 'detail' for field-level hints.",
+      "unknown_tool": "If tools/call returns -32601, the tool name is unrecognised. Re-run tools/list for the correct name — suggestions are included in the error data field."
+    }
+  }
+}
+```
+
+### Notifications
+
+Per the MCP Streamable HTTP spec (2025-03-26), a JSON-RPC **notification** is a message with no `"id"` key (distinct from `"id": null`). When the server receives a notification it MUST return HTTP 202 Accepted with an empty body — no JSON-RPC response body.
+
+```
+POST /mcp/
+Content-Type: application/json
+
+{"jsonrpc": "2.0", "method": "initialized"}
+
+→ HTTP/1.1 202 Accepted
+   (empty body)
+```
+
+All notifications are handled this way regardless of method name. Only `initialized` is logged at INFO level; other notifications are logged at DEBUG.
+
+### Error handling in `tools/call`
+
+Tool-level errors are returned as `isError: true` content blocks inside a JSON-RPC **success** response (HTTP 200, no `error` key). This keeps the JSON-RPC session alive and lets the agent inspect the error without the session terminating.
+
+| Error condition | `isError` content |
+|---|---|
+| Permission denied | `{"error": "<permission message>"}` |
+| DRF `ValidationError` (field errors) | `{"error": "Validation failed", "detail": {"field": ["message"]}}` |
+| DRF `ValidationError` (non-field) | `{"error": "<joined messages>"}` |
+| Django `ValidationError` | `{"error": "<joined messages>"}` |
+| `ValueError` from tool handler | `{"error": "<message>"}` |
+| Unhandled exception | `{"error": "Internal tool error"}` (details in server log) |
+
+Unknown tool names return a JSON-RPC `-32601 METHOD_NOT_FOUND` error with close-match suggestions in the `data` field:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "error": {
+    "code": -32601,
+    "message": "Unknown tool",
+    "data": "No tool named 'user.lis'. Did you mean: users.list, users.list_active?"
+  }
+}
+```
+
 ### HTTP-level behaviour
 
 | Condition | HTTP status | JSON-RPC error code |
@@ -877,9 +1151,11 @@ Returns `METHOD_NOT_FOUND` in v1.
 |---|---|---|
 | `-32700` | Parse error | Request body is not valid JSON |
 | `-32600` | Invalid Request | Missing/wrong `jsonrpc` field, `method` is not a string, or non-POST HTTP method |
-| `-32601` | Method Not Found | Unrecognised method name, or `resources/read` in v1 |
-| `-32602` | Invalid Params | Missing `name` in `tools/call`, `arguments` not an object, unknown tool name, permission denied, or input schema validation failure |
+| `-32601` | Method Not Found | Unrecognised method name, unknown tool name in `tools/call`, or `resources/read` in v1 |
+| `-32602` | Invalid Params | Missing/invalid `name` or `arguments` structure in `tools/call`; argument schema validation failure |
 | `-32603` | Internal Error | Gateway disabled (`FRIESE_MCP_ENABLED = False`) |
+
+> **Note on tool errors:** Permission denied, validation errors, and unhandled exceptions inside tool handlers are returned as `isError: true` content blocks (HTTP 200), not JSON-RPC error codes. Only structural call failures (`-32602`) and unknown tool names (`-32601`) use error codes.
 
 ---
 
@@ -947,19 +1223,8 @@ Builds a synthetic DRF `Request` from the tool arguments, instantiates the ViewS
 
 - Works with any standard DRF ViewSet under a synchronous WSGI server (gunicorn, uWSGI).
 - The original request's `user` is forwarded to the synthetic inner request so host-app middleware state (JWT payload, tenant scope) remains accessible.
-- Uses `django.test.RequestFactory` to construct the inner request. This is a legitimate production use of Django's stable public API; DRF's `APIRequestFactory` is a test-only subclass that adds a `format=` kwarg convenience that is not needed here.
+- Constructs the inner `HttpRequest` directly using `django.http.HttpRequest` and `io.BytesIO` — no `django.test` dependency in production code.
 - **Not suitable for async ViewSets.** Use a custom `BaseInvocationBackend` pointed at `FRIESE_MCP_INVOCATION_BACKEND` for async or Celery-delegated invocation.
-
-### `RequestContext`
-
-Optional carrier for application-specific context. Available for use in custom backends.
-
-| Field | Type | Description |
-|---|---|---|
-| `request` | `HttpRequest` | The raw Django HTTP request from the MCP gateway. |
-| `user` | `AbstractBaseUser \| AnonymousUser` | The authenticated user. |
-| `tenant` | `Any` | Optional tenant object (e.g. for multi-tenant apps). |
-| `extras` | `dict` | Arbitrary key/value context from host-app middleware. |
 
 ---
 
@@ -967,11 +1232,11 @@ Optional carrier for application-specific context. Available for use in custom b
 
 ### Auth and `tools/list`
 
-`tools/list` returns the full tool manifest (names, descriptions, input schemas) to any caller without performing authentication or permission checks. This is intentional.
+Beyond per-agent filtering (see [contrib.agents](#contribagents--per-agent-tool-allowlists)), `tools/list` performs no additional authentication or permission checks. Any caller whose request passes gateway-level auth sees the full tool manifest.
 
-**Rationale:** friese-mcp does not own authentication or authorisation. The host application is responsible for placing auth-gating in front of the MCP endpoint at the infrastructure level — API gateway, reverse proxy, Django middleware, or DRF authentication classes applied to the URL include. Adding permission filtering inside `tools/list` would pull the package into auth ownership that is explicitly out of v1 scope.
+**Rationale:** friese-mcp does not own authentication or authorisation. The host application is responsible for placing auth-gating in front of the MCP endpoint at the infrastructure level — API gateway, reverse proxy, Django middleware, or DRF authentication classes applied to the URL include. Adding per-tool permission filtering inside `tools/list` would pull the package into auth ownership that is explicitly out of v1 scope.
 
-**Recommended pattern:** Protect the entire `/mcp/` URL prefix with authentication middleware or an API gateway rule. All MCP traffic — including `tools/list` — passes through that gate.
+**Recommended pattern:** Protect the entire `/mcp/` URL prefix with authentication middleware or an API gateway rule. All MCP traffic — including `tools/list` — passes through that gate. Use `contrib.agents` when you need per-agent tool visibility scoping beyond that.
 
 ### Object-level permissions not enforced
 
@@ -989,7 +1254,7 @@ When a tool raises an unhandled exception, `tools/call` returns `{"isError": tru
 
 ### CSRF and session authentication
 
-`McpEndpointView` extends DRF's `APIView`. DRF exempts `APIView` from Django's CSRF middleware by default. However, if `SessionAuthentication` is in `FRIESE_MCP_AUTHENTICATION_CLASSES`, DRF will enforce CSRF for session-authenticated requests (standard DRF behaviour). MCP clients should use token authentication (Bearer / API key) rather than session cookies to avoid this complexity.
+`McpEndpointView` extends DRF's `APIView`. DRF exempts `APIView` from Django's CSRF middleware by default, so no `@csrf_exempt` decorator is needed. However, if `SessionAuthentication` is included in `FRIESE_MCP_AUTHENTICATION_CLASSES`, DRF will enforce CSRF for session-authenticated requests (standard DRF behaviour). MCP clients should use token authentication (Bearer / API key) rather than session cookies to avoid this complexity.
 
 ### No SSE / streaming in v1
 
