@@ -216,7 +216,7 @@ FRIESE_MCP_PERMISSION_CLASSES = [
 
 **Type:** `str` | **Default:** `"friese-mcp"`
 
-The `serverInfo.name` field returned in the `initialize` handshake response.
+The `serverInfo.name` field returned in the `initialize` handshake response. `serverInfo.version` is read automatically from the installed package metadata (`importlib.metadata`) and cannot be overridden via settings.
 
 ```python
 FRIESE_MCP_SERVER_NAME = "my-product-mcp"
@@ -260,6 +260,27 @@ When `True`, incoming `tools/call` argument keys are normalised from camelCase t
 ```python
 FRIESE_MCP_NORMALIZE_INPUT_CASE = True
 ```
+
+### `FRIESE_MCP_EXPOSE_ERRORS`
+
+**Type:** `bool` | **Default:** `settings.DEBUG`
+
+Controls whether the raw exception message is included in `isError: true` tool responses for unhandled exceptions.
+
+| Value | Error text returned to caller |
+|---|---|
+| `True` (or absent with `DEBUG = True`) | `str(exc)` — full exception message |
+| `False` (or absent with `DEBUG = False`) | `"Internal tool error"` — safe generic message |
+
+```python
+# Always expose errors (e.g. a fully internal deployment)
+FRIESE_MCP_EXPOSE_ERRORS = True
+
+# Always suppress errors (e.g. public-facing API)
+FRIESE_MCP_EXPOSE_ERRORS = False
+```
+
+When the setting is absent, it inherits `settings.DEBUG`: errors are verbose in development and suppressed in production by default. Full error details are always logged server-side via `logger.exception` regardless of this setting.
 
 ---
 
@@ -1037,6 +1058,41 @@ When `input_schema` is set on an `@mcp_action`, the `params` dict is validated a
 from friese_mcp import mcp_dispatcher, mcp_action
 ```
 
+#### Dispatcher precedence over auto-discovery
+
+When a `@mcp_dispatcher` is registered for a resource name, friese-mcp automatically suppresses any auto-discovered ViewSet tools whose resource name conflicts. The dispatcher declaration is authoritative for its resource's MCP surface — no `@mcp_ignore` needed on the underlying ViewSet.
+
+**Why:** Writing `@mcp_dispatcher("exercises")` is an explicit declaration that you own the `exercises` resource. If auto-discovery also emits `exercise.list`, `exercise.create`, etc. from the underlying ViewSet, both sets of names appear in `tools/list` but only the dispatcher routes correctly — the flat names return `-32601`. The auto-suppression eliminates this split-brain at startup rather than at call time.
+
+**Match rule:** Strict prefix match. A dispatcher named `exercises` suppresses any auto-discovered tool whose resource prefix is `exercises` (exact) or `exercise` (singular — strips one trailing `s`). No fuzzy matching beyond that.
+
+| Auto-discovered tool | Dispatcher | Suppressed? |
+|---|---|---|
+| `exercise.list` | `exercises` | Yes — singular match |
+| `exercises.custom` | `exercises` | Yes — exact match |
+| `programs.list` | `exercises` | No — different resource |
+| `users.list` | `users` | Yes — exact match |
+
+**Suppression logging:** When a tool is suppressed, friese-mcp logs at INFO:
+
+```
+friese_mcp: suppressing auto-discovered tool 'exercise.list' — shadowed by dispatcher 'exercises'
+```
+
+Check your logs if expected auto-discovered tools go missing — a misspelled dispatcher name would silently suppress the wrong resource without this signal.
+
+**Three scenarios:**
+
+1. **Auto-discovery only** (no `@mcp_dispatcher` registered) — nothing suppressed, unchanged behaviour. All ViewSet tools appear in `tools/list` as usual.
+
+2. **Dispatchers only** (`FRIESE_MCP_AUTODISCOVER = False`, or no matching ViewSets) — nothing to suppress. Dispatchers register and appear in `tools/list` normally.
+
+3. **Mixed** (dispatchers for some resources, auto-discovery for others) — only the shadowed ViewSet tools are suppressed. Other ViewSets register normally alongside the dispatchers.
+
+**Works correctly with Darth Claude and fresh projects:** Darth Claude uses custom handlers, not DRF ViewSets — auto-discovery finds nothing and suppression never fires. A fresh project with only dispatchers or only auto-discovery is also unaffected.
+
+**Intentional-both edge case:** If you genuinely need both a `@mcp_dispatcher("exercises")` and flat auto-discovered `exercise.*` tools in `tools/list`, the suppression will remove the flat tools. This is intentional — advertising both would recreate the split-brain bug. Use distinct resource names if you need both surfaces.
+
 ### `@mcp_resource`
 
 Expose server-side content as an MCP resource via `resources/list` and `resources/read`. Resources are ideal for static or semi-static content that agents should read rather than invoke — configuration files, schema definitions, domain reference data.
@@ -1292,7 +1348,7 @@ MCP protocol handshake. Call once before issuing other requests.
 }
 ```
 
-The server always responds with its own `protocolVersion` (`2025-03-26`) regardless of what the client sends.
+The server always responds with its own `protocolVersion` (`2025-03-26`) regardless of what the client sends. `serverInfo.name` is controlled by `FRIESE_MCP_SERVER_NAME`. `serverInfo.version` is read from the installed package metadata via `importlib.metadata` and falls back to `"unknown"` when the package is not installed via a standard distribution (e.g. a bare source checkout with no `pip install`).
 
 #### `initialized`
 
@@ -1444,7 +1500,7 @@ Unknown tool names return a JSON-RPC `-32601 METHOD_NOT_FOUND` error with close-
   "error": {
     "code": -32601,
     "message": "Unknown tool",
-    "data": "No tool named 'user.lis'. Did you mean: users.list, users.list_active?"
+    "data": "No tool named 'user.lis'. Did you mean: users.list, users.list_active? Call tools/list to refresh your available tools — the server manifest may have changed."
   }
 }
 ```
@@ -1534,9 +1590,12 @@ When `FRIESE_MCP_TOOLS_PAGE_SIZE` is absent (the default), `tools/list` behaves 
 
 | Condition | HTTP status | JSON-RPC error code |
 |---|---|---|
-| Non-POST request | 405 | `-32600` (Invalid Request) |
+| Non-POST request (except DELETE) | 405 | `-32600` (Invalid Request) |
+| DELETE request | 200 | `{}` empty body — stateless no-op |
 | `FRIESE_MCP_ENABLED = False` | 503 | `-32603` (Internal Error) |
 | All other responses | 200 | See error codes below |
+
+**DELETE no-op:** friese-mcp accepts `DELETE /mcp/` and returns HTTP 200 `{}` with no authentication required. This allows agent clients that send a session-cleanup `DELETE` at the end of a session to do so without error, even though friese-mcp is stateless and holds no session state to clean up.
 
 ### JSON-RPC error codes
 

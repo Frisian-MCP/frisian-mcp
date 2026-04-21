@@ -9,7 +9,7 @@ import pytest
 from rest_framework import serializers
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
-from friese_mcp.apps import _apply_tool_filters
+from friese_mcp.apps import _apply_tool_filters, _suppress_dispatcher_shadowed
 from friese_mcp.backends.base import ToolDefinition
 from friese_mcp.backends.discovery import (
     DRFSyncDiscovery,
@@ -661,3 +661,96 @@ class TestCustomActionSchemaInGetInputSchema:
         # Signature introspection should not add 'request' or 'self' to list schema.
         assert "self" not in schema.get("properties", {})
         assert "request" not in schema.get("properties", {})
+
+
+# ---------------------------------------------------------------------------
+# TestSuppressDispatcherShadowed
+# ---------------------------------------------------------------------------
+
+
+def _tool_def(name: str) -> ToolDefinition:
+    """Return a minimal ToolDefinition with the given name."""
+    return ToolDefinition(
+        name=name,
+        description="",
+        input_schema={"type": "object", "properties": {}},
+        permission_classes=(),
+        source="auto",
+    )
+
+
+class TestSuppressDispatcherShadowed:
+    """Unit tests for _suppress_dispatcher_shadowed."""
+
+    def test_no_dispatchers_returns_all(self) -> None:
+        """With no dispatchers, all tools are returned unchanged."""
+        tools = [_tool_def("exercises.list"), _tool_def("exercises.create")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset())
+        assert [t.name for t in result] == ["exercises.list", "exercises.create"]
+
+    def test_exact_match_suppresses_tool(self) -> None:
+        """Discovered tool with same resource prefix as dispatcher is suppressed."""
+        tools = [_tool_def("exercises.list"), _tool_def("exercises.create")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        assert result == []
+
+    def test_singular_match_suppresses_tool(self) -> None:
+        """Dispatcher 'exercises' suppresses discovered 'exercise.list'."""
+        tools = [_tool_def("exercise.list"), _tool_def("exercise.retrieve")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        assert result == []
+
+    def test_unrelated_tools_not_suppressed(self) -> None:
+        """Dispatcher 'exercises' does not affect 'orders.list'."""
+        tools = [_tool_def("orders.list"), _tool_def("orders.create")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        assert [t.name for t in result] == ["orders.list", "orders.create"]
+
+    def test_mixed_resources_suppresses_only_matching(self) -> None:
+        """Only tools whose resource matches the dispatcher are removed."""
+        tools = [
+            _tool_def("exercises.list"),
+            _tool_def("exercises.create"),
+            _tool_def("orders.list"),
+        ]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        assert [t.name for t in result] == ["orders.list"]
+
+    def test_multiple_dispatchers_suppress_respective_tools(self) -> None:
+        """Two dispatchers each suppress their own resource tools."""
+        tools = [
+            _tool_def("exercises.list"),
+            _tool_def("programs.list"),
+            _tool_def("orders.list"),
+        ]
+        result = _suppress_dispatcher_shadowed(
+            tools, frozenset({"exercises", "programs"})
+        )
+        assert [t.name for t in result] == ["orders.list"]
+
+    def test_non_dotted_tool_exact_match(self) -> None:
+        """A tool without a dot is matched by its full name."""
+        tools = [_tool_def("exercises")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        assert result == []
+
+    def test_non_dotted_tool_no_match(self) -> None:
+        """A tool without a dot is not suppressed when name differs."""
+        tools = [_tool_def("orders")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        assert [t.name for t in result] == ["orders"]
+
+    def test_empty_tool_list(self) -> None:
+        """Empty tool list returns empty list regardless of dispatchers."""
+        result = _suppress_dispatcher_shadowed([], frozenset({"exercises"}))
+        assert result == []
+
+    def test_suppressed_tools_logged(self, caplog: Any) -> None:
+        """Suppressed tools are logged at INFO level."""
+        import logging
+
+        tools = [_tool_def("exercises.list")]
+        with caplog.at_level(logging.INFO, logger="friese_mcp.apps"):
+            _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        assert any("exercises.list" in r.message for r in caplog.records)
+        assert any("exercises" in r.message for r in caplog.records)

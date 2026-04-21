@@ -16,6 +16,48 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _suppress_dispatcher_shadowed(
+    tool_defs: list[ToolDefinition],
+    dispatcher_names: frozenset[str],
+) -> list[ToolDefinition]:
+    """
+    Remove auto-discovered tools that are shadowed by a registered dispatcher.
+
+    A discovered tool ``{resource}.{action}`` is suppressed when *resource*
+    exactly matches a dispatcher name, or when the dispatcher name is the
+    plural form of *resource* (e.g. dispatcher ``"exercises"`` suppresses
+    ``"exercise.list"``).
+
+    Args:
+        tool_defs: The filtered list of auto-discovered tool definitions.
+        dispatcher_names: Dispatcher tool names already in the registry.
+
+    Returns:
+        A new list with shadowed tools removed; *tool_defs* is not mutated.
+
+    """
+    if not dispatcher_names:
+        return tool_defs
+
+    result: list[ToolDefinition] = []
+    for tool_def in tool_defs:
+        prefix = tool_def.name.split(".")[0] if "." in tool_def.name else tool_def.name
+        matched: str | None = None
+        for dname in dispatcher_names:
+            if prefix == dname or (dname.endswith("s") and prefix == dname[:-1]):
+                matched = dname
+                break
+        if matched is not None:
+            logger.info(
+                "friese_mcp: suppressing auto-discovered tool %r — shadowed by dispatcher %r",
+                tool_def.name,
+                matched,
+            )
+        else:
+            result.append(tool_def)
+    return result
+
+
 def _apply_tool_filters(tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
     """
     Apply settings-based allowlist / denylist filters to discovered tool definitions.
@@ -141,7 +183,11 @@ class FrieseMcpConfig(AppConfig):
 
         discovery = get_discovery_backend()
         invocation = get_invocation_backend()
-        tool_defs = _apply_tool_filters(discovery.discover_tools())
+        dispatcher_names = tool_registry.list_dispatcher_names()
+        tool_defs = _suppress_dispatcher_shadowed(
+            _apply_tool_filters(discovery.discover_tools()),
+            dispatcher_names,
+        )
 
         for tool_def in tool_defs:
             tool_registry.register(
