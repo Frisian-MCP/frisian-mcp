@@ -8,6 +8,7 @@ from typing import Any, TypeVar
 from rest_framework.permissions import BasePermission
 
 from friese_mcp.registry import tool_registry
+from friese_mcp.resources import ResourceDefinition, resource_registry
 
 _CallableT = TypeVar("_CallableT", bound=Callable[..., Any])
 _AnyT = TypeVar("_AnyT")
@@ -158,6 +159,44 @@ def mcp_dispatcher(
             is_dispatcher=True,
         )
         return cls
+
+    return decorator
+
+
+def mcp_resource(
+    uri_template: str,
+    name: str,
+    description: str = "",
+    mime_type: str = "text/plain",
+) -> Callable[[_CallableT], _CallableT]:
+    """
+    Register the decorated callable as an MCP resource.
+
+    The decorated function must accept ``(uri: str, request: HttpRequest)``
+    and return the resource contents as a string.
+
+    Args:
+        uri_template: Resource URI (may use ``{variable}`` placeholders).
+        name: Human-readable resource name shown in ``resources/list``.
+        description: Optional description shown in ``resources/list``.
+        mime_type: MIME type of the returned content.  Defaults to ``"text/plain"``.
+
+    Returns:
+        The original callable, unchanged, registered as a side-effect.
+
+    """
+
+    def decorator(fn: _CallableT) -> _CallableT:
+        resource_registry.register(
+            ResourceDefinition(
+                uri_template=uri_template,
+                name=name,
+                fn=fn,  # type: ignore[arg-type]
+                description=description,
+                mime_type=mime_type,
+            )
+        )
+        return fn
 
     return decorator
 

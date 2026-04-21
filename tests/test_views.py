@@ -206,10 +206,10 @@ class TestMethodHandlers:
         data = _response_data(_call(rf, "resources/list"))
         assert data["result"]["resources"] == []
 
-    def test_resources_read_returns_method_not_found(self, rf: RequestFactory) -> None:
-        """resources/read returns METHOD_NOT_FOUND in v1."""
-        data = _response_data(_call(rf, "resources/read", {"uri": "mcp://test"}))
-        assert data["error"]["code"] == METHOD_NOT_FOUND
+    def test_resources_read_unknown_uri_returns_invalid_params(self, rf: RequestFactory) -> None:
+        """resources/read with an unknown URI returns INVALID_PARAMS."""
+        data = _response_data(_call(rf, "resources/read", {"uri": "mcp://unknown"}))
+        assert data["error"]["code"] == INVALID_PARAMS
 
     def test_unknown_method_returns_method_not_found(self, rf: RequestFactory) -> None:
         """An unrecognised method name returns METHOD_NOT_FOUND."""
