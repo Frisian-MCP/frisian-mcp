@@ -115,6 +115,13 @@ class ToolRegistry:
         with self._lock:
             return self._tools.get(name)
 
+    def list_dispatcher_names(self) -> frozenset[str]:
+        """Return the names of all tools registered via ``@mcp_dispatcher``."""
+        with self._lock:
+            return frozenset(
+                entry.name for entry in self._tools.values() if entry.is_dispatcher
+            )
+
     def list_tools(self) -> list[dict[str, Any]]:
         """
         Return the tool listing in MCP ``tools/list`` response format.

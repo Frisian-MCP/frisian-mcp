@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import BasePermission
 
@@ -80,6 +80,22 @@ def _response_data(response: Any) -> dict[str, Any]:
 
 class TestHttpGuards:
     """Tests for HTTP-method and feature-flag guards in McpEndpointView."""
+
+    def test_delete_returns_200(self, rf: RequestFactory) -> None:
+        """DELETE requests return HTTP 200 (stateless no-op for session cleanup)."""
+        request = rf.delete("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        assert response.status_code == 200
+
+    def test_delete_body_is_empty_object(self, rf: RequestFactory) -> None:
+        """DELETE response body is an empty JSON object."""
+        import json as _json
+
+        request = rf.delete("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        assert _json.loads(response.content) == {}
 
     def test_get_returns_405(self, rf: RequestFactory) -> None:
         """GET requests to the MCP endpoint return 405 Method Not Allowed."""
@@ -184,6 +200,17 @@ class TestMethodHandlers:
         data = _response_data(_call(rf, "initialize", {}))
         assert data["result"]["serverInfo"]["name"] == "my-gateway"
 
+    def test_initialize_server_name_default(self, rf: RequestFactory) -> None:
+        """Initialize serverInfo.name defaults to 'friese-mcp'."""
+        data = _response_data(_call(rf, "initialize", {}))
+        assert data["result"]["serverInfo"]["name"] == "friese-mcp"
+
+    def test_initialize_server_version_present(self, rf: RequestFactory) -> None:
+        """Initialize serverInfo.version is present and non-empty."""
+        data = _response_data(_call(rf, "initialize", {}))
+        version = data["result"]["serverInfo"]["version"]
+        assert isinstance(version, str) and version
+
     def test_initialized_returns_empty_result(self, rf: RequestFactory) -> None:
         """Initialized sent as a request (with id) returns a success response."""
         data = _response_data(_call(rf, "initialized"))
@@ -283,6 +310,18 @@ class TestToolsCall:
             )
 
         assert data["error"]["code"] == METHOD_NOT_FOUND
+
+    def test_tools_call_unknown_tool_includes_refresh_hint(self, rf: RequestFactory) -> None:
+        """tools/call -32601 error data includes the tools/list refresh hint."""
+        isolated = ToolRegistry()
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(
+                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
+            )
+
+        assert "tools/list" in data["error"]["data"]
+        assert "manifest" in data["error"]["data"]
 
     def test_tools_call_missing_name(self, rf: RequestFactory) -> None:
         """tools/call without a 'name' field returns INVALID_PARAMS."""
@@ -439,6 +478,58 @@ class TestValueErrorSurfacing:
         assert data["result"]["isError"] is True
         content = json.loads(data["result"]["content"][0]["text"])
         assert content["error"] == "Internal tool error"
+
+
+# ---------------------------------------------------------------------------
+# FRIESE_MCP_EXPOSE_ERRORS — configurable exception verbosity
+# ---------------------------------------------------------------------------
+
+
+class TestExposeErrors:
+    """FRIESE_MCP_EXPOSE_ERRORS: configurable exception verbosity."""
+
+    def _register_boom(self, msg: str) -> ToolRegistry:
+        def _boom(arguments: dict[str, Any], request: Any) -> None:
+            raise RuntimeError(msg)
+
+        reg = ToolRegistry()
+        reg.register("boom", _boom, "Boom", {})
+        return reg
+
+    def test_default_returns_generic_message(self, rf: RequestFactory) -> None:
+        """Without the setting (and DEBUG=False), returns 'Internal tool error'."""
+        reg = self._register_boom("secret detail")
+        with patch("friese_mcp.views.tool_registry", reg):
+            data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "Internal tool error"
+
+    @override_settings(FRIESE_MCP_EXPOSE_ERRORS=True)
+    def test_expose_true_returns_exception_message(self, rf: RequestFactory) -> None:
+        """FRIESE_MCP_EXPOSE_ERRORS=True surfaces str(exc)."""
+        reg = self._register_boom("very secret detail")
+        with patch("friese_mcp.views.tool_registry", reg):
+            data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "very secret detail"
+
+    @override_settings(FRIESE_MCP_EXPOSE_ERRORS=False, DEBUG=True)
+    def test_expose_false_overrides_debug(self, rf: RequestFactory) -> None:
+        """FRIESE_MCP_EXPOSE_ERRORS=False suppresses detail even when DEBUG=True."""
+        reg = self._register_boom("secret detail")
+        with patch("friese_mcp.views.tool_registry", reg):
+            data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "Internal tool error"
+
+    @override_settings(DEBUG=True)
+    def test_debug_true_without_setting_exposes_detail(self, rf: RequestFactory) -> None:
+        """DEBUG=True without explicit setting surfaces str(exc)."""
+        reg = self._register_boom("debug detail")
+        with patch("friese_mcp.views.tool_registry", reg):
+            data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["error"] == "debug detail"
 
 
 # ---------------------------------------------------------------------------

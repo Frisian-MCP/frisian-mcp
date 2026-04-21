@@ -31,6 +31,7 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
 
 import base64
 import difflib
+import importlib.metadata
 import json
 import logging
 import uuid
@@ -61,6 +62,11 @@ from friese_mcp.registry import ToolInputError, tool_registry
 from friese_mcp.resources import ResourceNotFoundError, resource_registry
 
 logger = logging.getLogger(__name__)
+
+_REFRESH_HINT = (
+    " Call tools/list to refresh your available tools"
+    " — the server manifest may have changed."
+)
 
 # ---------------------------------------------------------------------------
 # JSON-RPC helpers
@@ -250,6 +256,14 @@ def _tool_registry_dispatch(
 # ---------------------------------------------------------------------------
 
 
+def _server_version() -> str:
+    """Return the installed friese-mcp package version, or ``'unknown'`` as fallback."""
+    try:
+        return importlib.metadata.version("friese-mcp")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def _handle_initialize(request_id: JsonRpcId, params: JsonDict) -> JsonResponse:
     """Handle ``initialize`` — MCP protocol handshake."""
     client_info: Any = params.get("clientInfo", {})
@@ -271,7 +285,10 @@ def _handle_initialize(request_id: JsonRpcId, params: JsonDict) -> JsonResponse:
         request_id,
         {
             "protocolVersion": MCP_PROTOCOL_VERSION,
-            "serverInfo": {"name": server_name, "version": "0.1.0"},
+            "serverInfo": {
+                "name": server_name,
+                "version": _server_version(),
+            },
             "capabilities": {"tools": {}, "resources": {}},
         },
     )
@@ -420,6 +437,7 @@ def _handle_tools_call(
         data = str(exc)
         if suggestions:
             data += f". Did you mean: {', '.join(suggestions)}?"
+        data += _REFRESH_HINT
         return _jsonrpc_error(request_id, METHOD_NOT_FOUND, "Unknown tool", data)
     except ToolInputError as exc:
         return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc))
@@ -470,13 +488,23 @@ def _handle_tools_call(
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.exception("tool_execution_error", extra={"tool": tool_name, "error": str(exc)})
-        # Do NOT surface the raw exception message to the caller — it may contain
-        # internal details (DB column names, file paths, stack frames).  The full
-        # error is already captured in the server log above.
         return _jsonrpc_success(
             request_id,
             {
-                "content": [{"type": "text", "text": json.dumps({"error": "Internal tool error"})}],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "error": (
+                                    str(exc)
+                                    if getattr(settings, "FRIESE_MCP_EXPOSE_ERRORS", settings.DEBUG)
+                                    else "Internal tool error"
+                                )
+                            }
+                        ),
+                    }
+                ],
                 "isError": True,
             },
         )
@@ -718,6 +746,10 @@ class McpEndpointView(APIView):
                 request,
             )
         return _maybe_sse(_parse_and_dispatch(request), request)
+
+    def delete(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse:
+        """Handle DELETE — stateless no-op for agent session-cleanup calls."""
+        return JsonResponse({}, status=200)
 
     def http_method_not_allowed(  # type: ignore[override]
         self, request: DRFRequest, *args: Any, **kwargs: Any
