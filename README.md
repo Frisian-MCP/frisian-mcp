@@ -21,6 +21,9 @@ friese-mcp exposes your existing Django REST Framework ViewSets as [Model Contex
   - [contrib.agents — per-agent tool allowlists](#contribagents--per-agent-tool-allowlists)
 - [Auto-discovery](#auto-discovery)
 - [Decorators](#decorators)
+  - [@mcp_tool](#mcp_tool)
+  - [@mcp_ignore](#mcp_ignore)
+  - [@mcp_dispatcher and @mcp_action](#mcp_dispatcher-and-mcp_action)
 - [ToolRegistry API](#toolregistry-api)
 - [MCP gateway endpoint](#mcp-gateway-endpoint)
 - [Pluggable backend architecture](#pluggable-backend-architecture)
@@ -872,6 +875,162 @@ class UserViewSet(ModelViewSet):
 
 `@mcp_ignore` sets `_mcp_ignore = True` on the target object. The discovery backend checks this attribute before registering each ViewSet or action.
 
+### `@mcp_dispatcher` and `@mcp_action`
+
+Register a class as a single MCP **dispatcher tool** — one tool name that routes to multiple named actions. Use `@mcp_dispatcher` when you have a family of related operations that share context (e.g. tasks, rooms, projects): it reduces tool count and enables progressive disclosure via built-in help-mode.
+
+**When to use `@mcp_dispatcher` vs `@mcp_tool`:**
+
+| | `@mcp_tool` | `@mcp_dispatcher` |
+|---|---|---|
+| Structure | One callable, one tool | One class, one tool, many actions |
+| Best for | Standalone, independent operations | Related operations sharing context or a namespace |
+| Tool count | One tool per function | One tool for the whole family |
+| Help mode | None | Built-in — call without `action` or with `action="help"` |
+
+```python
+from django.http import HttpRequest
+from friese_mcp import mcp_dispatcher, mcp_action
+
+@mcp_dispatcher(name="tasks", description="Manage project tasks.")
+class TasksDispatcher:
+
+    @mcp_action(
+        name="create",
+        description="Create a new task.",
+        params={"title": "Task title", "priority": "Integer 1–5 (default 3)"},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "priority": {"type": "integer", "minimum": 1, "maximum": 5},
+            },
+            "required": ["title"],
+        },
+    )
+    def create(self, request: HttpRequest, params: dict) -> dict:
+        task = Task.objects.create(
+            title=params["title"],
+            priority=params.get("priority", 3),
+            created_by=request.user,
+        )
+        return {"id": task.pk, "title": task.title}
+
+    @mcp_action(
+        name="list",
+        description="List tasks, optionally filtered by status.",
+        params={"status": "Filter by status: open, closed, all (default all)"},
+    )
+    def list(self, request: HttpRequest, params: dict) -> dict:
+        qs = Task.objects.all()
+        if params.get("status") in ("open", "closed"):
+            qs = qs.filter(status=params["status"])
+        return {"tasks": list(qs.values("id", "title", "status"))}
+
+    @mcp_action(
+        name="get",
+        description="Retrieve a single task by ID.",
+        params={"id": "Task ID"},
+        input_schema={
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "required": ["id"],
+        },
+    )
+    def get(self, request: HttpRequest, params: dict) -> dict:
+        task = Task.objects.get(pk=params["id"])
+        return {"id": task.pk, "title": task.title, "status": task.status}
+```
+
+**`@mcp_dispatcher(name, description)`** — class decorator. Scans the class for `@mcp_action` methods, instantiates the class once at decoration time, and registers it as a single MCP tool with a compact `inputSchema`. The class instance is reused across calls; `request` is passed per-call.
+
+**`@mcp_action(name, description, params=None, input_schema=None)`** — method decorator. Marks a method as a dispatchable action. Does not alter the method's behaviour.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | `str` | Yes | Action name used as the `action` argument value (e.g. `"create"`). |
+| `description` | `str` | Yes | Human-readable description shown in help-mode responses. |
+| `params` | `dict[str, str]` | No | Mapping of param name → human-readable hint. Shown in help-mode. |
+| `input_schema` | `dict` | No | JSON Schema (draft-07) for server-side validation of `params` before the method is called. |
+
+Action method signature:
+
+```python
+def action_name(self, request: HttpRequest, params: dict) -> dict:
+    ...
+```
+
+`params` is the raw dict from the `params` key of the incoming `tools/call` arguments (defaulting to `{}`).
+
+#### Help mode
+
+Call the dispatcher tool without an `action` argument, or with `action="help"`, to receive a structured listing of all available actions:
+
+```json
+// Request
+{
+  "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+  "params": {"name": "tasks", "arguments": {"action": "help"}}
+}
+
+// Response
+{
+  "jsonrpc": "2.0", "id": 1,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "{\"help\": true, \"dispatcher\": \"tasks\", \"actions\": [{\"name\": \"create\", \"description\": \"Create a new task.\", \"params\": {\"title\": \"Task title\", \"priority\": \"Integer 1-5 (default 3)\"}, \"input_schema\": {...}}, ...]}"
+    }],
+    "isError": false
+  }
+}
+```
+
+If the caller sends an unrecognised action name, the dispatcher returns a `LookupError` with a close-match suggestion (e.g. `"Unknown action 'creat'. Did you mean: 'create'?"`), surfaced as `isError: true`.
+
+#### Generated `inputSchema`
+
+`@mcp_dispatcher` generates a compact schema automatically — no hand-written JSON Schema needed at the tool level:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["create", "list", "get"],
+      "description": "Operation to perform. Omit or use 'help' to list all available actions and their required parameters."
+    },
+    "params": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Parameters for the chosen action. See help for details."
+    }
+  }
+}
+```
+
+Per-action parameter schemas live in `@mcp_action(input_schema=...)` and are applied server-side, not in the top-level tool schema. This keeps `tools/list` compact while still enforcing per-action constraints at call time.
+
+#### Server-side validation
+
+When `input_schema` is set on an `@mcp_action`, the `params` dict is validated against that schema before the method is called. Validation failure returns `isError: true` without invoking the method:
+
+```json
+{
+  "content": [{"type": "text", "text": "{\"error\": \"Invalid params for action 'create': 'title' is a required property\"}"}],
+  "isError": true
+}
+```
+
+#### Export
+
+`mcp_dispatcher` and `mcp_action` are exported from `friese_mcp` directly:
+
+```python
+from friese_mcp import mcp_dispatcher, mcp_action
+```
+
 ---
 
 ## ToolRegistry API
@@ -1205,6 +1364,7 @@ Immutable dataclass produced by discovery backends and consumed by invocation ba
 | `input_schema` | `dict` | JSON Schema (draft-07). |
 | `permission_classes` | `tuple[type[BasePermission], ...]` | DRF permission classes. |
 | `source` | `"auto" \| "decorator"` | How this tool was registered. |
+| `is_dispatcher` | `bool` | `True` when the tool was registered via `@mcp_dispatcher`. |
 | `view_class` | `type \| None` | The ViewSet class (`None` for decorator tools). |
 | `action` | `str \| None` | The ViewSet action name (`None` for decorator tools). |
 

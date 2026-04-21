@@ -32,7 +32,7 @@ from rest_framework.permissions import BasePermission
 
 
 @dataclasses.dataclass(frozen=True)
-class ToolDefinition:
+class ToolDefinition:  # pylint: disable=too-many-instance-attributes
     """
     Immutable descriptor for a single MCP tool.
 
@@ -61,6 +61,7 @@ class ToolDefinition:
     source: Literal["auto", "decorator"]
     view_class: type | None = None
     action: str | None = None
+    is_dispatcher: bool = False
 
 
 @dataclasses.dataclass
