@@ -29,9 +29,11 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
   separately by :data:`~friese_mcp.registry.tool_registry`.
 """
 
+import base64
 import difflib
 import json
 import logging
+import uuid
 from collections.abc import Generator
 from typing import Any
 
@@ -225,6 +227,9 @@ def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse:
         _stream(), content_type="text/event-stream"
     )
     sse["Cache-Control"] = "no-cache"
+    for header, value in response.items():
+        if header.lower() not in ("content-type", "content-length"):
+            sse[header] = value
     return sse
 
 
@@ -262,7 +267,7 @@ def _handle_initialize(request_id: JsonRpcId, params: JsonDict) -> JsonResponse:
     )
 
     server_name: str = getattr(settings, "FRIESE_MCP_SERVER_NAME", "friese-mcp")
-    return _jsonrpc_success(
+    response = _jsonrpc_success(
         request_id,
         {
             "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -270,6 +275,9 @@ def _handle_initialize(request_id: JsonRpcId, params: JsonDict) -> JsonResponse:
             "capabilities": {"tools": {}, "resources": {}},
         },
     )
+    if getattr(settings, "FRIESE_MCP_SESSION_ID_HEADER", True):
+        response["Mcp-Session-Id"] = str(uuid.uuid4())
+    return response
 
 
 def _handle_initialized(request_id: JsonRpcId) -> JsonResponse:
@@ -278,7 +286,27 @@ def _handle_initialized(request_id: JsonRpcId) -> JsonResponse:
     return _jsonrpc_success(request_id, {})
 
 
-def _handle_tools_list(request_id: JsonRpcId, request: Any) -> JsonResponse:
+def _decode_cursor(cursor: str) -> int:
+    """
+    Decode a base64url cursor string to an integer offset.
+
+    Raises :exc:`ValueError` when *cursor* is not a valid base64url-encoded
+    integer so the caller can surface INVALID_PARAMS to the client.
+    """
+    try:
+        return int(base64.urlsafe_b64decode(cursor.encode()).decode())
+    except Exception as exc:
+        raise ValueError(f"Invalid cursor: {cursor!r}") from exc
+
+
+def _encode_cursor(offset: int) -> str:
+    """Encode an integer offset as a base64url cursor string."""
+    return base64.urlsafe_b64encode(str(offset).encode()).decode()
+
+
+def _handle_tools_list(
+    request_id: JsonRpcId, request: Any, params: JsonDict
+) -> JsonResponse:
     """
     Handle ``tools/list`` — return the tool manifest from the registry.
 
@@ -286,6 +314,12 @@ def _handle_tools_list(request_id: JsonRpcId, request: Any) -> JsonResponse:
     an active :class:`~friese_mcp.contrib.agents.models.AgentConnection` with a
     non-null ``allowed_tools`` list, only those tools are included in the
     response.  All other callers receive the full manifest.
+
+    When ``FRIESE_MCP_TOOLS_PAGE_SIZE`` is set, results are paginated using an
+    opaque base64url cursor that encodes a simple integer offset.  Clients pass
+    the returned ``nextCursor`` in subsequent requests to advance through pages.
+    When the setting is absent, all tools are returned in a single response with
+    no ``nextCursor`` key (default, zero-behavior-change).
 
     **Auth note:** Beyond per-agent filtering, this handler does not perform
     additional authentication or permission checks.  The host application is
@@ -298,7 +332,25 @@ def _handle_tools_list(request_id: JsonRpcId, request: Any) -> JsonResponse:
     if conn is not None and conn.allowed_tools is not None:
         allowed: frozenset[str] = frozenset(conn.allowed_tools)
         tools = [t for t in tools if t["name"] in allowed]
-    return _jsonrpc_success(request_id, {"tools": tools})
+
+    page_size: int | None = getattr(settings, "FRIESE_MCP_TOOLS_PAGE_SIZE", None)
+    if page_size is None:
+        return _jsonrpc_success(request_id, {"tools": tools})
+
+    cursor_str: Any = params.get("cursor")
+    offset = 0
+    if cursor_str is not None:
+        try:
+            offset = _decode_cursor(str(cursor_str))
+        except ValueError:
+            return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid cursor")
+
+    page = tools[offset : offset + page_size]
+    result: dict[str, Any] = {"tools": page}
+    next_offset = offset + page_size
+    if next_offset < len(tools):
+        result["nextCursor"] = _encode_cursor(next_offset)
+    return _jsonrpc_success(request_id, result)
 
 
 def _handle_tools_call(
@@ -552,7 +604,7 @@ def _parse_and_dispatch(  # pylint: disable=too-many-branches
     if method == "initialized":
         return _handle_initialized(request_id)
     if method == "tools/list":
-        return _handle_tools_list(request_id, request)
+        return _handle_tools_list(request_id, request, params)
     if method == "tools/call":
         return _handle_tools_call(request, request_id, params)
     if method == "resources/list":
