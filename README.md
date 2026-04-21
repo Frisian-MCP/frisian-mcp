@@ -24,8 +24,14 @@ friese-mcp exposes your existing Django REST Framework ViewSets as [Model Contex
   - [@mcp_tool](#mcp_tool)
   - [@mcp_ignore](#mcp_ignore)
   - [@mcp_dispatcher and @mcp_action](#mcp_dispatcher-and-mcp_action)
+  - [@mcp_resource](#mcp_resource)
+- [Tool call middleware](#tool-call-middleware)
+  - [RateLimitMiddleware](#ratelimitmiddleware)
 - [ToolRegistry API](#toolregistry-api)
 - [MCP gateway endpoint](#mcp-gateway-endpoint)
+  - [SSE support](#sse-support)
+  - [Session ID header](#session-id-header)
+  - [tools/list cursor pagination](#toolslist-cursor-pagination)
 - [Pluggable backend architecture](#pluggable-backend-architecture)
 - [Known limitations and design decisions](#known-limitations-and-design-decisions)
 - [Troubleshooting](#troubleshooting)
@@ -1031,6 +1037,153 @@ When `input_schema` is set on an `@mcp_action`, the `params` dict is validated a
 from friese_mcp import mcp_dispatcher, mcp_action
 ```
 
+### `@mcp_resource`
+
+Expose server-side content as an MCP resource via `resources/list` and `resources/read`. Resources are ideal for static or semi-static content that agents should read rather than invoke — configuration files, schema definitions, domain reference data.
+
+```python
+from django.http import HttpRequest
+from friese_mcp import mcp_resource
+
+@mcp_resource(
+    uri_template="rag://products/{product_id}/spec",
+    name="Product spec",
+    description="Technical specification for a product, as plain text.",
+    mime_type="text/plain",
+)
+def product_spec(uri: str, request: HttpRequest) -> str:
+    # uri is the concrete URI from the resources/read request
+    product_id = uri.split("/")[-1]
+    product = Product.objects.get(pk=product_id)
+    return product.spec_text
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `uri_template` | `str` | Yes | Resource URI. May include `{variable}` placeholders — the decorated function receives the full concrete URI and is responsible for parsing any variables. |
+| `name` | `str` | Yes | Human-readable name shown in `resources/list`. |
+| `description` | `str` | No | Optional description shown in `resources/list`. |
+| `mime_type` | `str` | No | MIME type of the returned content. Defaults to `"text/plain"`. |
+
+The decorated function must have the signature `(uri: str, request: HttpRequest) -> str` and return the resource contents as a string.
+
+`@mcp_resource` is exported from `friese_mcp` directly:
+
+```python
+from friese_mcp import mcp_resource
+```
+
+#### `resources/list` response
+
+```json
+{
+  "jsonrpc": "2.0", "id": 2,
+  "result": {
+    "resources": [
+      {
+        "uri": "rag://products/{product_id}/spec",
+        "name": "Product spec",
+        "description": "Technical specification for a product, as plain text.",
+        "mimeType": "text/plain"
+      }
+    ]
+  }
+}
+```
+
+#### `resources/read` request
+
+```json
+{
+  "jsonrpc": "2.0", "id": 3, "method": "resources/read",
+  "params": {"uri": "rag://products/42/spec"}
+}
+```
+
+The URI in the `resources/read` request is matched by exact lookup against registered `uri_template` values. If no handler matches, the gateway returns `-32601 METHOD_NOT_FOUND`.
+
+---
+
+## Tool call middleware
+
+`FRIESE_MCP_TOOL_MIDDLEWARE` is a list of dotted-path class strings that are instantiated at startup and wrapped around every `tools/call` dispatch. Use middleware for cross-cutting concerns: audit logging, heartbeat stamping, tenant checks, per-call observability.
+
+```python
+# settings.py
+FRIESE_MCP_TOOL_MIDDLEWARE = [
+    "myapp.mcp.AuditLogMiddleware",
+    "myapp.mcp.WorkerHeartbeatMiddleware",
+]
+```
+
+Middleware runs in declaration order — the first entry is outermost (called first on the way in, last on the way out).
+
+### Middleware class contract
+
+Each middleware is a plain class. friese-mcp instantiates it once at startup (via `load_middleware()`) and calls it as a callable on every `tools/call`:
+
+```python
+class AuditLogMiddleware:
+    def __call__(self, request, tool_name: str, arguments: dict, call_next):
+        # Before the tool call:
+        import logging
+        logging.getLogger("audit").info("tool_call tool=%s user=%s", tool_name, request.user)
+
+        result = call_next(request, tool_name, arguments)
+
+        # After the tool call:
+        logging.getLogger("audit").info("tool_done  tool=%s", tool_name)
+        return result
+```
+
+**Parameters received by `__call__`:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `request` | `HttpRequest` | The current DRF request, including `request.user` and `request.auth`. |
+| `tool_name` | `str` | Name of the tool being called (e.g. `"users.list"`). |
+| `arguments` | `dict` | Raw arguments dict from the `tools/call` payload. |
+| `call_next` | `callable` | The next middleware in the chain (or the tool itself). Call it as `call_next(request, tool_name, arguments)`. |
+
+The middleware must return the result of `call_next(...)` (or a replacement value). Raising an exception aborts the chain — `PermissionError` is converted to `isError: true`; other exceptions bubble up as internal errors.
+
+### `RateLimitMiddleware`
+
+A built-in rate limiter that ships in `friese_mcp.contrib.middleware`. Uses an in-process sliding-window counter — no Redis or external dependency required. Configuration is read from `FRIESE_MCP_RATE_LIMIT`.
+
+```python
+# settings.py
+FRIESE_MCP_TOOL_MIDDLEWARE = [
+    "friese_mcp.contrib.middleware.RateLimitMiddleware",
+]
+
+FRIESE_MCP_RATE_LIMIT = {
+    "rate": "100/m",    # <count>/<period>: s = second, m = minute, h = hour
+    "key": "user_id",   # "user_id" | "tenant_id" | "ip"
+}
+```
+
+When `FRIESE_MCP_RATE_LIMIT` is absent, `RateLimitMiddleware` is a no-op. The rate limit is per-process — not shared across workers. For multi-process deployments, use a shared backend (Redis, database) in a custom middleware class.
+
+**Key resolution:**
+
+| `key` | Bucket identifier |
+|---|---|
+| `"user_id"` | `str(request.user.pk)`, or `"anonymous"` for unauthenticated requests. |
+| `"tenant_id"` | `str(request.user.tenant_id)` if the attribute exists; falls back to `user_id` resolution. |
+| `"ip"` | `request.META["REMOTE_ADDR"]`. |
+
+When the limit is exceeded, `RateLimitMiddleware` raises `PermissionError("Rate limit exceeded")`, which the gateway converts to an `isError: true` tool-level response:
+
+```json
+{
+  "content": [{"type": "text", "text": "{\"error\": \"Rate limit exceeded\"}"}],
+  "isError": true
+}
+```
+
 ---
 
 ## ToolRegistry API
@@ -1295,6 +1448,87 @@ Unknown tool names return a JSON-RPC `-32601 METHOD_NOT_FOUND` error with close-
   }
 }
 ```
+
+### SSE support
+
+friese-mcp supports Server-Sent Events on the same `/mcp/` endpoint. Send `Accept: text/event-stream` and every JSON-RPC response is wrapped in a single SSE event:
+
+```
+POST /mcp/
+Accept: text/event-stream
+Content-Type: application/json
+
+{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+
+→ HTTP/1.1 200 OK
+   Content-Type: text/event-stream
+   Cache-Control: no-cache
+
+   data: {"jsonrpc":"2.0","id":1,"result":{"tools":[...]}}
+
+   (stream closes)
+```
+
+The stream is stateless — it closes after delivering the single response. Clients that do not send `Accept: text/event-stream` receive a normal `application/json` response and are unaffected by this change. HTTP 202 notifications are not wrapped in SSE (they return an empty body as before).
+
+### Session ID header
+
+Every `initialize` response includes an `Mcp-Session-Id` header containing a fresh UUID:
+
+```
+HTTP/1.1 200 OK
+Mcp-Session-Id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+Content-Type: application/json
+```
+
+The ID is stateless — friese-mcp generates a new UUID per `initialize` call and does not track it server-side. Clients may use it as a correlation handle for logging. To opt out:
+
+```python
+FRIESE_MCP_SESSION_ID_HEADER = False
+```
+
+### `tools/list` cursor pagination
+
+By default, `tools/list` returns all registered tools in a single response. For deployments with a large number of tools (80+), enable cursor pagination with:
+
+```python
+FRIESE_MCP_TOOLS_PAGE_SIZE = 20
+```
+
+**First page — no cursor:**
+
+```json
+// Request
+{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+
+// Response (more pages available)
+{
+  "jsonrpc": "2.0", "id": 1,
+  "result": {
+    "tools": [ /* first 20 tools */ ],
+    "nextCursor": "MjA="
+  }
+}
+```
+
+**Subsequent pages — pass `cursor`:**
+
+```json
+// Request
+{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"cursor": "MjA="}}
+
+// Response (last page — no nextCursor)
+{
+  "jsonrpc": "2.0", "id": 2,
+  "result": {
+    "tools": [ /* remaining tools */ ]
+  }
+}
+```
+
+When `nextCursor` is absent, the client has reached the last page. Cursors are opaque base64url-encoded integer offsets. An invalid cursor returns `-32602 INVALID_PARAMS`.
+
+When `FRIESE_MCP_TOOLS_PAGE_SIZE` is absent (the default), `tools/list` behaves exactly as before — no `cursor` parameter is consumed and no `nextCursor` is returned.
 
 ### HTTP-level behaviour
 
