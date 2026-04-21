@@ -32,17 +32,20 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
 import difflib
 import json
 import logging
+from collections.abc import Generator
 from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.utils.module_loading import import_string
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.request import Request as DRFRequest
 from rest_framework.views import APIView
 
+from friese_mcp.middleware import build_middleware_chain, get_middleware_instances
 from friese_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -53,6 +56,7 @@ from friese_mcp.protocol import (
     JsonRpcId,
 )
 from friese_mcp.registry import ToolInputError, tool_registry
+from friese_mcp.resources import ResourceNotFoundError, resource_registry
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +191,56 @@ def _get_agent_connection(request: Any) -> Any | None:
 
 
 # ---------------------------------------------------------------------------
+# SSE helper
+# ---------------------------------------------------------------------------
+
+
+def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse:
+    """
+    Wrap *response* as a single-message SSE stream when the caller accepts it.
+
+    Returns *response* unchanged when:
+
+    * The request ``Accept`` header does not include ``text/event-stream``, or
+    * *response* is not a :class:`~django.http.JsonResponse` (e.g. HTTP 202
+      notifications have no body to stream).
+
+    When SSE is accepted, returns a :class:`~django.http.StreamingHttpResponse`
+    with ``Content-Type: text/event-stream`` and ``Cache-Control: no-cache``
+    containing a single ``data:`` event followed by the double-newline delimiter.
+
+    """
+    if not isinstance(response, JsonResponse):
+        return response
+    accept: str = request.META.get("HTTP_ACCEPT", "")
+    if "text/event-stream" not in accept:
+        return response
+
+    body: str = response.content.decode("utf-8")
+
+    def _stream() -> Generator[str, None, None]:
+        yield f"data: {body}\n\n"
+
+    sse: StreamingHttpResponse = StreamingHttpResponse(
+        _stream(), content_type="text/event-stream"
+    )
+    sse["Cache-Control"] = "no-cache"
+    return sse
+
+
+# ---------------------------------------------------------------------------
+# Middleware dispatch helper
+# ---------------------------------------------------------------------------
+
+
+def _tool_registry_dispatch(
+    request: HttpRequest, tool_name: str, arguments: dict[str, Any]
+) -> Any:
+    """Inner dispatch callable passed to the middleware chain."""
+    return tool_registry.dispatch(request, tool_name, arguments)
+
+
+# ---------------------------------------------------------------------------
 # Method handlers
 # ---------------------------------------------------------------------------
 
@@ -298,7 +352,9 @@ def _handle_tools_call(
         AgentConnection.objects.filter(pk=conn.pk).update(last_seen_at=timezone.now())
 
     try:
-        result = tool_registry.dispatch(request, tool_name, arguments)
+        result = build_middleware_chain(
+            _tool_registry_dispatch, get_middleware_instances()
+        )(request, tool_name, arguments)
     except LookupError as exc:
         # JSON-RPC 2.0: -32601 METHOD_NOT_FOUND is the correct code for an unknown
         # tool name.  -32602 INVALID_PARAMS is reserved for structural argument
@@ -383,18 +439,27 @@ def _handle_tools_call(
 
 
 def _handle_resources_list(request_id: JsonRpcId) -> JsonResponse:
-    """Handle ``resources/list`` — returns empty list in v1."""
-    return _jsonrpc_success(request_id, {"resources": []})
+    """Handle ``resources/list`` — return all registered resources."""
+    return _jsonrpc_success(request_id, {"resources": resource_registry.list_resources()})
 
 
-def _handle_resources_read(request_id: JsonRpcId, params: JsonDict) -> JsonResponse:
-    """Handle ``resources/read`` — not implemented in v1."""
-    uri: Any = params.get("uri", "<unknown>")
-    return _jsonrpc_error(
+def _handle_resources_read(request_id: JsonRpcId, params: JsonDict, request: Any) -> JsonResponse:
+    """Handle ``resources/read`` — dispatch to a registered resource handler."""
+    uri: Any = params.get("uri")
+    if not uri or not isinstance(uri, str):
+        return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid params", "'uri' is required")
+
+    try:
+        text = resource_registry.read_resource(uri, request)
+    except ResourceNotFoundError as exc:
+        return _jsonrpc_error(request_id, INVALID_PARAMS, f"Resource not found: {uri}", str(exc))
+
+    defn = resource_registry.get_definition(uri)
+    mime_type = defn.mime_type if defn is not None else "text/plain"
+
+    return _jsonrpc_success(
         request_id,
-        METHOD_NOT_FOUND,
-        "resources/read is not supported in v1",
-        str(uri),
+        {"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]},
     )
 
 
@@ -493,10 +558,27 @@ def _parse_and_dispatch(  # pylint: disable=too-many-branches
     if method == "resources/list":
         return _handle_resources_list(request_id)
     if method == "resources/read":
-        return _handle_resources_read(request_id, params)
+        return _handle_resources_read(request_id, params, request)
     if method == "help":
         return _handle_help(request_id)
     return _jsonrpc_error(request_id, METHOD_NOT_FOUND, f"Method not found: {method!r}")
+
+
+# ---------------------------------------------------------------------------
+# SSE renderer — lets DRF content negotiation accept text/event-stream
+# ---------------------------------------------------------------------------
+
+
+class _EventStreamRenderer(BaseRenderer):
+    """Passthrough renderer that satisfies DRF content negotiation for SSE."""
+
+    media_type = "text/event-stream"
+    format = "event-stream"
+
+    def render(
+        self, data: Any, accepted_media_type: str | None = None, renderer_context: Any = None
+    ) -> Any:
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +589,12 @@ def _parse_and_dispatch(  # pylint: disable=too-many-branches
 class McpEndpointView(APIView):
     """
     MCP gateway — single HTTP POST endpoint for all JSON-RPC 2.0 traffic.
+
+    ``renderer_classes`` includes :class:`_EventStreamRenderer` so that DRF
+    content negotiation accepts ``Accept: text/event-stream`` requests without
+    raising HTTP 406.  The actual SSE wrapping is handled by :func:`_maybe_sse`;
+    the renderer's ``render`` method is never invoked because ``post`` returns
+    a raw :class:`~django.http.StreamingHttpResponse` that bypasses DRF rendering.
 
     Extends DRF :class:`~rest_framework.views.APIView` so that host projects
     can apply standard DRF authentication and permission classes to the MCP
@@ -536,6 +624,8 @@ class McpEndpointView(APIView):
 
     """
 
+    renderer_classes = [JSONRenderer, _EventStreamRenderer]
+
     def get_authenticators(self) -> list[Any]:
         """
         Return authenticator instances for this view.
@@ -564,15 +654,18 @@ class McpEndpointView(APIView):
     def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse:
         """Handle POST — the only allowed HTTP method."""
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
-            return JsonResponse(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": INTERNAL_ERROR, "message": "MCP gateway is disabled"},
-                },
-                status=503,
+            return _maybe_sse(
+                JsonResponse(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": INTERNAL_ERROR, "message": "MCP gateway is disabled"},
+                    },
+                    status=503,
+                ),
+                request,
             )
-        return _parse_and_dispatch(request)
+        return _maybe_sse(_parse_and_dispatch(request), request)
 
     def http_method_not_allowed(  # type: ignore[override]
         self, request: DRFRequest, *args: Any, **kwargs: Any

@@ -136,6 +136,7 @@ class FrieseMcpConfig(AppConfig):
             get_discovery_backend,
             get_invocation_backend,
         )
+        from friese_mcp.middleware import load_middleware  # pylint: disable=import-outside-toplevel
         from friese_mcp.registry import tool_registry  # pylint: disable=import-outside-toplevel
 
         discovery = get_discovery_backend()
@@ -150,6 +151,8 @@ class FrieseMcpConfig(AppConfig):
                 input_schema=tool_def.input_schema,
                 permission_classes=list(tool_def.permission_classes),
             )
+
+        load_middleware()
 
         if tool_defs:
             logger.info("friese_mcp: auto-discovery registered %d tools", len(tool_defs))
