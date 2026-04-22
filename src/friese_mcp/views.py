@@ -31,6 +31,7 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
 
 import base64
 import difflib
+import hashlib
 import importlib.metadata
 import json
 import logging
@@ -281,6 +282,8 @@ def _handle_initialize(request_id: JsonRpcId, params: JsonDict) -> JsonResponse:
     )
 
     server_name: str = getattr(settings, "FRIESE_MCP_SERVER_NAME", "friese-mcp")
+    tool_names = sorted(t["name"] for t in tool_registry.list_tools())
+    tools_version = hashlib.sha256(",".join(tool_names).encode()).hexdigest()[:8]
     response = _jsonrpc_success(
         request_id,
         {
@@ -290,6 +293,7 @@ def _handle_initialize(request_id: JsonRpcId, params: JsonDict) -> JsonResponse:
                 "version": _server_version(),
             },
             "capabilities": {"tools": {}, "resources": {}},
+            "toolsVersion": tools_version,
         },
     )
     if getattr(settings, "FRIESE_MCP_SESSION_ID_HEADER", True):
@@ -437,6 +441,7 @@ def _handle_tools_call(
         data = str(exc)
         if suggestions:
             data += f". Did you mean: {', '.join(suggestions)}?"
+        data += f" Available tools: {', '.join(sorted(known_names))}."
         data += _REFRESH_HINT
         return _jsonrpc_error(request_id, METHOD_NOT_FOUND, "Unknown tool", data)
     except ToolInputError as exc:
