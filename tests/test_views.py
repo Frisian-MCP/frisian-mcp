@@ -211,6 +211,55 @@ class TestMethodHandlers:
         version = data["result"]["serverInfo"]["version"]
         assert isinstance(version, str) and version
 
+    def test_initialize_tools_version_present(self, rf: RequestFactory) -> None:
+        """Initialize response contains toolsVersion key."""
+        data = _response_data(_call(rf, "initialize", {}))
+        assert "toolsVersion" in data["result"]
+
+    def test_initialize_tools_version_is_eight_hex_chars(self, rf: RequestFactory) -> None:
+        """Value of toolsVersion is exactly 8 hexadecimal characters."""
+        data = _response_data(_call(rf, "initialize", {}))
+        tv = data["result"]["toolsVersion"]
+        assert isinstance(tv, str)
+        assert len(tv) == 8
+        assert all(c in "0123456789abcdef" for c in tv)
+
+    def test_initialize_tools_version_stable(self, rf: RequestFactory) -> None:
+        """Same tool set produces the same toolsVersion on repeated calls."""
+        isolated = ToolRegistry()
+        isolated.register(
+            name="a_tool",
+            fn=lambda a, r: {},
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        )
+        with patch("friese_mcp.views.tool_registry", isolated):
+            v1 = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
+            v2 = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
+        assert v1 == v2
+
+    def test_initialize_tools_version_changes_with_registry(self, rf: RequestFactory) -> None:
+        """Different tool sets produce different toolsVersion values."""
+        reg_a = ToolRegistry()
+        reg_a.register(
+            name="tool_a",
+            fn=lambda a, r: {},
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        )
+        reg_b = ToolRegistry()
+        reg_b.register(
+            name="tool_b",
+            fn=lambda a, r: {},
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        )
+        with patch("friese_mcp.views.tool_registry", reg_a):
+            v_a = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
+        with patch("friese_mcp.views.tool_registry", reg_b):
+            v_b = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
+        assert v_a != v_b
+
     def test_initialized_returns_empty_result(self, rf: RequestFactory) -> None:
         """Initialized sent as a request (with id) returns a success response."""
         data = _response_data(_call(rf, "initialized"))
@@ -322,6 +371,53 @@ class TestToolsCall:
 
         assert "tools/list" in data["error"]["data"]
         assert "manifest" in data["error"]["data"]
+
+    def test_tools_call_unknown_tool_includes_available_tools(self, rf: RequestFactory) -> None:
+        """tools/call -32601 error data lists available tool names."""
+        isolated = ToolRegistry()
+        for name in ("beta", "alpha"):
+            isolated.register(
+                name=name,
+                fn=lambda a, r: {},
+                description="",
+                input_schema={"type": "object", "properties": {}},
+            )
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(
+                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
+            )
+
+        assert "Available tools: alpha, beta." in data["error"]["data"]
+
+    def test_tools_call_available_tools_sorted(self, rf: RequestFactory) -> None:
+        """Available tools in -32601 data appear in sorted order."""
+        isolated = ToolRegistry()
+        for name in ("zebra", "apple", "mango"):
+            isolated.register(
+                name=name,
+                fn=lambda a, r: {},
+                description="",
+                input_schema={"type": "object", "properties": {}},
+            )
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(
+                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
+            )
+
+        assert "Available tools: apple, mango, zebra." in data["error"]["data"]
+
+    def test_tools_call_available_tools_empty_registry(self, rf: RequestFactory) -> None:
+        """Available tools section is present even when registry is empty."""
+        isolated = ToolRegistry()
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            data = _response_data(
+                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
+            )
+
+        assert "Available tools: ." in data["error"]["data"]
 
     def test_tools_call_missing_name(self, rf: RequestFactory) -> None:
         """tools/call without a 'name' field returns INVALID_PARAMS."""
