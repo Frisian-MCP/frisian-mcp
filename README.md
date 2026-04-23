@@ -12,7 +12,6 @@ friese-mcp exposes your existing Django REST Framework ViewSets as [Model Contex
 
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [Connecting MCP clients](#connecting-mcp-clients)
 - [Quickstart](#quickstart)
 - [Settings reference](#settings-reference)
 - [Authentication and permissions](#authentication-and-permissions)
@@ -72,47 +71,6 @@ urlpatterns = [
 ```
 
 The gateway is now reachable at `POST /mcp/`.
-
----
-
-## Connecting MCP clients
-
-Run the built-in management command to generate a copy-pasteable `mcpServers` block for Claude Desktop, Cursor, or any MCP client that accepts HTTP transport:
-
-```
-python manage.py mcp_config
-```
-
-Sample output:
-
-```json
-{
-  "mcpServers": {
-    "friese-mcp": {
-      "url": "http://localhost:8000/mcp/",
-      "transport": "http"
-    }
-  }
-}
-```
-
-Paste this block into your MCP client's configuration file. The server name comes from `FRIESE_MCP_SERVER_NAME` (default `"friese-mcp"`).
-
-**URL resolution order:**
-
-1. `--url` CLI flag — highest priority
-2. `FRIESE_MCP_BASE_URL` Django setting
-3. `http://localhost:8000/mcp/` — fallback default
-
-```bash
-# Override URL at the command line
-python manage.py mcp_config --url https://api.example.com/mcp/
-```
-
-```python
-# Or set it permanently in settings.py
-FRIESE_MCP_BASE_URL = "https://api.example.com/mcp/"
-```
 
 ---
 
@@ -262,16 +220,6 @@ The `serverInfo.name` field returned in the `initialize` handshake response. `se
 
 ```python
 FRIESE_MCP_SERVER_NAME = "my-product-mcp"
-```
-
-### `FRIESE_MCP_BASE_URL`
-
-**Type:** `str` | **Default:** `"http://localhost:8000/mcp/"`
-
-The public URL of your MCP gateway endpoint. Used by the `mcp_config` management command when generating `mcpServers` config blocks for MCP clients. Has no effect on gateway routing.
-
-```python
-FRIESE_MCP_BASE_URL = "https://api.example.com/mcp/"
 ```
 
 ### `FRIESE_MCP_TOOL_ALLOWLIST`
@@ -1021,24 +969,7 @@ class TasksDispatcher:
         return {"id": task.pk, "title": task.title, "status": task.status}
 ```
 
-**`@mcp_dispatcher(name, description, permission_classes=None)`** — class decorator. Scans the class for `@mcp_action` methods, instantiates the class once at decoration time, and registers it as a single MCP tool with a compact `inputSchema`. The class instance is reused across calls; `request` is passed per-call.
-
-`permission_classes` accepts a list of DRF permission classes that guard the entire dispatcher tool. Defaults to `[]` (AllowAny) when omitted — identical to the previous behaviour, so existing dispatchers are unaffected. Permission is enforced class-wide; per-`@mcp_action` permission narrowing is not supported in v1.
-
-```python
-from rest_framework.permissions import IsAuthenticated
-from friese_mcp import mcp_dispatcher, mcp_action
-
-@mcp_dispatcher(
-    name="admin_tasks",
-    description="Administrative task operations.",
-    permission_classes=[IsAuthenticated],
-)
-class AdminTaskDispatcher:
-    @mcp_action(name="purge", description="Delete all completed tasks.")
-    def purge(self, request, params):
-        ...
-```
+**`@mcp_dispatcher(name, description)`** — class decorator. Scans the class for `@mcp_action` methods, instantiates the class once at decoration time, and registers it as a single MCP tool with a compact `inputSchema`. The class instance is reused across calls; `request` is passed per-call.
 
 **`@mcp_action(name, description, params=None, input_schema=None)`** — method decorator. Marks a method as a dispatchable action. Does not alter the method's behaviour.
 

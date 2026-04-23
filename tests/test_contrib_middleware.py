@@ -39,7 +39,7 @@ def _make_user(pk: int, tenant_id: int | None = None) -> Any:
     return _User(pk, tenant_id)
 
 
-def _noop_next(request: Any, _tool_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+def _noop_next(request: Any, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return {"called": True}
 
 

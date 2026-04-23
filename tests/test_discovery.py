@@ -692,13 +692,13 @@ class TestSuppressDispatcherShadowed:
         """Discovered tool with same resource prefix as dispatcher is suppressed."""
         tools = [_tool_def("exercises.list"), _tool_def("exercises.create")]
         result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
-        assert not result
+        assert result == []
 
     def test_singular_match_suppresses_tool(self) -> None:
         """Dispatcher 'exercises' suppresses discovered 'exercise.list'."""
         tools = [_tool_def("exercise.list"), _tool_def("exercise.retrieve")]
         result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
-        assert not result
+        assert result == []
 
     def test_unrelated_tools_not_suppressed(self) -> None:
         """Dispatcher 'exercises' does not affect 'orders.list'."""
@@ -732,7 +732,7 @@ class TestSuppressDispatcherShadowed:
         """A tool without a dot is matched by its full name."""
         tools = [_tool_def("exercises")]
         result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
-        assert not result
+        assert result == []
 
     def test_non_dotted_tool_no_match(self) -> None:
         """A tool without a dot is not suppressed when name differs."""
@@ -743,11 +743,11 @@ class TestSuppressDispatcherShadowed:
     def test_empty_tool_list(self) -> None:
         """Empty tool list returns empty list regardless of dispatchers."""
         result = _suppress_dispatcher_shadowed([], frozenset({"exercises"}))
-        assert not result
+        assert result == []
 
     def test_suppressed_tools_logged(self, caplog: Any) -> None:
         """Suppressed tools are logged at INFO level."""
-        import logging  # pylint: disable=import-outside-toplevel
+        import logging
 
         tools = [_tool_def("exercises.list")]
         with caplog.at_level(logging.INFO, logger="friese_mcp.apps"):
