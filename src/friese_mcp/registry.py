@@ -189,10 +189,16 @@ class ToolRegistry:
         if getattr(settings, "FRIESE_MCP_NORMALIZE_INPUT_CASE", True):
             arguments = _normalize_argument_keys(arguments)
 
-        try:
-            jsonschema.validate(instance=arguments, schema=entry.input_schema)
-        except jsonschema.exceptions.ValidationError as exc:
-            raise ToolInputError(exc.message) from exc
+        # Dispatcher tools handle action="help" internally (same path as a missing
+        # action). Skip schema validation so "help" reaches the invoke callable
+        # without triggering an enum mismatch — "help" is intentionally absent from
+        # the action enum in the inputSchema.
+        is_dispatcher_help = entry.is_dispatcher and arguments.get("action") == "help"
+        if not is_dispatcher_help:
+            try:
+                jsonschema.validate(instance=arguments, schema=entry.input_schema)
+            except jsonschema.exceptions.ValidationError as exc:
+                raise ToolInputError(exc.message) from exc
 
         for perm_class in entry.permission_classes:
             perm = perm_class()

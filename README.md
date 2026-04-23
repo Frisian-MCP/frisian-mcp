@@ -1430,11 +1430,11 @@ The raw exception message is never returned to the caller. Full error details ar
 
 #### `resources/list`
 
-Returns an empty list in v1. Resources are not implemented.
+Returns all resources registered via `@mcp_resource`. Returns an empty list if no resources are registered.
 
 #### `resources/read`
 
-Returns `METHOD_NOT_FOUND` in v1.
+Dispatches to the matching `@mcp_resource` handler by exact URI lookup. Returns `-32602 Invalid Params` if no handler is registered for the requested URI. See the [`@mcp_resource` section](#mcp_resource) for registration details.
 
 #### `help`
 
@@ -1603,7 +1603,7 @@ When `FRIESE_MCP_TOOLS_PAGE_SIZE` is absent (the default), `tools/list` behaves 
 |---|---|---|
 | `-32700` | Parse error | Request body is not valid JSON |
 | `-32600` | Invalid Request | Missing/wrong `jsonrpc` field, `method` is not a string, or non-POST HTTP method |
-| `-32601` | Method Not Found | Unrecognised method name, unknown tool name in `tools/call`, or `resources/read` in v1 |
+| `-32601` | Method Not Found | Unrecognised method name, or unknown tool name in `tools/call` |
 | `-32602` | Invalid Params | Missing/invalid `name` or `arguments` structure in `tools/call`; argument schema validation failure |
 | `-32603` | Internal Error | Gateway disabled (`FRIESE_MCP_ENABLED = False`) |
 

@@ -107,6 +107,7 @@ def mcp_action(
 def mcp_dispatcher(
     name: str,
     description: str,
+    permission_classes: list[type[BasePermission]] | None = None,
 ) -> Callable[[_ClassT], _ClassT]:
     """
     Register a class as a named MCP dispatcher tool.
@@ -119,6 +120,8 @@ def mcp_dispatcher(
     Args:
         name: Unique MCP tool name (e.g. ``"tasks"``).
         description: Human-readable description shown in ``tools/list``.
+        permission_classes: DRF permission classes that guard this dispatcher.
+            Pass ``None`` or ``[]`` for unrestricted access.
 
     Returns:
         The original class, unchanged, registered as a side-effect.
@@ -156,6 +159,7 @@ def mcp_dispatcher(
             fn=invoke_fn,
             description=description,
             input_schema=input_schema,
+            permission_classes=permission_classes,
             is_dispatcher=True,
         )
         return cls

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from django.test import RequestFactory
+from rest_framework.permissions import BasePermission
 
 from friese_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
 from friese_mcp.registry import ToolInputError, ToolRegistry
@@ -374,3 +375,162 @@ class TestDispatcherCoexistence:
         entry = reg.get_entry("flag.dispatcher")
         assert entry is not None
         assert entry.is_dispatcher is True
+
+
+# ---------------------------------------------------------------------------
+# TestDispatcherHelpModeViaRegistry
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherHelpModeViaRegistry:
+    """Tests that action='help' reaches the dispatcher invoke callable via registry.dispatch."""
+
+    def test_help_action_returns_help_envelope(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """registry.dispatch with action='help' returns the help envelope."""
+        request = rf.get("/")
+        result = isolated_registry.dispatch(request, "tasks", {"action": "help"})
+        assert result["help"] is True
+        assert result["dispatcher"] == "tasks"
+
+    def test_help_action_includes_all_actions(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """Help envelope via registry.dispatch includes all registered actions."""
+        request = rf.get("/")
+        result = isolated_registry.dispatch(request, "tasks", {"action": "help"})
+        action_names = {a["name"] for a in result["actions"]}
+        assert action_names == {"create", "list", "delete"}
+
+    def test_help_action_on_plain_mcp_tool_still_raises(
+        self, rf: RequestFactory
+    ) -> None:
+        """action='help' on a regular @mcp_tool with an enum schema still raises ToolInputError."""
+        reg = ToolRegistry()
+        schema_with_enum = {
+            "type": "object",
+            "properties": {"action": {"type": "string", "enum": ["go"]}},
+        }
+
+        def _plain(arguments: Any, request: Any) -> dict[str, Any]:  # pylint: disable=unused-argument
+            return {}
+
+        reg.register(
+            "plain.tool",
+            _plain,
+            description="Plain tool.",
+            input_schema=schema_with_enum,
+        )
+        request = rf.get("/")
+        with pytest.raises(ToolInputError):
+            reg.dispatch(request, "plain.tool", {"action": "help"})
+
+    def test_valid_action_still_dispatches(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """A valid named action dispatches normally through registry.dispatch."""
+        request = rf.get("/")
+        result = isolated_registry.dispatch(
+            request, "tasks", {"action": "create", "params": {"title": "t"}}
+        )
+        assert result == {"created": "t"}
+
+    def test_invalid_non_help_action_raises_tool_input_error(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """An invalid action (not 'help', not in enum) raises ToolInputError."""
+        request = rf.get("/")
+        with pytest.raises(ToolInputError):
+            isolated_registry.dispatch(request, "tasks", {"action": "totally_wrong"})
+
+
+# ---------------------------------------------------------------------------
+# TestDispatcherPermissionClasses
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherPermissionClasses:
+    """Tests that permission_classes kwarg on @mcp_dispatcher is enforced."""
+
+    def test_no_permission_classes_allows_all(self) -> None:
+        """Dispatcher with no permission_classes allows all callers (AllowAny default)."""
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("open", description="Open dispatcher.")
+            class OpenDispatcher:  # pylint: disable=unused-variable
+                """Open dispatcher."""
+
+                @mcp_action("ping", description="Ping.")
+                def ping(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                    """Ping action."""
+                    return {"ok": True}
+
+        entry = reg.get_entry("open")
+        assert entry is not None
+        assert entry.permission_classes == []
+
+    def test_permission_classes_stored_on_entry(self) -> None:
+        """permission_classes passed to @mcp_dispatcher are stored on the registry entry."""
+
+        class AllowNone(BasePermission):
+            """Deny all requests."""
+
+            def has_permission(self, request: Any, view: Any) -> bool:
+                """Deny."""
+                return False
+
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher(
+                "guarded", description="Guarded dispatcher.", permission_classes=[AllowNone]
+            )
+            class GuardedDispatcher:  # pylint: disable=unused-variable
+                """Guarded dispatcher."""
+
+                @mcp_action("ping", description="Ping.")
+                def ping(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                    """Ping action."""
+                    return {}
+
+        entry = reg.get_entry("guarded")
+        assert entry is not None
+        assert AllowNone in entry.permission_classes
+
+    def test_permission_denied_raises_permission_error(self, rf: RequestFactory) -> None:
+        """registry.dispatch raises PermissionError when permission class denies."""
+
+        class DenyAll(BasePermission):
+            """Deny all requests."""
+
+            def has_permission(self, request: Any, view: Any) -> bool:
+                """Deny."""
+                return False
+
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher(
+                "secured", description="Secured dispatcher.", permission_classes=[DenyAll]
+            )
+            class SecuredDispatcher:  # pylint: disable=unused-variable
+                """Secured dispatcher."""
+
+                @mcp_action("go", description="Go.")
+                def go(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                    """Go action."""
+                    return {}
+
+        request = rf.get("/")
+        with pytest.raises(PermissionError):
+            reg.dispatch(request, "secured", {"action": "go"})
+
+    def test_existing_dispatcher_without_permission_classes_still_works(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """Regression: dispatchers declared without permission_classes still dispatch."""
+        request = rf.get("/")
+        result = isolated_registry.dispatch(request, "tasks", {"action": "list"})
+        assert result == {"tasks": []}
