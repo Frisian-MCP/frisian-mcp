@@ -70,7 +70,7 @@ class TestCursorHelpers:
 
     def test_invalid_cursor_raises_value_error(self) -> None:
         """_decode_cursor raises ValueError for non-integer payloads."""
-        import pytest
+        import pytest  # pylint: disable=import-outside-toplevel
 
         with pytest.raises(ValueError, match="Invalid cursor"):
             _decode_cursor("not-valid-base64!!!")

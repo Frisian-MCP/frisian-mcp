@@ -11,6 +11,7 @@ INSTALLED_APPS = [
     "friese_mcp.contrib.tokens",
     "friese_mcp.contrib.oauth",
     "friese_mcp.contrib.agents",
+    "friese_mcp.contrib.coordination",
 ]
 
 DATABASES = {

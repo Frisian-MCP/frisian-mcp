@@ -48,7 +48,7 @@ class TestMaybeSse:
 
     def test_non_json_response_returned_unchanged(self) -> None:
         """Non-JsonResponse (e.g. HttpResponse) is returned as-is."""
-        from django.http import HttpResponse
+        from django.http import HttpResponse  # pylint: disable=import-outside-toplevel
 
         plain = HttpResponse(status=202)
         req = _post()

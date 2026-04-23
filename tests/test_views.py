@@ -90,12 +90,10 @@ class TestHttpGuards:
 
     def test_delete_body_is_empty_object(self, rf: RequestFactory) -> None:
         """DELETE response body is an empty JSON object."""
-        import json as _json
-
         request = rf.delete("/mcp/")
         request.user = _anon_user()
         response = _view(request)
-        assert _json.loads(response.content) == {}
+        assert json.loads(response.content) == {}
 
     def test_get_returns_405(self, rf: RequestFactory) -> None:
         """GET requests to the MCP endpoint return 405 Method Not Allowed."""

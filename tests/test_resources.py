@@ -175,7 +175,7 @@ class TestResourceRegistry:
     def test_register_overwrites_same_uri(self) -> None:
         """Re-registering the same uri_template overwrites the previous entry."""
 
-        def handler_v2(uri: str, request: Any) -> str:
+        def handler_v2(_uri: str, request: Any) -> str:
             return "v2"
 
         reg = _make_registry(
@@ -199,10 +199,10 @@ class TestMcpResourceDecorator:
         """@mcp_resource registers the function in the resource_registry."""
         isolated = ResourceRegistry()
         with patch("friese_mcp.decorators.resource_registry", isolated):
-            from friese_mcp.decorators import mcp_resource
+            from friese_mcp.decorators import mcp_resource  # pylint: disable=import-outside-toplevel
 
             @mcp_resource(uri_template="rag://test", name="Test")
-            def my_resource(uri: str, request: Any) -> str:
+            def my_resource(_uri: str, request: Any) -> str:
                 return "hello"
 
         listing = isolated.list_resources()
@@ -214,10 +214,10 @@ class TestMcpResourceDecorator:
         """@mcp_resource returns the original function."""
         isolated = ResourceRegistry()
         with patch("friese_mcp.decorators.resource_registry", isolated):
-            from friese_mcp.decorators import mcp_resource
+            from friese_mcp.decorators import mcp_resource  # pylint: disable=import-outside-toplevel
 
             @mcp_resource(uri_template="rag://test", name="Test")
-            def my_resource(uri: str, request: Any) -> str:
+            def my_resource(_uri: str, request: Any) -> str:
                 return "hello"
 
         assert my_resource("rag://test", _make_request()) == "hello"
@@ -226,7 +226,7 @@ class TestMcpResourceDecorator:
         """@mcp_resource passes description and mime_type to the definition."""
         isolated = ResourceRegistry()
         with patch("friese_mcp.decorators.resource_registry", isolated):
-            from friese_mcp.decorators import mcp_resource
+            from friese_mcp.decorators import mcp_resource  # pylint: disable=import-outside-toplevel
 
             @mcp_resource(
                 uri_template="rag://json",
@@ -234,7 +234,7 @@ class TestMcpResourceDecorator:
                 description="A JSON resource",
                 mime_type="application/json",
             )
-            def json_resource(uri: str, request: Any) -> str:
+            def json_resource(_uri: str, request: Any) -> str:
                 return "{}"
 
         listing = isolated.list_resources()
@@ -313,7 +313,7 @@ class TestResourcesReadView:
     def test_resources_read_custom_mime_type(self) -> None:
         """resources/read returns the correct mimeType from the definition."""
 
-        def json_handler(uri: str, request: Any) -> str:
+        def json_handler(_uri: str, request: Any) -> str:
             return '{"key": "val"}'
 
         reg = _make_registry(
