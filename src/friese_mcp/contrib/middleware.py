@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import abc
+import importlib
 import re
 import threading
 import time
@@ -15,9 +17,76 @@ _PERIOD_SECONDS: dict[str, int] = {"s": 1, "m": 60, "h": 3600}
 _RATE_RE: re.Pattern[str] = re.compile(r"^(\d+)/([smh])$")
 
 
+class AbstractRateLimitBackend(abc.ABC):
+    """
+    Interface for pluggable rate-limit counter backends.
+
+    Implementations must be thread-safe and must track counts per *key*
+    within a sliding window of *window* seconds.
+    """
+
+    @abc.abstractmethod
+    def allow_request(self, key: str, limit: int, window: int) -> bool:
+        """
+        Decide whether the request identified by *key* is within the limit.
+
+        Increments the counter for *key* then returns ``True`` if the
+        updated count is within *limit* for the current *window* (seconds).
+        Returns ``False`` when the limit has been exceeded.
+
+        Args:
+            key: Rate-limit bucket identifier (e.g. user ID or IP).
+            limit: Maximum number of requests allowed per window.
+            window: Duration of the sliding window in seconds.
+
+        """
+
+
+class InMemoryRateLimitBackend(AbstractRateLimitBackend):
+    """
+    In-process sliding-window counter (default backend).
+
+    State is kept in a plain dict protected by a :class:`threading.Lock`.
+    Each worker process maintains its own counters, so the effective rate
+    under multi-worker deployments is ``limit × N``.  Use a shared backend
+    (e.g. Redis) when cross-worker accuracy is required.
+    """
+
+    def __init__(self) -> None:
+        """Initialise an empty counter store."""
+        self._counters: dict[str, tuple[int, float]] = {}
+        self._lock: threading.Lock = threading.Lock()
+
+    def allow_request(self, key: str, limit: int, window: int) -> bool:
+        """Increment counter for *key* and return whether it is within *limit*."""
+        now = time.monotonic()
+        with self._lock:
+            count, window_start = self._counters.get(key, (0, now))
+            if now - window_start >= window:
+                count = 0
+                window_start = now
+            count += 1
+            self._counters[key] = (count, window_start)
+            return count <= limit
+
+
+def _load_backend(dotted_path: str) -> AbstractRateLimitBackend:
+    """Import *dotted_path* and return an instance of the backend class."""
+    try:
+        module_path, cls_name = dotted_path.rsplit(".", 1)
+    except ValueError as exc:
+        raise ImproperlyConfigured(
+            f"FRIESE_MCP_RATE_LIMIT 'backend' must be a dotted import path, "
+            f"got {dotted_path!r}."
+        ) from exc
+    module = importlib.import_module(module_path)
+    cls = getattr(module, cls_name)
+    return cls()
+
+
 class RateLimitMiddleware:
     """
-    In-process sliding-window rate limiter for MCP tool calls.
+    Sliding-window rate limiter for MCP tool calls.
 
     Plugs into ``FRIESE_MCP_TOOL_MIDDLEWARE`` and reads configuration from
     ``FRIESE_MCP_RATE_LIMIT``::
@@ -29,6 +98,8 @@ class RateLimitMiddleware:
         FRIESE_MCP_RATE_LIMIT = {
             "rate": "10/s",     # <count>/<period> — s=second, m=minute, h=hour
             "key": "user_id",   # "user_id" | "tenant_id" | "ip"
+            # optional — dotted import path to an AbstractRateLimitBackend subclass:
+            "backend": "myapp.backends.RedisRateLimitBackend",
         }
 
     When ``FRIESE_MCP_RATE_LIMIT`` is absent the middleware is a no-op.
@@ -39,26 +110,26 @@ class RateLimitMiddleware:
                         otherwise falls back to ``user_id`` resolution.
     - ``"ip"``        — ``request.META["REMOTE_ADDR"]``.
 
-    Counter state is held in-process; no Redis or external dependency is required.
-    A new window starts the first time a key is seen or after the previous window
-    has elapsed.  When the count for a key exceeds the limit within its window,
-    :exc:`PermissionError` is raised (the gateway converts this to an
-    ``isError: True`` tool-level response).
+    The ``backend`` key selects the counter storage.  Omitting it uses
+    :class:`InMemoryRateLimitBackend` (in-process, no external dependency).
+    Supply a dotted path to an :class:`AbstractRateLimitBackend` subclass
+    (e.g. a Redis-backed implementation) for shared cross-worker counters.
 
     Raises:
         :exc:`~django.core.exceptions.ImproperlyConfigured`: When
             ``FRIESE_MCP_RATE_LIMIT`` is present but ``rate`` has an invalid
-            format.
+            format or ``backend`` cannot be imported.
 
     """
 
     def __init__(self) -> None:
-        """Read settings and parse the rate string once at instantiation time."""
+        """Read settings, parse the rate string, and instantiate the backend."""
         config: dict[str, Any] | None = getattr(settings, "FRIESE_MCP_RATE_LIMIT", None)
         self._enabled: bool = config is not None
         self._limit: int = 0
         self._window: int = 1
         self._key_type: str = "user_id"
+        self._backend: AbstractRateLimitBackend | None = None
 
         if config is not None:
             rate_str: str = config.get("rate", "")
@@ -73,8 +144,12 @@ class RateLimitMiddleware:
             self._window = _PERIOD_SECONDS[match.group(2)]
             self._key_type = config.get("key", "user_id")
 
-        self._counters: dict[str, tuple[int, float]] = {}
-        self._lock: threading.Lock = threading.Lock()
+            backend_path: str | None = config.get("backend")
+            self._backend = (
+                _load_backend(backend_path)
+                if backend_path
+                else InMemoryRateLimitBackend()
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -108,22 +183,11 @@ class RateLimitMiddleware:
         call_next: Callable[..., Any],
     ) -> Any:
         """Check the rate limit then delegate to *call_next*."""
-        if not self._enabled:
+        if not self._enabled or self._backend is None:
             return call_next(request, tool_name, arguments)
 
         key = self._resolve_key(request)
-        now = time.monotonic()
-
-        with self._lock:
-            count, window_start = self._counters.get(key, (0, now))
-            if now - window_start >= self._window:
-                count = 0
-                window_start = now
-            count += 1
-            self._counters[key] = (count, window_start)
-            exceeded = count > self._limit
-
-        if exceeded:
+        if not self._backend.allow_request(key, self._limit, self._window):
             raise PermissionError("Rate limit exceeded")
 
         return call_next(request, tool_name, arguments)

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.http import StreamingHttpResponse
 from django.test import RequestFactory, override_settings
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import BasePermission
@@ -90,26 +91,40 @@ class TestHttpGuards:
 
     def test_delete_body_is_empty_object(self, rf: RequestFactory) -> None:
         """DELETE response body is an empty JSON object."""
-        import json as _json
-
         request = rf.delete("/mcp/")
         request.user = _anon_user()
         response = _view(request)
-        assert _json.loads(response.content) == {}
+        assert json.loads(response.content) == {}
 
-    def test_get_returns_405(self, rf: RequestFactory) -> None:
-        """GET requests to the MCP endpoint return 405 Method Not Allowed."""
+    def test_get_returns_200_sse(self, rf: RequestFactory) -> None:
+        """GET requests return 200 with an SSE stream per MCP Streamable HTTP spec."""
         request = rf.get("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        assert response.status_code == 200
+        assert isinstance(response, StreamingHttpResponse)
+        assert "text/event-stream" in response["Content-Type"]
+
+    def test_get_sets_cache_control(self, rf: RequestFactory) -> None:
+        """GET SSE response includes Cache-Control: no-cache."""
+        request = rf.get("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        assert response["Cache-Control"] == "no-cache"
+
+    def test_unsupported_method_returns_405(self, rf: RequestFactory) -> None:
+        """Unsupported HTTP methods (e.g. PUT) return HTTP 405."""
+        request = rf.put("/mcp/", data=b"", content_type="application/json")
         request.user = _anon_user()
         response = _view(request)
         assert response.status_code == 405
 
-    def test_get_body_is_json_rpc_error(self, rf: RequestFactory) -> None:
-        """A 405 response has a JSON-RPC error body."""
-        request = rf.get("/mcp/")
+    def test_unsupported_method_error_code_is_method_not_found(self, rf: RequestFactory) -> None:
+        """HTTP 405 response body uses JSON-RPC -32601 METHOD_NOT_FOUND, not -32600."""
+        request = rf.put("/mcp/", data=b"", content_type="application/json")
         request.user = _anon_user()
         data = _response_data(_view(request))
-        assert data["error"]["code"] == INVALID_REQUEST
+        assert data["error"]["code"] == METHOD_NOT_FOUND
 
     def test_disabled_returns_503(self, rf: RequestFactory, settings: Any) -> None:
         """When FRIESE_MCP_ENABLED=False the endpoint returns 503."""

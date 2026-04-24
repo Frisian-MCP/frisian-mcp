@@ -138,6 +138,9 @@ class OAuthAccessToken(models.Model):
         verbose_name = "OAuth Access Token"
         verbose_name_plural = "OAuth Access Tokens"
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["token", "expires_at"], name="friese_mcp_oat_expires_idx"),
+        ]
 
     def __str__(self) -> str:
         """Return a human-readable representation."""

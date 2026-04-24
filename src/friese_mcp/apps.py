@@ -175,19 +175,23 @@ class FrieseMcpConfig(AppConfig):
         # django.contrib.auth models, which require the app registry to be ready.
         # AppConfig.ready() is the first safe point after full app loading.
         from friese_mcp.backends import (  # pylint: disable=import-outside-toplevel
-            get_discovery_backend,
+            get_discovery_backends,
             get_invocation_backend,
         )
         from friese_mcp.middleware import load_middleware  # pylint: disable=import-outside-toplevel
         from friese_mcp.registry import tool_registry  # pylint: disable=import-outside-toplevel
 
-        discovery = get_discovery_backend()
         invocation = get_invocation_backend()
         dispatcher_names = tool_registry.list_dispatcher_names()
-        tool_defs = _suppress_dispatcher_shadowed(
-            _apply_tool_filters(discovery.discover_tools()),
-            dispatcher_names,
-        )
+
+        # Collect tool definitions from all configured backends; later backends
+        # win on name clashes (dict preserves insertion order, last write wins).
+        merged: dict[str, Any] = {}
+        for discovery in get_discovery_backends():
+            for tool_def in _apply_tool_filters(discovery.discover_tools()):
+                merged[tool_def.name] = tool_def
+
+        tool_defs = _suppress_dispatcher_shadowed(list(merged.values()), dispatcher_names)
 
         for tool_def in tool_defs:
             tool_registry.register(

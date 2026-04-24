@@ -88,6 +88,9 @@ class FrieseMcpToken(models.Model):
         verbose_name = "Friese MCP Token"
         verbose_name_plural = "Friese MCP Tokens"
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["token", "is_active"], name="friese_mcp_tok_active_idx"),
+        ]
 
     def __str__(self) -> str:
         """Return a human-readable representation."""
