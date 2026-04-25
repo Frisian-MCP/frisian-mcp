@@ -234,3 +234,69 @@ class TestRateLimitMiddlewareKeyResolvers:
 
         result = mw(req_b, "tool", {}, _noop_next)
         assert result == {"called": True}
+
+    @override_settings(
+        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRIESE_MCP_TRUSTED_PROXY_COUNT=0,
+    )
+    def test_ip_key_proxy_count_zero_uses_remote_addr(self) -> None:
+        """When proxy_count=0 (default), REMOTE_ADDR is used regardless of XFF."""
+        mw = RateLimitMiddleware()
+        req = _rf.get(
+            "/",
+            REMOTE_ADDR="10.0.0.1",
+            HTTP_X_FORWARDED_FOR="203.0.113.5, 10.0.0.1",
+        )
+        assert mw._resolve_key(req) == "10.0.0.1"  # pylint: disable=protected-access
+
+    @override_settings(
+        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRIESE_MCP_TRUSTED_PROXY_COUNT=1,
+    )
+    def test_ip_key_proxy_count_one_extracts_client_ip(self) -> None:
+        """With proxy_count=1, the single XFF entry (set by the trusted proxy) is the client IP."""
+        mw = RateLimitMiddleware()
+        req = _rf.get(
+            "/",
+            REMOTE_ADDR="10.0.0.1",
+            HTTP_X_FORWARDED_FOR="203.0.113.5",
+        )
+        assert mw._resolve_key(req) == "203.0.113.5"  # pylint: disable=protected-access
+
+    @override_settings(
+        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRIESE_MCP_TRUSTED_PROXY_COUNT=2,
+    )
+    def test_ip_key_proxy_count_two_extracts_client_ip(self) -> None:
+        """With proxy_count=2, two trusted proxies each appended one XFF entry; client is first."""
+        mw = RateLimitMiddleware()
+        req = _rf.get(
+            "/",
+            REMOTE_ADDR="10.0.0.2",
+            HTTP_X_FORWARDED_FOR="203.0.113.5, 10.0.0.1",
+        )
+        assert mw._resolve_key(req) == "203.0.113.5"  # pylint: disable=protected-access
+
+    @override_settings(
+        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRIESE_MCP_TRUSTED_PROXY_COUNT=3,
+    )
+    def test_ip_key_xff_too_short_falls_back_to_remote_addr(self) -> None:
+        """Falls back to REMOTE_ADDR when XFF has fewer entries than proxy_count."""
+        mw = RateLimitMiddleware()
+        req = _rf.get(
+            "/",
+            REMOTE_ADDR="10.0.0.1",
+            HTTP_X_FORWARDED_FOR="203.0.113.5",
+        )
+        assert mw._resolve_key(req) == "10.0.0.1"  # pylint: disable=protected-access
+
+    @override_settings(
+        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRIESE_MCP_TRUSTED_PROXY_COUNT=1,
+    )
+    def test_ip_key_no_xff_header_falls_back_to_remote_addr(self) -> None:
+        """Falls back to REMOTE_ADDR when no X-Forwarded-For header is present."""
+        mw = RateLimitMiddleware()
+        req = _rf.get("/", REMOTE_ADDR="203.0.113.5")
+        assert mw._resolve_key(req) == "203.0.113.5"  # pylint: disable=protected-access

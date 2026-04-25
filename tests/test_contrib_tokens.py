@@ -51,8 +51,10 @@ class TestFrieseMcpTokenModel:
     def test_token_auto_generated_on_save(self) -> None:
         """Token field is populated automatically when a new token is saved."""
         token = FrieseMcpToken.objects.create(name="test-token")
-        assert token.token
-        assert len(token.token) == 64  # secrets.token_hex(32) → 64 hex chars
+        assert token.token  # stored HMAC
+        assert len(token.token) == 64  # HMAC-SHA256 → 64 hex chars
+        assert hasattr(token, "plaintext_token")
+        assert len(token.plaintext_token) == 64  # raw: secrets.token_hex(32) → 64 hex chars
 
     def test_token_not_overwritten_on_update(self) -> None:
         """Existing token value is preserved on subsequent saves."""
@@ -75,10 +77,11 @@ class TestFrieseMcpTokenModel:
         assert "inactive" in str(token)
 
     def test_each_token_unique(self) -> None:
-        """Two tokens created back-to-back have different token values."""
+        """Two tokens created back-to-back have different stored HMACs and raw values."""
         t1 = FrieseMcpToken.objects.create(name="t1")
         t2 = FrieseMcpToken.objects.create(name="t2")
         assert t1.token != t2.token
+        assert t1.plaintext_token != t2.plaintext_token
 
     def test_service_token_no_user(self) -> None:
         """Tokens can be created without a linked user (service tokens)."""
@@ -92,6 +95,27 @@ class TestFrieseMcpTokenModel:
         token = FrieseMcpToken.objects.create(name="alice-token", user=user)
         token.refresh_from_db()
         assert token.user == user
+
+    def test_stored_token_is_hmac_not_plaintext(self) -> None:
+        """The stored token field is not the raw secret — it's the HMAC."""
+        token = FrieseMcpToken.objects.create(name="hash-check")
+        assert token.token != token.plaintext_token
+
+    def test_plaintext_token_absent_on_fresh_db_fetch(self) -> None:
+        """plaintext_token is not present on a freshly fetched instance (creation-time only)."""
+        token = FrieseMcpToken.objects.create(name="reload-check")
+        fetched = FrieseMcpToken.objects.get(pk=token.pk)
+        assert not hasattr(fetched, "plaintext_token")
+
+    def test_auth_rejects_hmac_used_as_bearer(self) -> None:
+        """Sending the stored HMAC as the Bearer value is rejected (wrong layer)."""
+        token = FrieseMcpToken.objects.create(name="hmac-bearer-check")
+
+        class _Req:
+            META = {"HTTP_AUTHORIZATION": f"Bearer {token.token}"}
+
+        with pytest.raises(AuthenticationFailed):
+            FrieseMcpTokenAuthentication().authenticate(_Req())
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +156,7 @@ class TestFrieseMcpTokenAuthentication:
         user = User.objects.create_user(username="bob", password="pw")
         token = FrieseMcpToken.objects.create(name="bob-token", user=user)
 
-        req = self._fake_request(_bearer(token.token))
+        req = self._fake_request(_bearer(token.plaintext_token))
         result = self._auth().authenticate(req)
         assert result is not None
         auth_user, auth_token = result
@@ -142,7 +166,7 @@ class TestFrieseMcpTokenAuthentication:
     def test_valid_service_token_returns_anonymous(self) -> None:
         """Valid token with no user returns (AnonymousUser, token)."""
         token = FrieseMcpToken.objects.create(name="svc")
-        req = self._fake_request(_bearer(token.token))
+        req = self._fake_request(_bearer(token.plaintext_token))
         result = self._auth().authenticate(req)
         assert result is not None
         auth_user, _ = result
@@ -157,7 +181,7 @@ class TestFrieseMcpTokenAuthentication:
     def test_inactive_token_raises_auth_failed(self) -> None:
         """Inactive token raises AuthenticationFailed."""
         token = FrieseMcpToken.objects.create(name="disabled", is_active=False)
-        req = self._fake_request(_bearer(token.token))
+        req = self._fake_request(_bearer(token.plaintext_token))
         with pytest.raises(AuthenticationFailed):
             self._auth().authenticate(req)
 
@@ -165,16 +189,16 @@ class TestFrieseMcpTokenAuthentication:
         """last_used_at is set after a successful authentication."""
         token = FrieseMcpToken.objects.create(name="t")
         assert token.last_used_at is None
-        req = self._fake_request(_bearer(token.token))
+        req = self._fake_request(_bearer(token.plaintext_token))
         self._auth().authenticate(req)
         token.refresh_from_db()
         assert token.last_used_at is not None
 
-    def test_authenticate_header_returns_bearer(self) -> None:
-        """authenticate_header() returns a Bearer realm string."""
-        req = self._fake_request({})
-        header = self._auth().authenticate_header(req)
+    def test_authenticate_header_returns_bearer(self, rf: RequestFactory) -> None:
+        """authenticate_header() returns a Bearer realm string with resource_metadata."""
+        header = self._auth().authenticate_header(rf.get("/"))
         assert header.startswith("Bearer")
+        assert "resource_metadata" in header
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +253,7 @@ class TestMcpEndpointTokenIntegration:
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         with patch("friese_mcp.views.tool_registry", isolated):
-            request = _post_mcp(rf, payload, _bearer(token.token))
+            request = _post_mcp(rf, payload, _bearer(token.plaintext_token))
             response = _view(request)
 
         assert response.status_code == 200

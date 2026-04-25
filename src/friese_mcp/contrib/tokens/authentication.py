@@ -22,7 +22,7 @@ from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
-from .models import FrieseMcpToken
+from .models import FrieseMcpToken, _hmac_token
 
 
 class FrieseMcpTokenAuthentication(BaseAuthentication):
@@ -61,7 +61,7 @@ class FrieseMcpTokenAuthentication(BaseAuthentication):
         token_str = auth_header[len("Bearer ") :]
         try:
             token = FrieseMcpToken.objects.select_related("user").get(
-                token=token_str,
+                token=_hmac_token(token_str),
                 is_active=True,
             )
         except FrieseMcpToken.DoesNotExist:
@@ -75,4 +75,17 @@ class FrieseMcpTokenAuthentication(BaseAuthentication):
 
     def authenticate_header(self, request: Any) -> str:
         """Return the WWW-Authenticate header value for 401 responses."""
+        try:
+            from django.apps import apps  # pylint: disable=import-outside-toplevel
+
+            if apps.is_installed("friese_mcp.contrib.oauth"):
+                from friese_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+                    _get_base_url,
+                )
+
+                base = _get_base_url(request)
+                resource_metadata = f"{base}/.well-known/oauth-protected-resource"
+                return f'Bearer realm="friese-mcp", resource_metadata="{resource_metadata}"'
+        except ImportError:
+            pass
         return 'Bearer realm="friese-mcp"'

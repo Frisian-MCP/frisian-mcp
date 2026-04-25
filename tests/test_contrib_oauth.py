@@ -19,6 +19,7 @@ from friese_mcp.contrib.oauth.views import (
     OAuthProtectedResourceView,
     RegistrationView,
     TokenView,
+    _get_base_url,
 )
 from friese_mcp.registry import ToolRegistry
 from friese_mcp.views import McpEndpointView
@@ -77,10 +78,12 @@ class TestOAuthClientModel:
         assert len(client.client_id) == 32  # secrets.token_hex(16) → 32 hex chars
 
     def test_client_secret_auto_generated(self) -> None:
-        """client_secret is populated automatically on first save."""
+        """client_secret (stored HMAC) and plaintext_client_secret are populated on first save."""
         client = OAuthClient.objects.create(name="test-client")
-        assert client.client_secret
-        assert len(client.client_secret) == 64  # secrets.token_hex(32) → 64 hex chars
+        assert client.client_secret  # stored HMAC
+        assert len(client.client_secret) == 64  # HMAC-SHA256 → 64 hex chars
+        assert hasattr(client, "plaintext_client_secret")
+        assert len(client.plaintext_client_secret) == 64  # raw: token_hex(32) → 64 hex chars
 
     def test_credentials_not_overwritten_on_update(self) -> None:
         """client_id and client_secret are preserved on subsequent saves."""
@@ -110,6 +113,7 @@ class TestOAuthClientModel:
         c2 = OAuthClient.objects.create(name="c2")
         assert c1.client_id != c2.client_id
         assert c1.client_secret != c2.client_secret
+        assert c1.plaintext_client_secret != c2.plaintext_client_secret
 
     def test_default_scope_is_mcp(self) -> None:
         """Default scope is 'mcp'."""
@@ -121,6 +125,31 @@ class TestOAuthClientModel:
         client = OAuthClient.objects.create(name="scoped", scope="mcp read write")
         client.refresh_from_db()
         assert client.scope == "mcp read write"
+
+    def test_stored_secret_is_hmac_not_plaintext(self) -> None:
+        """The stored client_secret is the HMAC, not the raw value."""
+        client = OAuthClient.objects.create(name="hash-check")
+        assert client.client_secret != client.plaintext_client_secret
+
+    def test_plaintext_secret_absent_on_fresh_db_fetch(self) -> None:
+        """plaintext_client_secret is not present on a freshly fetched instance."""
+        client = OAuthClient.objects.create(name="reload-check")
+        fetched = OAuthClient.objects.get(pk=client.pk)
+        assert not hasattr(fetched, "plaintext_client_secret")
+
+    def test_token_endpoint_rejects_hmac_as_secret(self, rf: RequestFactory) -> None:
+        """Sending the stored HMAC as client_secret is rejected (wrong layer)."""
+        client = OAuthClient.objects.create(name="hmac-secret-check")
+        request = _post_token(
+            rf,
+            {
+                "grant_type": "client_credentials",
+                "client_id": client.client_id,
+                "client_secret": client.client_secret,  # HMAC, not raw
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -253,11 +282,24 @@ class TestOAuthTokenAuthentication:
         with pytest.raises(AuthenticationFailed):
             self._auth().authenticate(req)
 
-    def test_authenticate_header_returns_bearer(self) -> None:
-        """authenticate_header() returns a Bearer realm string."""
-        req = self._fake_request({})
-        header = self._auth().authenticate_header(req)
+    def test_authenticate_header_returns_bearer(self, rf: RequestFactory) -> None:
+        """authenticate_header() returns a Bearer realm with resource_metadata."""
+        header = self._auth().authenticate_header(rf.get("/"))
         assert header.startswith("Bearer")
+        assert "resource_metadata" in header
+        assert ".well-known/oauth-protected-resource" in header
+
+    def test_last_used_at_stamped_on_success(self) -> None:
+        """last_used_at is set after a successful authentication."""
+        client = OAuthClient.objects.create(name="tracked")
+        token = OAuthAccessToken.objects.create(client=client)
+        assert token.last_used_at is None
+
+        req = self._fake_request(_bearer(token.token))
+        self._auth().authenticate(req)
+
+        token.refresh_from_db()
+        assert token.last_used_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +319,7 @@ class TestTokenView:
             {
                 "grant_type": "client_credentials",
                 "client_id": client.client_id,
-                "client_secret": client.client_secret,
+                "client_secret": client.plaintext_client_secret,
             },
         )
         response = _token_view(request)
@@ -296,7 +338,7 @@ class TestTokenView:
             {
                 "grant_type": "client_credentials",
                 "client_id": client.client_id,
-                "client_secret": client.client_secret,
+                "client_secret": client.plaintext_client_secret,
             },
         )
         response = _token_view(request)
@@ -351,7 +393,7 @@ class TestTokenView:
             {
                 "grant_type": "client_credentials",
                 "client_id": client.client_id,
-                "client_secret": client.client_secret,
+                "client_secret": client.plaintext_client_secret,
             },
         )
         response = _token_view(request)
@@ -366,13 +408,63 @@ class TestTokenView:
                 {
                     "grant_type": "client_credentials",
                     "client_id": client.client_id,
-                    "client_secret": client.client_secret,
+                    "client_secret": client.plaintext_client_secret,
                 }
             ),
             content_type="application/json",
         )
         response = _token_view(request)
         assert response.status_code == 200
+
+    def test_unknown_client_id_returns_401(self, rf: RequestFactory) -> None:
+        """Non-existent client_id returns 401 with invalid_client error."""
+        request = _post_token(
+            rf,
+            {
+                "grant_type": "client_credentials",
+                "client_id": "doesnotexist00000000000000000000",
+                "client_secret": "doesnotmatter",
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 401
+        data = json.loads(response.content)
+        assert data["error"] == "invalid_client"
+
+    def test_token_scope_matches_client_scope(self, rf: RequestFactory) -> None:
+        """Access token scope reflects the client's configured scope."""
+        client = OAuthClient.objects.create(name="scoped", scope="mcp read")
+        request = _post_token(
+            rf,
+            {
+                "grant_type": "client_credentials",
+                "client_id": client.client_id,
+                "client_secret": client.plaintext_client_secret,
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["scope"] == "mcp read"
+
+    def test_custom_expiry_seconds_reflected_in_response(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS is reflected in the expires_in field."""
+        settings.FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 7200
+        client = OAuthClient.objects.create(name="agent")
+        request = _post_token(
+            rf,
+            {
+                "grant_type": "client_credentials",
+                "client_id": client.client_id,
+                "client_secret": client.plaintext_client_secret,
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["expires_in"] == 7200
 
     def test_get_returns_405(self, rf: RequestFactory) -> None:
         """GET request to token endpoint returns 405."""
@@ -583,3 +675,117 @@ class TestMcpEndpointOAuthIntegration:
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["result"] == {}
+
+
+# ---------------------------------------------------------------------------
+# _get_base_url — reverse proxy support
+# ---------------------------------------------------------------------------
+
+
+class TestGetBaseUrl:
+    """Tests for _get_base_url with and without reverse-proxy headers."""
+
+    def test_issuer_setting_takes_priority(self, rf: RequestFactory, settings: Any) -> None:
+        """FRIESE_MCP_OAUTH_ISSUER overrides everything else."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = "https://api.example.com"
+        request = rf.get("/", HTTP_X_FORWARDED_PROTO="http", HTTP_HOST="internal:8000")
+        assert _get_base_url(request) == "https://api.example.com"
+
+    def test_issuer_setting_trailing_slash_stripped(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """Trailing slash is stripped from FRIESE_MCP_OAUTH_ISSUER."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = "https://api.example.com/"
+        request = rf.get("/")
+        assert _get_base_url(request) == "https://api.example.com"
+
+    def test_no_proxy_uses_build_absolute_uri(self, rf: RequestFactory, settings: Any) -> None:
+        """Without ISSUER or proxy count, build_absolute_uri is used."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = ""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 0
+        request = rf.get("/")  # default SERVER_NAME = testserver
+        result = _get_base_url(request)
+        assert "testserver" in result
+
+    def test_proxy_count_uses_xff_proto(self, rf: RequestFactory, settings: Any) -> None:
+        """With proxy_count>0, X-Forwarded-Proto determines the scheme."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = ""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        request = rf.get(
+            "/",
+            HTTP_X_FORWARDED_PROTO="https",
+            HTTP_X_FORWARDED_HOST="api.example.com",
+        )
+        result = _get_base_url(request)
+        assert result == "https://api.example.com"
+
+    def test_proxy_count_uses_xff_host(self, rf: RequestFactory, settings: Any) -> None:
+        """With proxy_count>0, X-Forwarded-Host overrides the Host header."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = ""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        request = rf.get(
+            "/",
+            HTTP_X_FORWARDED_PROTO="https",
+            HTTP_X_FORWARDED_HOST="public.example.com",
+            SERVER_NAME="internal-host",
+        )
+        result = _get_base_url(request)
+        assert "public.example.com" in result
+        assert "internal-host" not in result
+
+    def test_proxy_xff_proto_first_value_used_when_multiple(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """The first value of X-Forwarded-Proto is used when multiple are present."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = ""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        request = rf.get(
+            "/",
+            HTTP_X_FORWARDED_PROTO="https, http",
+            HTTP_X_FORWARDED_HOST="api.example.com",
+        )
+        result = _get_base_url(request)
+        assert result.startswith("https://")
+
+    def test_proxy_xff_host_first_value_used_when_multiple(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """The first value of X-Forwarded-Host is used when multiple are present."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = ""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        request = rf.get(
+            "/",
+            HTTP_X_FORWARDED_PROTO="https",
+            HTTP_X_FORWARDED_HOST="api.example.com, proxy.internal",
+        )
+        result = _get_base_url(request)
+        assert "api.example.com" in result
+        assert "proxy.internal" not in result
+
+    def test_proxy_no_xff_host_falls_back_to_request_get_host(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """Falls back to request.get_host() when X-Forwarded-Host is absent."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = ""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        settings.ALLOWED_HOSTS = ["testserver"]
+        # No HTTP_X_FORWARDED_HOST — falls back to request.get_host() which reads Host header.
+        # RequestFactory defaults SERVER_NAME to "testserver".
+        request = rf.get("/", HTTP_X_FORWARDED_PROTO="https")
+        result = _get_base_url(request)
+        assert "testserver" in result
+        assert result.startswith("https://")
+
+    def test_well_known_issuer_reflects_proxy_url(self, rf: RequestFactory, settings: Any) -> None:
+        """Authorization server metadata uses the proxy-resolved base URL as issuer."""
+        settings.FRIESE_MCP_OAUTH_ISSUER = ""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        request = rf.get(
+            "/.well-known/oauth-authorization-server",
+            HTTP_X_FORWARDED_PROTO="https",
+            HTTP_X_FORWARDED_HOST="api.example.com",
+        )
+        response = _auth_server_view(request)
+        data = json.loads(response.content)
+        assert data["issuer"] == "https://api.example.com"
+        assert data["token_endpoint"].startswith("https://api.example.com")

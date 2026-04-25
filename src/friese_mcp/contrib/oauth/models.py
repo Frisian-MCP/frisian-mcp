@@ -20,6 +20,8 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
+import hmac as _hmac_lib
 import secrets
 from datetime import datetime, timedelta
 from typing import Any
@@ -27,6 +29,12 @@ from typing import Any
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+
+
+def _hmac_secret(raw: str) -> str:
+    """Return HMAC-SHA256 of *raw* keyed by Django's SECRET_KEY (64 hex chars)."""
+    key = settings.SECRET_KEY.encode()
+    return _hmac_lib.new(key, raw.encode(), hashlib.sha256).hexdigest()
 
 
 def _default_expires_at() -> datetime:
@@ -58,7 +66,7 @@ class OAuthClient(models.Model):
         max_length=64,
         unique=True,
         editable=False,
-        help_text="Auto-generated OAuth client secret.  Treat as a password.",
+        help_text="HMAC-SHA256 of the raw client secret keyed by SECRET_KEY.  Never the raw value.",
     )
     name = models.CharField(
         max_length=200,
@@ -90,9 +98,11 @@ class OAuthClient(models.Model):
     def save(self, *args: Any, **kwargs: Any) -> None:
         """Auto-generate ``client_id`` and ``client_secret`` on first save."""
         if not self.client_id:
-            self.client_id = secrets.token_hex(16)  # 32 hex chars
+            self.client_id = secrets.token_hex(16)  # 32 hex chars — public identifier
         if not self.client_secret:
-            self.client_secret = secrets.token_hex(32)  # 64 hex chars
+            raw = secrets.token_hex(32)
+            self.plaintext_client_secret: str = raw  # pylint: disable=attribute-defined-outside-init
+            self.client_secret = _hmac_secret(raw)
         super().save(*args, **kwargs)
 
 
@@ -129,6 +139,11 @@ class OAuthAccessToken(models.Model):
         max_length=200,
         default="mcp",
         help_text="Space-separated list of scopes granted to this token.",
+    )
+    last_used_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of the most recent authenticated request using this token.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 

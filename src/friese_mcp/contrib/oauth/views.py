@@ -42,7 +42,7 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
-from .models import OAuthAccessToken, OAuthClient
+from .models import OAuthAccessToken, OAuthClient, _hmac_secret
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,15 @@ def _get_base_url(request: HttpRequest) -> str:
     issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "")
     if issuer:
         return issuer.rstrip("/")
+
+    proxy_count: int = getattr(settings, "FRIESE_MCP_TRUSTED_PROXY_COUNT", 0)
+    if proxy_count > 0:
+        xff_proto = request.META.get("HTTP_X_FORWARDED_PROTO", "").strip()
+        scheme = xff_proto.split(",")[0].strip() or request.scheme
+        xff_host = request.META.get("HTTP_X_FORWARDED_HOST", "").strip()
+        host = xff_host.split(",")[0].strip() if xff_host else request.get_host()
+        return f"{scheme}://{host}"
+
     return request.build_absolute_uri("/").rstrip("/")
 
 
@@ -131,7 +140,7 @@ class TokenView(View):
         try:
             client = OAuthClient.objects.get(
                 client_id=client_id,
-                client_secret=client_secret,
+                client_secret=_hmac_secret(client_secret),
             )
         except OAuthClient.DoesNotExist:
             logger.warning("oauth_token_invalid_credentials", extra={"client_id": client_id})
@@ -236,7 +245,7 @@ class RegistrationView(View):
         return JsonResponse(
             {
                 "client_id": client.client_id,
-                "client_secret": client.client_secret,
+                "client_secret": client.plaintext_client_secret,
                 "client_name": client.name,
                 "scope": client.scope,
             },

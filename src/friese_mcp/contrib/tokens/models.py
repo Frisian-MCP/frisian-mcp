@@ -29,11 +29,19 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
+import hmac as _hmac_lib
 import secrets
 from typing import Any
 
 from django.conf import settings
 from django.db import models
+
+
+def _hmac_token(raw: str) -> str:
+    """Return HMAC-SHA256 of *raw* keyed by Django's SECRET_KEY (64 hex chars)."""
+    key = settings.SECRET_KEY.encode()
+    return _hmac_lib.new(key, raw.encode(), hashlib.sha256).hexdigest()
 
 
 class FrieseMcpToken(models.Model):
@@ -57,7 +65,7 @@ class FrieseMcpToken(models.Model):
         max_length=64,
         unique=True,
         editable=False,
-        help_text="Auto-generated Bearer token secret.  Treat as a password.",
+        help_text="HMAC-SHA256 of the raw Bearer token keyed by SECRET_KEY.  Never the raw value.",
     )
     name = models.CharField(
         max_length=200,
@@ -98,7 +106,9 @@ class FrieseMcpToken(models.Model):
         return f"{self.name} ({state})"
 
     def save(self, *args: Any, **kwargs: Any) -> None:
-        """Auto-generate ``token`` on first save."""
+        """Auto-generate ``token`` on first save; exposes raw value once via ``plaintext_token``."""
         if not self.token:
-            self.token = secrets.token_hex(32)
+            raw = secrets.token_hex(32)
+            self.plaintext_token: str = raw  # pylint: disable=attribute-defined-outside-init
+            self.token = _hmac_token(raw)
         super().save(*args, **kwargs)
