@@ -64,6 +64,36 @@ def get_discovery_backend(
     return DRFSyncDiscovery()
 
 
+def get_discovery_backends() -> list[BaseDiscoveryBackend]:
+    """
+    Load and instantiate all configured discovery backends.
+
+    Resolution order:
+
+    1. ``FRIESE_MCP_DISCOVERY_BACKENDS`` — a list of dotted-path strings, each
+       pointing to a :class:`BaseDiscoveryBackend` subclass.  All are loaded
+       and their results are merged in order (later entries win on name clash).
+    2. ``FRIESE_MCP_DISCOVERY_BACKEND`` (singular, legacy) — wrapped in a
+       single-element list so existing configurations are unaffected.
+    3. :class:`DRFSyncDiscovery` — the built-in default.
+
+    Returns:
+        A list of instantiated :class:`BaseDiscoveryBackend` objects.  Always
+        contains at least one element.
+
+    """
+    plural: list[str] | None = getattr(settings, "FRIESE_MCP_DISCOVERY_BACKENDS", None)
+    if plural is not None:
+        return [_load_class(path)() for path in plural]  # type: ignore[misc]
+
+    singular: str | None = getattr(settings, "FRIESE_MCP_DISCOVERY_BACKEND", None)
+    if singular is not None:
+        cls = _load_class(singular)
+        return [cls()]  # type: ignore[return-value]
+
+    return [DRFSyncDiscovery()]
+
+
 def get_invocation_backend(
     default: type[BaseInvocationBackend] | None = None,
 ) -> BaseInvocationBackend:
@@ -98,6 +128,7 @@ __all__ = [
     "ToolDefinition",
     "ToolResult",
     "get_discovery_backend",
+    "get_discovery_backends",
     "get_invocation_backend",
 ]
 

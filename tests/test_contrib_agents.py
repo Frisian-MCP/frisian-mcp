@@ -7,9 +7,10 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.core.exceptions import ValidationError
 from django.test import RequestFactory
 
-from friese_mcp.contrib.agents.models import AgentConnection
+from friese_mcp.contrib.agents.models import AgentConnection, validate_tool_name_list
 from friese_mcp.contrib.oauth.models import OAuthClient
 from friese_mcp.contrib.tokens.models import FrieseMcpToken
 from friese_mcp.registry import ToolRegistry
@@ -134,6 +135,97 @@ class TestAgentConnectionModel:
         AgentConnection.objects.create(name="second")
         names = list(AgentConnection.objects.values_list("name", flat=True))
         assert names[0] == "second"
+
+    def test_get_agent_connection_token_select_related_no_extra_query(
+        self, django_assert_num_queries: Any
+    ) -> None:
+        """_get_agent_connection() via token uses select_related — FK attrs need no extra query."""
+        from friese_mcp.views import _get_agent_connection  # pylint: disable=import-outside-toplevel
+        from unittest.mock import MagicMock  # pylint: disable=import-outside-toplevel
+
+        token = FrieseMcpToken.objects.create(name="sr-tok")
+        AgentConnection.objects.create(name="sr-agent", token=token)
+        req = MagicMock()
+        req.auth = token
+        conn = _get_agent_connection(req)
+        assert conn is not None
+        with django_assert_num_queries(0):
+            _ = conn.token
+            _ = conn.oauth_client
+
+
+# ---------------------------------------------------------------------------
+# validate_tool_name_list validator
+# ---------------------------------------------------------------------------
+
+
+class TestValidateToolNameList:
+    """Unit tests for the validate_tool_name_list standalone validator."""
+
+    def test_valid_list_passes(self) -> None:
+        """A list of non-empty strings raises no exception."""
+        validate_tool_name_list(["users.list", "workouts.create"])
+
+    def test_empty_list_passes(self) -> None:
+        """An empty list is valid (means 'no tools allowed')."""
+        validate_tool_name_list([])
+
+    def test_dict_raises(self) -> None:
+        """A dict raises ValidationError — not a list."""
+        with pytest.raises(ValidationError, match="JSON array"):
+            validate_tool_name_list({"users.list": True})
+
+    def test_integer_raises(self) -> None:
+        """An integer raises ValidationError — not a list."""
+        with pytest.raises(ValidationError):
+            validate_tool_name_list(42)
+
+    def test_non_string_element_raises(self) -> None:
+        """A list containing a non-string element raises ValidationError."""
+        with pytest.raises(ValidationError, match=r"\[0\]"):
+            validate_tool_name_list([123])
+
+    def test_empty_string_element_raises(self) -> None:
+        """A list containing an empty string raises ValidationError."""
+        with pytest.raises(ValidationError, match=r"\[0\]"):
+            validate_tool_name_list([""])
+
+    def test_whitespace_only_string_raises(self) -> None:
+        """A list containing a whitespace-only string raises ValidationError."""
+        with pytest.raises(ValidationError, match=r"\[0\]"):
+            validate_tool_name_list(["   "])
+
+    def test_mixed_valid_then_invalid_raises(self) -> None:
+        """Validation fails on the first invalid element, not silently skipped."""
+        with pytest.raises(ValidationError, match=r"\[1\]"):
+            validate_tool_name_list(["valid.tool", ""])
+
+
+@pytest.mark.django_db
+class TestAgentConnectionAllowedToolsValidation:
+    """AgentConnection.full_clean() rejects non-list allowed_tools values."""
+
+    def test_full_clean_accepts_null(self) -> None:
+        """full_clean() passes when allowed_tools is None."""
+        conn = AgentConnection(name="agent")
+        conn.full_clean(exclude=["token", "oauth_client"])
+
+    def test_full_clean_accepts_valid_list(self) -> None:
+        """full_clean() passes for a valid list of tool names."""
+        conn = AgentConnection(name="agent", allowed_tools=["users.list"])
+        conn.full_clean(exclude=["token", "oauth_client"])
+
+    def test_full_clean_rejects_dict(self) -> None:
+        """full_clean() raises ValidationError when allowed_tools is a dict."""
+        conn = AgentConnection(name="agent", allowed_tools={"users.list": True})
+        with pytest.raises(ValidationError):
+            conn.full_clean(exclude=["token", "oauth_client"])
+
+    def test_full_clean_rejects_non_string_element(self) -> None:
+        """full_clean() raises ValidationError when an element is not a string."""
+        conn = AgentConnection(name="agent", allowed_tools=[42])
+        with pytest.raises(ValidationError):
+            conn.full_clean(exclude=["token", "oauth_client"])
 
 
 # ---------------------------------------------------------------------------

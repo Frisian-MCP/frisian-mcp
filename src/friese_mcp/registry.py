@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 from collections.abc import Callable
@@ -9,6 +10,7 @@ from typing import Any
 
 import jsonschema
 import jsonschema.exceptions
+from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.http import HttpRequest
 from rest_framework.permissions import BasePermission
@@ -205,9 +207,43 @@ class ToolRegistry:
             if not perm.has_permission(request, None):  # type: ignore[arg-type]
                 raise PermissionError(f"Permission denied by {perm_class.__name__}")
 
+        if asyncio.iscoroutinefunction(entry.fn):
+            return async_to_sync(entry.fn)(arguments, request)
         return entry.fn(arguments, request)
 
 
 #: Module-level singleton imported by ``views.py`` and ``@mcp_tool``.
 #: Import this directly rather than instantiating :class:`ToolRegistry`.
 tool_registry: ToolRegistry = ToolRegistry()
+
+
+def register(
+    name: str,
+    description: str,
+    input_schema: dict[str, Any],
+    handler: Callable[..., Any],
+    permission_classes: list[type[BasePermission]] | None = None,
+) -> None:
+    """
+    Register a callable as a named MCP tool with the global registry.
+
+    This is the imperative counterpart to ``@mcp_tool``, intended for host
+    apps that register tools from ``AppConfig.ready()`` rather than at import
+    time.  The handler signature must be ``(arguments: dict, request: HttpRequest)``.
+
+    Args:
+        name: Unique tool name (e.g. ``"orders.cancel"``).
+        description: Human-readable description shown in ``tools/list``.
+        input_schema: JSON Schema (draft-07) describing expected arguments.
+        handler: Callable invoked as ``handler(arguments, request)``.
+        permission_classes: DRF ``BasePermission`` subclasses guarding this
+            tool.  Pass ``None`` or ``[]`` for unrestricted access.
+
+    """
+    tool_registry.register(
+        name=name,
+        fn=handler,
+        description=description,
+        input_schema=input_schema,
+        permission_classes=permission_classes,
+    )

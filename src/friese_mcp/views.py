@@ -18,7 +18,8 @@ Supported methods
 
 Authentication & permissions
 -----------------------------
-``McpEndpointView`` extends DRF's :class:`~rest_framework.views.APIView`, which
+:class:`McpView` (formerly ``McpEndpointView``) extends DRF's
+:class:`~rest_framework.views.APIView`, which
 means host projects can gate the MCP surface using standard DRF mechanisms:
 
 * ``FRIESE_MCP_AUTHENTICATION_CLASSES`` — list of dotted-path strings *or*
@@ -40,6 +41,7 @@ from collections.abc import Generator
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import cache as django_cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -63,6 +65,8 @@ from friese_mcp.registry import ToolInputError, tool_registry
 from friese_mcp.resources import ResourceNotFoundError, resource_registry
 
 logger = logging.getLogger(__name__)
+
+_TOOLS_LIST_CACHE_KEY = "friese_mcp:tools_list"
 
 _REFRESH_HINT = (
     " Call tools/list to refresh your available tools"
@@ -182,7 +186,11 @@ def _get_agent_connection(request: Any) -> Any | None:
         )
 
         if isinstance(auth, FrieseMcpToken):
-            return auth.agent_connections.filter(is_active=True).first()
+            return (
+                auth.agent_connections.select_related("token", "oauth_client")
+                .filter(is_active=True)
+                .first()
+            )
     except ImportError:
         pass
 
@@ -192,7 +200,11 @@ def _get_agent_connection(request: Any) -> Any | None:
         )
 
         if isinstance(auth, OAuthAccessToken):
-            return auth.client.agent_connections.filter(is_active=True).first()
+            return (
+                auth.client.agent_connections.select_related("token", "oauth_client")
+                .filter(is_active=True)
+                .first()
+            )
     except ImportError:
         pass
 
@@ -348,8 +360,18 @@ def _handle_tools_list(
     ``FRIESE_MCP_AUTHENTICATION_CLASSES`` / ``FRIESE_MCP_PERMISSION_CLASSES`` or
     upstream infrastructure.
     """
-    tools = tool_registry.list_tools()
     conn = _get_agent_connection(request)
+    cache_ttl: int | None = getattr(settings, "FRIESE_MCP_TOOLS_LIST_CACHE_TTL", None)
+    use_cache = cache_ttl is not None and (conn is None or conn.allowed_tools is None)
+
+    if use_cache:
+        tools: list[dict[str, Any]] | None = django_cache.get(_TOOLS_LIST_CACHE_KEY)
+        if tools is None:
+            tools = tool_registry.list_tools()
+            django_cache.set(_TOOLS_LIST_CACHE_KEY, tools, cache_ttl)
+    else:
+        tools = tool_registry.list_tools()
+
     if conn is not None and conn.allowed_tools is not None:
         allowed: frozenset[str] = frozenset(conn.allowed_tools)
         tools = [t for t in tools if t["name"] in allowed]
@@ -523,9 +545,9 @@ def _handle_tools_call(
     )
 
 
-def _handle_resources_list(request_id: JsonRpcId) -> JsonResponse:
+def _handle_resources_list(request_id: JsonRpcId, request: Any) -> JsonResponse:
     """Handle ``resources/list`` — return all registered resources."""
-    return _jsonrpc_success(request_id, {"resources": resource_registry.list_resources()})
+    return _jsonrpc_success(request_id, {"resources": resource_registry.list_resources(request)})
 
 
 def _handle_resources_read(request_id: JsonRpcId, params: JsonDict, request: Any) -> JsonResponse:
@@ -641,7 +663,7 @@ def _parse_and_dispatch(  # pylint: disable=too-many-branches
     if method == "tools/call":
         return _handle_tools_call(request, request_id, params)
     if method == "resources/list":
-        return _handle_resources_list(request_id)
+        return _handle_resources_list(request_id, request)
     if method == "resources/read":
         return _handle_resources_read(request_id, params, request)
     if method == "help":
@@ -671,7 +693,7 @@ class _EventStreamRenderer(BaseRenderer):
 # ---------------------------------------------------------------------------
 
 
-class McpEndpointView(APIView):
+class McpView(APIView):
     """
     MCP gateway — single HTTP POST endpoint for all JSON-RPC 2.0 traffic.
 
@@ -736,8 +758,26 @@ class McpEndpointView(APIView):
             return []
         return [cls() for cls in classes]
 
+    def get(self, request: DRFRequest, *args: Any, **kwargs: Any) -> StreamingHttpResponse:
+        """
+        Handle GET — open an empty SSE channel per MCP Streamable HTTP spec.
+
+        The MCP 2025-03-26 Streamable HTTP transport requires GET to return a
+        ``text/event-stream`` response so that clients can establish an
+        SSE channel before submitting POST requests.  The stream body is empty;
+        the connection stays open until the client disconnects.
+        """
+
+        def _empty_stream() -> Generator[str, None, None]:
+            return
+            yield  # pragma: no cover  # makes this a generator function
+
+        resp = StreamingHttpResponse(_empty_stream(), content_type="text/event-stream")
+        resp["Cache-Control"] = "no-cache"
+        return resp
+
     def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse:
-        """Handle POST — the only allowed HTTP method."""
+        """Handle POST — dispatch JSON-RPC 2.0 requests."""
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             return _maybe_sse(
                 JsonResponse(
@@ -764,7 +804,11 @@ class McpEndpointView(APIView):
             {
                 "jsonrpc": "2.0",
                 "id": None,
-                "error": {"code": INVALID_REQUEST, "message": "Method Not Allowed — POST only"},
+                "error": {"code": METHOD_NOT_FOUND, "message": "Method Not Allowed — POST only"},
             },
             status=405,
         )
+
+
+#: Backward-compatible alias — prefer :class:`McpView` for new code.
+McpEndpointView = McpView

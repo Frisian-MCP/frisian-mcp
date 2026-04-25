@@ -35,7 +35,31 @@ Usage::
 
 from __future__ import annotations
 
+from typing import Any
+
+from django.core.exceptions import ValidationError
 from django.db import models
+
+
+def validate_tool_name_list(value: Any) -> None:
+    """
+    Validate that *value* is a list of non-empty strings.
+
+    Called by Django at form and model validation time.  Raises
+    :exc:`~django.core.exceptions.ValidationError` when *value* is not a list
+    or when any element is not a non-empty string.
+    """
+    if not isinstance(value, list):
+        raise ValidationError(
+            "allowed_tools must be a JSON array, not %(type)s.",
+            params={"type": type(value).__name__},
+        )
+    for i, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValidationError(
+                "allowed_tools[%(i)d] must be a non-empty string.",
+                params={"i": i},
+            )
 
 AGENT_TYPE_CHOICES: list[tuple[str, str]] = [
     ("claude-code", "Claude Code"),
@@ -93,6 +117,7 @@ class AgentConnection(models.Model):
     allowed_tools = models.JSONField(
         null=True,
         blank=True,
+        validators=[validate_tool_name_list],
         help_text=(
             'Optional JSON array of tool names this agent may see and call '
             '(e.g. ["users.list", "workouts.create"]). '
