@@ -12,8 +12,10 @@ friese-mcp exposes your existing Django REST Framework ViewSets as [Model Contex
 
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Connecting MCP clients](#connecting-mcp-clients)
 - [Quickstart](#quickstart)
 - [Settings reference](#settings-reference)
+- [Reverse proxy configuration](#reverse-proxy-configuration)
 - [Authentication and permissions](#authentication-and-permissions)
 - [Built-in authentication](#built-in-authentication)
   - [contrib.tokens — static Bearer tokens](#contribtokens--static-bearer-tokens)
@@ -71,6 +73,89 @@ urlpatterns = [
 ```
 
 The gateway is now reachable at `POST /mcp/`.
+
+---
+
+## Connecting MCP clients
+
+Run the built-in management command to generate a ready-to-paste `mcpServers` config block:
+
+```bash
+python manage.py mcp_config [--client {claude-code,cursor,claude-desktop,generic}] [--url URL] [--token VALUE] [--name KEY]
+```
+
+**URL resolution order:** `--url` flag → `FRIESE_MCP_BASE_URL` setting → `http://localhost:8000/mcp/`
+
+**Server name resolution:** `--name` flag → `FRIESE_MCP_SERVER_NAME` setting → `"friese-mcp"`
+
+### Output schema by client
+
+| `--client` | Output shape |
+|---|---|
+| `claude-code` | `{"type": "http", "url": ..., ["headers": {...}]}` |
+| `cursor` | `{"type": "http", "url": ..., ["headers": {...}]}` |
+| `claude-desktop` | `{"url": ..., ["headers": {...}]}` |
+| `generic` (default) | `{"url": ..., "transport": "http", ["headers": {...}]}` |
+
+`headers` is only present when `--token` is supplied.
+
+### Examples
+
+**Generic (no auth):**
+```bash
+python manage.py mcp_config
+```
+```json
+{
+  "mcpServers": {
+    "friese-mcp": {
+      "url": "http://localhost:8000/mcp/",
+      "transport": "http"
+    }
+  }
+}
+```
+
+**Claude Code / Cursor with a Bearer token:**
+```bash
+python manage.py mcp_config --client claude-code --token mytoken123
+```
+```json
+{
+  "mcpServers": {
+    "friese-mcp": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp/",
+      "headers": {
+        "Authorization": "Bearer mytoken123"
+      }
+    }
+  }
+}
+```
+
+**Claude Desktop (production URL, custom server name):**
+```bash
+python manage.py mcp_config --client claude-desktop --url https://api.example.com/mcp/ --name my-product
+```
+```json
+{
+  "mcpServers": {
+    "my-product": {
+      "url": "https://api.example.com/mcp/"
+    }
+  }
+}
+```
+
+When `--client claude-desktop` is used, the command also prints the config file path to stderr:
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/claude/claude_desktop_config.json`
+
+> **Security note:** `--token` embeds the Bearer value in the output JSON. Treat the command output as sensitive when a real token is used — do not commit it to version control.
+
+**Multi-server setups:** Use `--name` to produce entries with distinct keys, then merge the `mcpServers` objects manually.
 
 ---
 
@@ -282,6 +367,80 @@ FRIESE_MCP_EXPOSE_ERRORS = False
 
 When the setting is absent, it inherits `settings.DEBUG`: errors are verbose in development and suppressed in production by default. Full error details are always logged server-side via `logger.exception` regardless of this setting.
 
+### `FRIESE_MCP_BASE_URL`
+
+**Type:** `str` | **Default:** absent
+
+Base URL used by `python manage.py mcp_config` when generating the `mcpServers` JSON block. When absent, the command falls back to `http://localhost:8000/mcp/`. This setting does not affect the gateway endpoint itself — set it so generated configs point at your production URL without requiring `--url` on every invocation.
+
+```python
+FRIESE_MCP_BASE_URL = "https://api.example.com/mcp/"
+```
+
+### `FRIESE_MCP_TRUSTED_PROXY_COUNT`
+
+**Type:** `int` | **Default:** `0`
+
+Number of trusted reverse proxies in front of the Django application. When `> 0`, friese-mcp reads `X-Forwarded-Proto` and `X-Forwarded-Host` for URL construction (OAuth well-known metadata, `WWW-Authenticate` resource URL) and pulls the real client IP from `X-Forwarded-For` when `RateLimitMiddleware` is configured with `key='ip'`.
+
+Set this to the number of proxy hops that add a trusted `X-Forwarded-For` entry (typically `1` for a single nginx/Caddy/ALB in front of Django).
+
+```python
+FRIESE_MCP_TRUSTED_PROXY_COUNT = 1  # one nginx/Caddy/ALB in front of Django
+```
+
+See [Reverse proxy configuration](#reverse-proxy-configuration) for a full example.
+
+---
+
+## Reverse proxy configuration
+
+In production, Django typically runs behind a reverse proxy (nginx, Caddy, AWS ALB). By default, `request.build_absolute_uri('/')` returns the internal hostname and scheme, which causes two problems:
+
+1. **OAuth well-known metadata** — the `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource` endpoints embed the issuer URL. With the internal hostname, MCP clients that perform OAuth auto-discovery will build token endpoint URLs that don't resolve.
+2. **Rate limiting by IP** — `RateLimitMiddleware` with `key='ip'` reads `REMOTE_ADDR`, which is the proxy's IP when behind a proxy. All clients collapse into a single bucket.
+
+### Option A — Set `FRIESE_MCP_TRUSTED_PROXY_COUNT` (dynamic, per-request)
+
+Tell friese-mcp how many proxies are in the chain. It will read `X-Forwarded-Proto` and `X-Forwarded-Host` for URL construction, and extract the real client IP from `X-Forwarded-For`:
+
+```python
+# settings.py
+FRIESE_MCP_TRUSTED_PROXY_COUNT = 1  # one nginx/Caddy/ALB in front of Django
+```
+
+Make sure your proxy sets these headers. Example nginx configuration:
+
+```nginx
+location /mcp/ {
+    proxy_pass         http://django:8000;
+    proxy_set_header   Host              $host;
+    proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_set_header   X-Forwarded-Host  $host;
+}
+```
+
+### Option B — Set `FRIESE_MCP_OAUTH_ISSUER` (explicit, recommended for production)
+
+For maximum predictability, set the issuer URL directly. friese-mcp uses this value without inspecting request headers:
+
+```python
+# settings.py
+FRIESE_MCP_OAUTH_ISSUER = "https://api.example.com"
+```
+
+When `FRIESE_MCP_OAUTH_ISSUER` is unset and `DEBUG = False`, friese-mcp logs a startup warning recommending you set it.
+
+### Recommended production settings
+
+```python
+# settings.py
+FRIESE_MCP_OAUTH_ISSUER = "https://api.example.com"   # explicit — no header inspection
+FRIESE_MCP_TRUSTED_PROXY_COUNT = 1                     # real client IP for rate limiting
+FRIESE_MCP_BASE_URL = "https://api.example.com/mcp/"  # mcp_config command output
+```
+
 ---
 
 ## Authentication and permissions
@@ -385,7 +544,7 @@ No URL configuration required — `contrib.tokens` only provides models and an a
 
 #### Creating tokens
 
-**Django admin:** Open `/admin/`, navigate to **Friese MCP Tokens**, and click **Add**. Set a `name` (e.g. `"claude-agent"`), leave `token` blank (auto-generated), and save. Copy the token value from the detail page.
+Tokens are generated automatically on first save. The raw Bearer value is exposed **once** as `instance.plaintext_token` on the freshly-created object — it is not stored in the database and cannot be retrieved later.
 
 **Shell:**
 ```python
@@ -397,8 +556,10 @@ token = FrieseMcpToken.objects.create(name="claude-agent", user=my_user)
 # Service token — no user
 token = FrieseMcpToken.objects.create(name="ci-pipeline")
 
-print(token.token)  # 64-hex-char secret — copy it now
+print(token.plaintext_token)  # raw Bearer value — save this now, it cannot be retrieved later
 ```
+
+**Django admin:** Navigate to **Friese MCP Tokens → Add**. Fill in a `name`, leave `token` blank, and save. The raw token is **not** displayed in the admin — use the shell method above when you need to capture it at creation time.
 
 #### Using tokens
 
@@ -416,12 +577,14 @@ Content-Type: application/json
 
 | Field | Type | Description |
 |---|---|---|
-| `token` | `CharField(64)` | Auto-generated 64-hex-char secret. Read-only after creation. |
+| `token` | `CharField(64)` | HMAC-SHA256 of the raw Bearer token keyed by `SECRET_KEY`. The raw value is exposed once as `instance.plaintext_token` immediately after creation and is never stored. |
 | `name` | `CharField(200)` | Human-readable label (e.g. `"claude-agent"`). |
 | `is_active` | `BooleanField` | Set to `False` to revoke. Inactive tokens are rejected. |
 | `user` | `ForeignKey(AUTH_USER_MODEL, null=True)` | Optional user. `None` for service tokens. |
 | `created_at` | `DateTimeField` | Auto-set on creation. |
 | `last_used_at` | `DateTimeField(null=True)` | Updated on each successful authentication (queryset update, no signals). |
+
+> **Pre-v1 tokens:** If your project created tokens before upgrading to v1.0 (when the field stored the raw value), those tokens will no longer authenticate. Delete and recreate them — this is a one-time migration step for early adopters.
 
 #### `FrieseMcpTokenAuthentication`
 
@@ -474,16 +637,18 @@ python manage.py migrate
 
 #### Managing OAuth clients
 
-**Django admin:** Open `/admin/`, navigate to **OAuth Clients**, and click **Add**. Set a name and scope. `client_id` and `client_secret` are auto-generated on save. Copy both values from the detail page.
+`client_id` and `client_secret` are auto-generated on first save. `client_id` is a public identifier and is readable at any time. `client_secret` is stored as an HMAC-SHA256 hash — the raw value is exposed **once** as `instance.plaintext_client_secret` on the freshly-created object and cannot be recovered later.
 
 **Shell:**
 ```python
 from friese_mcp.contrib.oauth.models import OAuthClient
 
 client = OAuthClient.objects.create(name="claude-agent")
-print(client.client_id)     # 32-hex-char client identifier
-print(client.client_secret) # 64-hex-char secret
+print(client.client_id)                 # 32-hex-char public identifier
+print(client.plaintext_client_secret)   # raw secret — save this now, it cannot be retrieved later
 ```
+
+**Django admin:** Navigate to **OAuth Clients → Add**. Set a name and scope and save. `client_id` is visible in the detail page; the raw `client_secret` is **not** — use the shell method above to capture it at creation time.
 
 #### OAuth flow
 
@@ -592,12 +757,14 @@ Reads `Authorization: Bearer <token>`. Looks up the token in `OAuthAccessToken`,
 
 | Field | Type | Description |
 |---|---|---|
-| `client_id` | `CharField(32)` | Auto-generated 32-hex-char identifier. |
-| `client_secret` | `CharField(64)` | Auto-generated 64-hex-char secret. |
+| `client_id` | `CharField(32)` | Auto-generated 32-hex-char public identifier. Readable at any time. |
+| `client_secret` | `CharField(64)` | HMAC-SHA256 of the raw client secret keyed by `SECRET_KEY`. The raw value is exposed once as `instance.plaintext_client_secret` immediately after creation and is never stored. |
 | `name` | `CharField(200)` | Human-readable label. |
 | `is_active` | `BooleanField` | Set to `False` to revoke all token issuance. Existing tokens are also rejected. |
 | `scope` | `CharField(200)` | Space-separated scopes (default `"mcp"`). |
 | `created_at` | `DateTimeField` | Auto-set on creation. |
+
+> **Pre-v1 clients:** If your project created `OAuthClient` records before upgrading to v1.0 (when `client_secret` stored the raw value), those clients will no longer be able to authenticate. Delete and recreate them — this is a one-time migration step for early adopters.
 
 #### `OAuthAccessToken` model
 

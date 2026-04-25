@@ -131,6 +131,8 @@ class RateLimitMiddleware:
         self._key_type: str = "user_id"
         self._backend: AbstractRateLimitBackend | None = None
 
+        self._proxy_count: int = getattr(settings, "FRIESE_MCP_TRUSTED_PROXY_COUNT", 0)
+
         if config is not None:
             rate_str: str = config.get("rate", "")
             match = _RATE_RE.match(rate_str)
@@ -158,6 +160,11 @@ class RateLimitMiddleware:
     def _resolve_key(self, request: Any) -> str:
         """Derive the rate-limit bucket key from *request*."""
         if self._key_type == "ip":
+            if self._proxy_count > 0:
+                xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+                parts = [p.strip() for p in xff.split(",") if p.strip()]
+                if len(parts) >= self._proxy_count:
+                    return parts[-self._proxy_count]
             return str(request.META.get("REMOTE_ADDR", "unknown"))
 
         user = getattr(request, "user", None)

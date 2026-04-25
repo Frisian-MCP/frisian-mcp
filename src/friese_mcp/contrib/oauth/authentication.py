@@ -24,10 +24,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 from .models import OAuthAccessToken
+from .views import _get_base_url
 
 
 class OAuthServicePrincipal:
@@ -91,8 +93,16 @@ class OAuthTokenAuthentication(BaseAuthentication):
         if access_token.is_expired():
             raise AuthenticationFailed("OAuth token has expired.")
 
+        OAuthAccessToken.objects.filter(pk=access_token.pk).update(last_used_at=timezone.now())
+
         return (OAuthServicePrincipal(), access_token)
 
     def authenticate_header(self, request: Any) -> str:
         """Return the WWW-Authenticate header value for 401 responses."""
-        return 'Bearer realm="friese-mcp" error="invalid_token"'
+        base = _get_base_url(request)
+        resource_metadata = f"{base}/.well-known/oauth-protected-resource"
+        return (
+            f'Bearer realm="friese-mcp",'
+            f' resource_metadata="{resource_metadata}",'
+            f' error="invalid_token"'
+        )

@@ -206,7 +206,7 @@ class TestToolsListCacheBypassForAgentFilter:
                     {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
                 ),
                 content_type="application/json",
-                HTTP_AUTHORIZATION=f"Bearer {token.token}",
+                HTTP_AUTHORIZATION=f"Bearer {token.plaintext_token}",
             )
             _view(req)
         mock_cache.get.assert_not_called()
@@ -245,7 +245,7 @@ class TestToolsListCacheBypassForAgentFilter:
                     {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
                 ),
                 content_type="application/json",
-                HTTP_AUTHORIZATION=f"Bearer {token.token}",
+                HTTP_AUTHORIZATION=f"Bearer {token.plaintext_token}",
             )
             _view(req)
         mock_cache.get.assert_called_once_with(_TOOLS_LIST_CACHE_KEY)

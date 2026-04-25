@@ -189,6 +189,7 @@ def _get_agent_connection(request: Any) -> Any | None:
             return (
                 auth.agent_connections.select_related("token", "oauth_client")
                 .filter(is_active=True)
+                .order_by("-created_at")
                 .first()
             )
     except ImportError:
@@ -203,6 +204,7 @@ def _get_agent_connection(request: Any) -> Any | None:
             return (
                 auth.client.agent_connections.select_related("token", "oauth_client")
                 .filter(is_active=True)
+                .order_by("-created_at")
                 .first()
             )
     except ImportError:

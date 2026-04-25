@@ -39,6 +39,7 @@ from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 
 
 def validate_tool_name_list(value: Any) -> None:
@@ -163,6 +164,19 @@ class AgentConnection(models.Model):
         verbose_name = "Agent Connection"
         verbose_name_plural = "Agent Connections"
         ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(token__isnull=True) | Q(oauth_client__isnull=True),
+                name="agent_connection_xor_credential",
+            ),
+        ]
+
+    def clean(self) -> None:
+        """Enforce XOR: at most one of token or oauth_client may be set."""
+        if self.token_id is not None and self.oauth_client_id is not None:
+            raise ValidationError(
+                "An AgentConnection may have a token or an oauth_client, but not both."
+            )
 
     def __str__(self) -> str:
         """Return a human-readable representation."""

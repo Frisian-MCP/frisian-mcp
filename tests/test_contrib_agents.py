@@ -136,12 +136,42 @@ class TestAgentConnectionModel:
         names = list(AgentConnection.objects.values_list("name", flat=True))
         assert names[0] == "second"
 
+    def test_clean_raises_when_both_credentials_set(self) -> None:
+        """clean() raises ValidationError when both token and oauth_client are set."""
+        from django.core.exceptions import ValidationError as DjangoValidationError  # noqa: PLC0415
+
+        token = FrieseMcpToken.objects.create(name="dual-tok")
+        client = OAuthClient.objects.create(name="dual-client")
+        conn = AgentConnection(name="dual", token=token, oauth_client=client)
+        with pytest.raises(DjangoValidationError, match="but not both"):
+            conn.clean()
+
+    def test_clean_passes_with_only_token(self) -> None:
+        """clean() raises no exception when only token is set."""
+        token = FrieseMcpToken.objects.create(name="tok-only")
+        conn = AgentConnection(name="tok-agent", token=token)
+        conn.clean()  # must not raise
+
+    def test_clean_passes_with_only_oauth_client(self) -> None:
+        """clean() raises no exception when only oauth_client is set."""
+        client = OAuthClient.objects.create(name="oauth-only")
+        conn = AgentConnection(name="oauth-agent", oauth_client=client)
+        conn.clean()  # must not raise
+
+    def test_clean_passes_with_no_credential(self) -> None:
+        """clean() raises no exception when neither credential is set (profile-only)."""
+        conn = AgentConnection(name="profile-only")
+        conn.clean()  # must not raise
+
     def test_get_agent_connection_token_select_related_no_extra_query(
         self, django_assert_num_queries: Any
     ) -> None:
         """_get_agent_connection() via token uses select_related — FK attrs need no extra query."""
-        from friese_mcp.views import _get_agent_connection  # pylint: disable=import-outside-toplevel
         from unittest.mock import MagicMock  # pylint: disable=import-outside-toplevel
+
+        from friese_mcp.views import (
+            _get_agent_connection,  # pylint: disable=import-outside-toplevel
+        )
 
         token = FrieseMcpToken.objects.create(name="sr-tok")
         AgentConnection.objects.create(name="sr-agent", token=token)
@@ -166,8 +196,8 @@ class TestValidateToolNameList:
         """A list of non-empty strings raises no exception."""
         validate_tool_name_list(["users.list", "workouts.create"])
 
-    def test_empty_list_passes(self) -> None:
-        """An empty list is valid (means 'no tools allowed')."""
+    def test_empty_list_validates_but_filters_to_no_tools(self) -> None:
+        """An empty list is a valid value but means zero tools are allowed (not 'unrestricted')."""
         validate_tool_name_list([])
 
     def test_dict_raises(self) -> None:
@@ -321,7 +351,7 @@ class TestPerAgentToolsList:
             name="unrestricted", token=token, allowed_tools=None
         )
         reg = _isolated_registry("users.list", "users.create")
-        tools = self._call_tools_list(rf, reg, bearer=token.token)
+        tools = self._call_tools_list(rf, reg, bearer=token.plaintext_token)
         names = {t["name"] for t in tools}
         assert names == {"users.list", "users.create"}
 
@@ -337,7 +367,7 @@ class TestPerAgentToolsList:
             allowed_tools=["users.list"],
         )
         reg = _isolated_registry("users.list", "users.create", "workouts.list")
-        tools = self._call_tools_list(rf, reg, bearer=token.token)
+        tools = self._call_tools_list(rf, reg, bearer=token.plaintext_token)
         names = {t["name"] for t in tools}
         assert names == {"users.list"}
 
@@ -354,7 +384,7 @@ class TestPerAgentToolsList:
             allowed_tools=["users.list"],
         )
         reg = _isolated_registry("users.list", "users.create")
-        tools = self._call_tools_list(rf, reg, bearer=token.token)
+        tools = self._call_tools_list(rf, reg, bearer=token.plaintext_token)
         names = {t["name"] for t in tools}
         assert names == {"users.list", "users.create"}
 
@@ -418,7 +448,7 @@ class TestPerAgentToolsCall:
             name="restricted", token=token, allowed_tools=["users.list"]
         )
         reg = _isolated_registry("users.list", "users.create")
-        data = self._call_tool(rf, reg, "users.create", bearer=token.token)
+        data = self._call_tool(rf, reg, "users.create", bearer=token.plaintext_token)
         assert data["result"]["isError"] is True
         content = json.loads(data["result"]["content"][0]["text"])
         assert "not permitted" in content["error"]
@@ -433,7 +463,7 @@ class TestPerAgentToolsCall:
             name="restricted", token=token, allowed_tools=["users.list"]
         )
         reg = _isolated_registry("users.list", "users.create")
-        data = self._call_tool(rf, reg, "users.list", bearer=token.token)
+        data = self._call_tool(rf, reg, "users.list", bearer=token.plaintext_token)
         assert data["result"]["isError"] is False
 
     def test_no_connection_allows_all_calls(self, rf: RequestFactory) -> None:
@@ -452,7 +482,7 @@ class TestPerAgentToolsCall:
             name="unrestricted", token=token, allowed_tools=None
         )
         reg = _isolated_registry("users.list", "users.create")
-        data = self._call_tool(rf, reg, "users.create", bearer=token.token)
+        data = self._call_tool(rf, reg, "users.create", bearer=token.plaintext_token)
         assert data["result"]["isError"] is False
 
 
@@ -485,7 +515,7 @@ class TestLastSeenAt:
             "method": "tools/call",
             "params": {"name": "users.list", "arguments": {}},
         }
-        request = _post_mcp(rf, payload, bearer=token.token)
+        request = _post_mcp(rf, payload, bearer=token.plaintext_token)
         with patch("friese_mcp.views.tool_registry", reg):
             _view(request)
 

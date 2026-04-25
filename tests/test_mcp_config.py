@@ -74,3 +74,80 @@ class TestMcpConfigCommand:
         data = self._run()
         server = next(iter(data["mcpServers"].values()))
         assert server["transport"] == "http"
+
+    # ------------------------------------------------------------------
+    # --name flag
+    # ------------------------------------------------------------------
+
+    def test_name_flag_overrides_server_key(self) -> None:
+        """--name overrides the mcpServers entry key."""
+        data = self._run("--name", "my-mcp")
+        assert "my-mcp" in data["mcpServers"]
+        assert "friese-mcp" not in data["mcpServers"]
+
+    def test_name_flag_overrides_settings_name(self) -> None:
+        """--name takes precedence over FRIESE_MCP_SERVER_NAME."""
+        data = self._run("--name", "cli-name", FRIESE_MCP_SERVER_NAME="settings-name")
+        assert "cli-name" in data["mcpServers"]
+
+    # ------------------------------------------------------------------
+    # --token flag
+    # ------------------------------------------------------------------
+
+    def test_token_flag_embeds_bearer_header(self) -> None:
+        """--token embeds Authorization: Bearer <token> in the headers dict."""
+        data = self._run("--token", "mytoken123")
+        server = next(iter(data["mcpServers"].values()))
+        assert server["headers"]["Authorization"] == "Bearer mytoken123"
+
+    def test_no_token_flag_omits_headers(self) -> None:
+        """Without --token, the headers key is absent from the server block."""
+        data = self._run()
+        server = next(iter(data["mcpServers"].values()))
+        assert "headers" not in server
+
+    # ------------------------------------------------------------------
+    # --client flag schemas
+    # ------------------------------------------------------------------
+
+    def test_client_claude_code_uses_type_field(self) -> None:
+        """--client claude-code uses 'type: http' schema (not 'transport')."""
+        data = self._run("--client", "claude-code")
+        server = next(iter(data["mcpServers"].values()))
+        assert server["type"] == "http"
+        assert "transport" not in server
+
+    def test_client_cursor_uses_type_field(self) -> None:
+        """--client cursor uses 'type: http' schema."""
+        data = self._run("--client", "cursor")
+        server = next(iter(data["mcpServers"].values()))
+        assert server["type"] == "http"
+        assert "transport" not in server
+
+    def test_client_claude_code_with_token(self) -> None:
+        """--client claude-code with --token embeds headers."""
+        data = self._run("--client", "claude-code", "--token", "tok123")
+        server = next(iter(data["mcpServers"].values()))
+        assert server["type"] == "http"
+        assert server["headers"]["Authorization"] == "Bearer tok123"
+
+    def test_client_claude_desktop_no_type_field(self) -> None:
+        """--client claude-desktop omits 'type' field."""
+        data = self._run("--client", "claude-desktop")
+        server = next(iter(data["mcpServers"].values()))
+        assert "type" not in server
+        assert "transport" not in server
+        assert "url" in server
+
+    def test_client_claude_desktop_with_token(self) -> None:
+        """--client claude-desktop with --token embeds headers."""
+        data = self._run("--client", "claude-desktop", "--token", "tok")
+        server = next(iter(data["mcpServers"].values()))
+        assert server["headers"]["Authorization"] == "Bearer tok"
+
+    def test_client_generic_uses_transport_field(self) -> None:
+        """--client generic (default) keeps 'transport: http' for backwards compatibility."""
+        data = self._run("--client", "generic")
+        server = next(iter(data["mcpServers"].values()))
+        assert server["transport"] == "http"
+        assert "type" not in server
