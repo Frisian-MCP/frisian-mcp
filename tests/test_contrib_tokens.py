@@ -259,3 +259,52 @@ class TestMcpEndpointTokenIntegration:
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["result"] == {}
+
+
+# ---------------------------------------------------------------------------
+# FRIESE_MCP_HMAC_KEY switching
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestHmacKeySwitch:
+    """FRIESE_MCP_HMAC_KEY overrides SECRET_KEY for token HMAC digests."""
+
+    def test_custom_hmac_key_produces_different_digest(self, settings: Any) -> None:
+        """Tokens created with FRIESE_MCP_HMAC_KEY differ from those keyed by SECRET_KEY."""
+        settings.FRIESE_MCP_HMAC_KEY = ""
+        t1 = FrieseMcpToken.objects.create(name="key-default")
+        raw = t1.plaintext_token
+
+        settings.FRIESE_MCP_HMAC_KEY = "dedicated-hmac-secret"
+        t2 = FrieseMcpToken.objects.create(name="key-custom")
+        raw2 = t2.plaintext_token
+
+        # Same raw value → different HMAC because the key changed
+        from friese_mcp.contrib.tokens.models import (
+            _hmac_token,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRIESE_MCP_HMAC_KEY = ""
+        digest_default = _hmac_token(raw)
+        settings.FRIESE_MCP_HMAC_KEY = "dedicated-hmac-secret"
+        digest_custom = _hmac_token(raw)
+        assert digest_default != digest_custom
+
+        # Stored digest for t2 matches the custom-key HMAC
+        settings.FRIESE_MCP_HMAC_KEY = "dedicated-hmac-secret"
+        assert _hmac_token(raw2) == t2.token
+
+    def test_auth_uses_hmac_key_at_lookup_time(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """Authentication reads the token HMAC using the current FRIESE_MCP_HMAC_KEY."""
+        settings.FRIESE_MCP_HMAC_KEY = "my-dedicated-key"
+        token = FrieseMcpToken.objects.create(name="hmac-auth-test")
+        raw = token.plaintext_token
+
+        request = rf.get("/", HTTP_AUTHORIZATION=f"Bearer {raw}")
+        auth = FrieseMcpTokenAuthentication()
+        result = auth.authenticate(request)
+        assert result is not None
+        assert result[1] == token

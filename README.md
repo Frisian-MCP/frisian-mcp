@@ -391,6 +391,20 @@ FRIESE_MCP_TRUSTED_PROXY_COUNT = 1  # one nginx/Caddy/ALB in front of Django
 
 See [Reverse proxy configuration](#reverse-proxy-configuration) for a full example.
 
+### `FRIESE_MCP_HMAC_KEY`
+
+**Type:** `str` | **Default:** absent (falls back to `SECRET_KEY`)
+
+Independent HMAC key used to hash `FrieseMcpToken.token` and `OAuthClient.client_secret`. When set, token validity is decoupled from Django's `SECRET_KEY` — rotating `SECRET_KEY` no longer invalidates existing tokens.
+
+```python
+FRIESE_MCP_HMAC_KEY = env("FRIESE_MCP_HMAC_KEY")  # read from environment, never hardcode
+```
+
+When absent and `DEBUG = False`, friese-mcp logs a startup warning recommending you set this.
+
+> **Key rotation warning:** Changing `FRIESE_MCP_HMAC_KEY` (or `SECRET_KEY` when this is unset) invalidates every existing `FrieseMcpToken` and `OAuthClient.client_secret` instantly. Treat this key like a password pepper — set it once in production and do not rotate without first regenerating all credentials.
+
 ---
 
 ## Reverse proxy configuration
@@ -586,6 +600,8 @@ Content-Type: application/json
 
 > **Pre-v1 tokens:** If your project created tokens before upgrading to v1.0 (when the field stored the raw value), those tokens will no longer authenticate. Delete and recreate them — this is a one-time migration step for early adopters.
 
+> **`SECRET_KEY` rotation risk:** Token HMACs are keyed by `FRIESE_MCP_HMAC_KEY` when set, or `SECRET_KEY` when not. If `FRIESE_MCP_HMAC_KEY` is absent and you rotate `SECRET_KEY` (e.g. after a security incident), every `FrieseMcpToken` is permanently invalidated — all agents lose access instantly with no warning. **Recommended:** set `FRIESE_MCP_HMAC_KEY` to an independent secret in production so that `SECRET_KEY` rotation does not affect token validity.
+
 #### `FrieseMcpTokenAuthentication`
 
 Reads `Authorization: Bearer <token>`. Returns `(user, token)` on success, where `user` is the associated Django user or `AnonymousUser` for service tokens. Raises `AuthenticationFailed` on invalid or inactive tokens. Returns `None` (passes to next authenticator) when the `Authorization` header is absent or uses a different scheme.
@@ -765,6 +781,8 @@ Reads `Authorization: Bearer <token>`. Looks up the token in `OAuthAccessToken`,
 | `created_at` | `DateTimeField` | Auto-set on creation. |
 
 > **Pre-v1 clients:** If your project created `OAuthClient` records before upgrading to v1.0 (when `client_secret` stored the raw value), those clients will no longer be able to authenticate. Delete and recreate them — this is a one-time migration step for early adopters.
+
+> **`SECRET_KEY` rotation risk:** `OAuthClient.client_secret` HMACs are keyed by `FRIESE_MCP_HMAC_KEY` when set, or `SECRET_KEY` when not. Rotating `SECRET_KEY` without first setting `FRIESE_MCP_HMAC_KEY` permanently invalidates every OAuth client secret — all agents must re-authenticate with new credentials. **Recommended:** set `FRIESE_MCP_HMAC_KEY` to an independent secret in production.
 
 #### `OAuthAccessToken` model
 

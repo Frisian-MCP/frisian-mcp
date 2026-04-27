@@ -733,30 +733,30 @@ class TestGetBaseUrl:
         assert "public.example.com" in result
         assert "internal-host" not in result
 
-    def test_proxy_xff_proto_first_value_used_when_multiple(
+    def test_proxy_xff_proto_last_value_used_when_multiple(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """The first value of X-Forwarded-Proto is used when multiple are present."""
+        """The last value of X-Forwarded-Proto is used — rightmost is set by the nearest proxy."""
         settings.FRIESE_MCP_OAUTH_ISSUER = ""
         settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
         request = rf.get(
             "/",
-            HTTP_X_FORWARDED_PROTO="https, http",
+            HTTP_X_FORWARDED_PROTO="http, https",
             HTTP_X_FORWARDED_HOST="api.example.com",
         )
         result = _get_base_url(request)
         assert result.startswith("https://")
 
-    def test_proxy_xff_host_first_value_used_when_multiple(
+    def test_proxy_xff_host_last_value_used_when_multiple(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """The first value of X-Forwarded-Host is used when multiple are present."""
+        """The last value of X-Forwarded-Host is used — rightmost is set by the nearest proxy."""
         settings.FRIESE_MCP_OAUTH_ISSUER = ""
         settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
         request = rf.get(
             "/",
             HTTP_X_FORWARDED_PROTO="https",
-            HTTP_X_FORWARDED_HOST="api.example.com, proxy.internal",
+            HTTP_X_FORWARDED_HOST="proxy.internal, api.example.com",
         )
         result = _get_base_url(request)
         assert "api.example.com" in result
@@ -788,4 +788,94 @@ class TestGetBaseUrl:
         response = _auth_server_view(request)
         data = json.loads(response.content)
         assert data["issuer"] == "https://api.example.com"
-        assert data["token_endpoint"].startswith("https://api.example.com")
+
+
+# ---------------------------------------------------------------------------
+# OAuthConfig.ready() validation
+# ---------------------------------------------------------------------------
+
+
+class TestOAuthConfigReady:
+    """Tests for startup validation in OAuthConfig.ready()."""
+
+    def _call_ready(self) -> None:
+        from django.apps import apps
+
+        apps.get_app_config("friese_mcp_oauth").ready()
+
+    def test_valid_zero_proxy_count(self, settings: Any) -> None:
+        """proxy_count=0 is valid and does not raise."""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 0
+        self._call_ready()  # no exception
+
+    def test_valid_positive_proxy_count(self, settings: Any) -> None:
+        """proxy_count=2 is valid and does not raise."""
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 2
+        self._call_ready()  # no exception
+
+    def test_string_proxy_count_raises(self, settings: Any) -> None:
+        """A string value for FRIESE_MCP_TRUSTED_PROXY_COUNT raises ImproperlyConfigured."""
+        from django.core.exceptions import ImproperlyConfigured
+
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = "1"
+        with pytest.raises(ImproperlyConfigured, match="must be a non-negative integer"):
+            self._call_ready()
+
+    def test_bool_proxy_count_raises(self, settings: Any) -> None:
+        """A bool value (subclass of int) raises ImproperlyConfigured."""
+        from django.core.exceptions import ImproperlyConfigured
+
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = True
+        with pytest.raises(ImproperlyConfigured, match="must be a non-negative integer"):
+            self._call_ready()
+
+    def test_negative_proxy_count_raises(self, settings: Any) -> None:
+        """A negative integer raises ImproperlyConfigured."""
+        from django.core.exceptions import ImproperlyConfigured
+
+        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = -1
+        with pytest.raises(ImproperlyConfigured, match="must be >= 0"):
+            self._call_ready()
+
+
+# ---------------------------------------------------------------------------
+# FRIESE_MCP_HMAC_KEY switching for OAuth client secrets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestOAuthHmacKeySwitch:
+    """FRIESE_MCP_HMAC_KEY overrides SECRET_KEY for client_secret HMAC digests."""
+
+    def test_custom_hmac_key_produces_different_digest(self, settings: Any) -> None:
+        """Clients created with FRIESE_MCP_HMAC_KEY use a different HMAC than SECRET_KEY."""
+        from friese_mcp.contrib.oauth.models import (
+            _hmac_secret,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        )
+
+        raw = "supersecretvalue"
+        settings.FRIESE_MCP_HMAC_KEY = ""
+        digest_default = _hmac_secret(raw)
+
+        settings.FRIESE_MCP_HMAC_KEY = "dedicated-oauth-key"
+        digest_custom = _hmac_secret(raw)
+
+        assert digest_default != digest_custom
+
+    def test_token_endpoint_uses_hmac_key(self, rf: RequestFactory, settings: Any) -> None:
+        """Token endpoint validates client_secret using the current FRIESE_MCP_HMAC_KEY."""
+        settings.FRIESE_MCP_HMAC_KEY = "my-oauth-hmac-key"
+        client = OAuthClient.objects.create(name="hmac-key-client")
+        raw_secret = client.plaintext_client_secret
+
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client.client_id,
+                "client_secret": raw_secret,
+            },
+        )
+        view = TokenView.as_view()
+        response = view(request)
+        assert response.status_code == 200

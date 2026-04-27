@@ -32,9 +32,9 @@ from django.utils import timezone
 
 
 def _hmac_secret(raw: str) -> str:
-    """Return HMAC-SHA256 of *raw* keyed by Django's SECRET_KEY (64 hex chars)."""
-    key = settings.SECRET_KEY.encode()
-    return _hmac_lib.new(key, raw.encode(), hashlib.sha256).hexdigest()
+    """Return HMAC-SHA256 of *raw* keyed by FRIESE_MCP_HMAC_KEY (or SECRET_KEY) as hex."""
+    hmac_key: str = getattr(settings, "FRIESE_MCP_HMAC_KEY", "") or settings.SECRET_KEY
+    return _hmac_lib.new(hmac_key.encode(), raw.encode(), hashlib.sha256).hexdigest()
 
 
 def _default_expires_at() -> datetime:
@@ -159,9 +159,8 @@ class OAuthAccessToken(models.Model):
 
     def __str__(self) -> str:
         """Return a human-readable representation."""
-        return (
-            f"{self.client.name} — {self.token[:8]}... (expires {self.expires_at:%Y-%m-%d %H:%M})"
-        )
+        masked = f"{self.token[:4]}****" if self.token else "****"
+        return f"{self.client.name} — {masked} (expires {self.expires_at:%Y-%m-%d %H:%M})"
 
     def is_expired(self) -> bool:
         """Return ``True`` if this token has passed its expiry time."""

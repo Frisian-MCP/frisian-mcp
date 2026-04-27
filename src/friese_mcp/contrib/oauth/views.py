@@ -82,9 +82,11 @@ def _get_base_url(request: HttpRequest) -> str:
     proxy_count: int = getattr(settings, "FRIESE_MCP_TRUSTED_PROXY_COUNT", 0)
     if proxy_count > 0:
         xff_proto = request.META.get("HTTP_X_FORWARDED_PROTO", "").strip()
-        scheme = xff_proto.split(",")[0].strip() or request.scheme
+        # Use the LAST value — rightmost is set by the nearest trusted proxy.
+        # The first value is attacker-injectable before the proxy chain.
+        scheme = xff_proto.split(",")[-1].strip() or request.scheme
         xff_host = request.META.get("HTTP_X_FORWARDED_HOST", "").strip()
-        host = xff_host.split(",")[0].strip() if xff_host else request.get_host()
+        host = xff_host.split(",")[-1].strip() if xff_host else request.get_host()
         return f"{scheme}://{host}"
 
     return request.build_absolute_uri("/").rstrip("/")

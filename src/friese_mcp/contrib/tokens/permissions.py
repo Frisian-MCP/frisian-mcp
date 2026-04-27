@@ -39,8 +39,9 @@ class IsAuthenticatedOrServiceToken(BasePermission):
     """
 
     def has_permission(self, request: Any, view: Any) -> bool:
-        """Return ``True`` when the caller is authenticated or holds a service token."""
+        """Return ``True`` when the caller is authenticated or holds an active service token."""
         user = getattr(request, "user", None)
         if user is not None and getattr(user, "is_authenticated", False):
             return True
-        return isinstance(getattr(request, "auth", None), FrieseMcpToken)
+        auth = getattr(request, "auth", None)
+        return isinstance(auth, FrieseMcpToken) and auth.is_active
