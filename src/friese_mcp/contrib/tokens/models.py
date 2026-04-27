@@ -39,9 +39,9 @@ from django.db import models
 
 
 def _hmac_token(raw: str) -> str:
-    """Return HMAC-SHA256 of *raw* keyed by Django's SECRET_KEY (64 hex chars)."""
-    key = settings.SECRET_KEY.encode()
-    return _hmac_lib.new(key, raw.encode(), hashlib.sha256).hexdigest()
+    """Return HMAC-SHA256 of *raw* keyed by FRIESE_MCP_HMAC_KEY (or SECRET_KEY) as hex."""
+    hmac_key: str = getattr(settings, "FRIESE_MCP_HMAC_KEY", "") or settings.SECRET_KEY
+    return _hmac_lib.new(hmac_key.encode(), raw.encode(), hashlib.sha256).hexdigest()
 
 
 class FrieseMcpToken(models.Model):
@@ -50,7 +50,8 @@ class FrieseMcpToken(models.Model):
 
     The ``token`` field is auto-generated on first save using
     :func:`secrets.token_hex` (32 bytes → 64 hex characters).  It is stored
-    in plaintext and must be treated as a secret by the host application.
+    as an HMAC-SHA256 digest; the raw value is exposed once via
+    ``plaintext_token`` immediately after creation and is never persisted.
 
     Service tokens (e.g. AI agent clients) may leave ``user`` unset.  In that
     case :class:`~friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication`

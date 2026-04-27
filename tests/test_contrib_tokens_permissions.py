@@ -35,8 +35,8 @@ def _make_request(user: Any = None, auth: Any = None) -> Any:
         pass
 
     req = _Req()
-    req.user = user if user is not None else AnonymousUser()
-    req.auth = auth
+    req.user = user if user is not None else AnonymousUser()  # pylint: disable=attribute-defined-outside-init
+    req.auth = auth  # pylint: disable=attribute-defined-outside-init
     return req
 
 
@@ -71,10 +71,18 @@ class TestIsAuthenticatedOrServiceToken:
         assert IsAuthenticatedOrServiceToken().has_permission(req, None) is False
 
     def test_anonymous_user_with_service_token_is_allowed(self) -> None:
-        """AnonymousUser whose request.auth is a FrieseMcpToken is allowed."""
+        """AnonymousUser whose request.auth is an active FrieseMcpToken is allowed."""
         token = FrieseMcpToken.__new__(FrieseMcpToken)
+        token.is_active = True
         req = _make_request(user=AnonymousUser(), auth=token)
         assert IsAuthenticatedOrServiceToken().has_permission(req, None) is True
+
+    def test_inactive_service_token_is_denied(self) -> None:
+        """AnonymousUser with an inactive FrieseMcpToken is denied."""
+        token = FrieseMcpToken.__new__(FrieseMcpToken)
+        token.is_active = False
+        req = _make_request(user=AnonymousUser(), auth=token)
+        assert IsAuthenticatedOrServiceToken().has_permission(req, None) is False
 
     def test_non_token_auth_object_is_denied(self) -> None:
         """Non-FrieseMcpToken auth object does not satisfy the service-token path."""
@@ -82,11 +90,12 @@ class TestIsAuthenticatedOrServiceToken:
         assert IsAuthenticatedOrServiceToken().has_permission(req, None) is False
 
     def test_none_user_with_service_token_is_allowed(self) -> None:
-        """None user with a valid FrieseMcpToken auth is allowed."""
+        """None user with an active FrieseMcpToken auth is allowed."""
 
         class _Req:
             user = None
             auth = FrieseMcpToken.__new__(FrieseMcpToken)
+            auth.is_active = True
 
         assert IsAuthenticatedOrServiceToken().has_permission(_Req(), None) is True
 

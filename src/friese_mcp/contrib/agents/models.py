@@ -172,7 +172,14 @@ class AgentConnection(models.Model):
         ]
 
     def clean(self) -> None:
-        """Enforce XOR: at most one of token or oauth_client may be set."""
+        """
+        Enforce XOR: at most one of token or oauth_client may be set.
+
+        Note: Django only calls ``clean()`` during form validation (admin, ModelForm).
+        Direct ORM ``save()`` skips it.  The ``agent_connection_xor_credential``
+        ``CheckConstraint`` enforces this at the database level and raises
+        ``IntegrityError`` (not ``ValidationError``) for ORM-level violations.
+        """
         if self.token_id is not None and self.oauth_client_id is not None:
             raise ValidationError(
                 "An AgentConnection may have a token or an oauth_client, but not both."
