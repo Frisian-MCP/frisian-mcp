@@ -205,6 +205,131 @@ def mcp_resource(
     return decorator
 
 
+_NEGOTIATION_PROPERTIES: dict[str, Any] = {
+    "continuation_token": {
+        "type": "string",
+        "description": (
+            "Token from a prior probe call. Supply with 'mode' to fetch the full response."
+        ),
+    },
+    "mode": {
+        "type": "string",
+        "enum": ["summary", "paginated", "filtered", "full"],
+        "description": "Response mode for the continuation call.",
+    },
+    "page": {
+        "type": "integer",
+        "description": "Page number (1-based) for 'paginated' mode. Default: 1.",
+        "default": 1,
+    },
+    "page_size": {
+        "type": "integer",
+        "description": "Items per page for 'paginated' mode. Defaults to FRIESE_MCP_HEAVY_PAGE_SIZE.",
+    },
+    "filter_keys": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Top-level keys to retain in 'filtered' mode.",
+    },
+}
+
+
+def _merge_negotiation_schema(base: dict[str, Any]) -> dict[str, Any]:
+    """Merge the response-negotiation protocol fields into *base* input schema.
+
+    Only modifies schemas with ``"type": "object"``; returns *base* unchanged
+    otherwise.  Removes ``"additionalProperties": false`` if present, since the
+    merged negotiation fields would violate it.
+    """
+    if base.get("type") != "object":
+        return base
+    merged: dict[str, Any] = {**base}
+    merged["properties"] = {**base.get("properties", {}), **_NEGOTIATION_PROPERTIES}
+    if merged.get("additionalProperties") is False:
+        del merged["additionalProperties"]
+    return merged
+
+
+def mcp_heavy(
+    name: str,
+    description: str,
+    input_schema: dict[str, Any],
+    permission_classes: list[type[BasePermission]] | None = None,
+) -> Callable[[_CallableT], _CallableT]:
+    """
+    Register the decorated callable as a heavy MCP tool with response-negotiation.
+
+    Heavy tools use a two-call protocol to avoid overloading agent context windows:
+
+    **Call 1 — probe** (no ``continuation_token``): the tool executes and its result is
+    cached.  The caller receives a probe envelope::
+
+        {
+            "preview": "<first 200 chars of the serialised result>",
+            "total_size": <byte count>,
+            "available_modes": ["summary", "paginated", "filtered", "full"],
+            "continuation_token": "<opaque token>"
+        }
+
+    **Call 2 — fetch** (with ``continuation_token`` + ``mode``): re-invoke the same tool
+    with the token from call 1.  Available modes:
+
+    * ``summary``   — top-level keys / first 5 list items; values truncated to 100 chars
+    * ``paginated`` — one page of a list result; pass ``page`` (default 1) and
+      ``page_size`` (default ``FRIESE_MCP_HEAVY_PAGE_SIZE`` or 20)
+    * ``filtered``  — result filtered to the keys named in ``filter_keys``
+    * ``full``      — complete original result
+
+    The five negotiation fields (``continuation_token``, ``mode``, ``page``,
+    ``page_size``, ``filter_keys``) are automatically merged into the registered
+    ``inputSchema`` so that ``tools/list`` exposes the protocol to clients.
+
+    **Secondary backstop (v2):** ``FRIESE_MCP_AUTO_NEGOTIATE_THRESHOLD`` — when set to a
+    byte-count integer in Django settings, *any* tool response above that size is
+    automatically wrapped in a probe envelope, even on tools not decorated with
+    ``@mcp_heavy``.  This setting is secondary; prefer ``@mcp_heavy`` for explicit
+    heavy tools.
+
+    Args:
+        name: Unique MCP tool name (e.g. ``"enterprise.list_all_tools"``).
+        description: Human-readable description shown in ``tools/list``.
+        input_schema: JSON Schema (draft-07) for argument validation.  Negotiation
+            fields are merged in automatically.
+        permission_classes: DRF permission classes that guard this tool.
+
+    Returns:
+        The original callable, unchanged, registered as a side-effect.
+
+    Example::
+
+        @mcp_heavy(
+            name="enterprise.search_tools",
+            description="Search all 150+ enterprise tools.",
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        )
+        def search_tools(arguments: dict, request: HttpRequest) -> dict:
+            return {"tools": [...]}  # potentially very large
+
+    """
+
+    def decorator(fn: _CallableT) -> _CallableT:
+        tool_registry.register(
+            name=name,
+            fn=fn,
+            description=description,
+            input_schema=_merge_negotiation_schema(input_schema),
+            permission_classes=permission_classes,
+            is_heavy=True,
+        )
+        return fn
+
+    return decorator
+
+
 def mcp_ignore(obj: _AnyT) -> _AnyT:
     """
     Mark a ViewSet class or action method so auto-discovery skips it.

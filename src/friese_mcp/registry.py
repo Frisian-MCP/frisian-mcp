@@ -44,7 +44,15 @@ class ToolInputError(ValueError):
 
 
 class _ToolEntry:
-    __slots__ = ("description", "fn", "input_schema", "is_dispatcher", "name", "permission_classes")
+    __slots__ = (
+        "description",
+        "fn",
+        "input_schema",
+        "is_dispatcher",
+        "is_heavy",
+        "name",
+        "permission_classes",
+    )
 
     def __init__(
         self,
@@ -54,6 +62,7 @@ class _ToolEntry:
         input_schema: dict[str, Any],
         permission_classes: list[type[BasePermission]],
         is_dispatcher: bool = False,
+        is_heavy: bool = False,
     ) -> None:
         self.name = name
         self.fn = fn
@@ -61,6 +70,7 @@ class _ToolEntry:
         self.input_schema = input_schema
         self.permission_classes = permission_classes
         self.is_dispatcher = is_dispatcher
+        self.is_heavy = is_heavy
 
 
 class ToolRegistry:
@@ -86,6 +96,7 @@ class ToolRegistry:
         input_schema: dict[str, Any],
         permission_classes: list[type[BasePermission]] | None = None,
         is_dispatcher: bool = False,
+        is_heavy: bool = False,
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -100,6 +111,8 @@ class ToolRegistry:
                 authentication and authorisation remain the host app's concern.
             is_dispatcher: ``True`` when the tool was registered via
                 ``@mcp_dispatcher``.
+            is_heavy: ``True`` when the tool was registered via ``@mcp_heavy``
+                and uses the two-call response-negotiation protocol.
 
         """
         with self._lock:
@@ -110,6 +123,7 @@ class ToolRegistry:
                 input_schema=input_schema,
                 permission_classes=list(permission_classes or []),
                 is_dispatcher=is_dispatcher,
+                is_heavy=is_heavy,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:

@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "friese-mcp"
 version = "0.1.0"
-description = "Django MCP gateway plugin with runtime API introspection and permission-aware tool scoping"
+description = "The Django MCP gateway that discovers your API automatically — zero boilerplate, auto-discovery, dispatcher pattern, OAuth 2.0"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
-    { name = "Jeremy Friese", email = "your-email@trifriesellc.com" },
+    { name = "Jeremy Friese", email = "jeremy@thefriese.com" },
 ]
 keywords = ["mcp", "django", "model-context-protocol", "agentic-ai", "drf"]
 classifiers = [

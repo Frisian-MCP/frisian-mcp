@@ -1,10 +1,186 @@
 # friese-mcp
 
-Django MCP gateway with runtime introspection and permission-aware tool scoping.
+**The Django MCP gateway that discovers your API automatically.**
 
-friese-mcp exposes your existing Django REST Framework ViewSets as [Model Context Protocol](https://spec.modelcontextprotocol.io/) tools over a single JSON-RPC 2.0 HTTP endpoint. Zero boilerplate for standard CRUD resources; explicit overrides where you need them.
+friese-mcp turns your existing Django REST Framework ViewSets into [Model Context Protocol](https://spec.modelcontextprotocol.io/) tools with zero boilerplate. Add the package, include one URL, and every ViewSet action becomes a callable MCP tool — no manual schema writing, no tool registration code, no wiring.
 
-**Version:** 0.1.0 | **License:** Apache 2.0 | **Owner:** TriFriese LLC
+**Version:** 0.1.0 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
+
+```bash
+pip install friese-mcp
+```
+
+---
+
+## Why friese-mcp
+
+Most Django MCP integrations require you to write a tool definition for every endpoint you want to expose. With 20 ViewSets and 5 actions each, that's 100 tool definitions to write, keep in sync with your serializers, and update every time a field changes.
+
+friese-mcp takes a different approach: **auto-discovery**.
+
+At startup, friese-mcp walks your URL patterns, finds every DRF ViewSet, and registers each action as an MCP tool — name, description, and input schema derived from your serializer automatically. The tool manifest stays in sync with your API without any extra work.
+
+### The dispatcher pattern: the other thing worth knowing
+
+Auto-discovery is the default path. For teams building purpose-built agent tools — multi-action families that share context — friese-mcp ships the **`@mcp_dispatcher`** pattern.
+
+One class. One MCP tool name. Many actions routed internally.
+
+```python
+from friese_mcp import mcp_dispatcher, mcp_action
+
+@mcp_dispatcher(name="tasks", description="Manage project tasks.")
+class TasksDispatcher:
+
+    @mcp_action(name="create", description="Create a task.")
+    def create(self, request, params):
+        task = Task.objects.create(title=params["title"])
+        return {"id": task.pk}
+
+    @mcp_action(name="list", description="List tasks by status.")
+    def list(self, request, params):
+        return {"tasks": list(Task.objects.values("id", "title", "status"))}
+```
+
+- One tool in `tools/list` instead of many
+- Built-in help mode: call with `action="help"` for a structured action listing
+- Per-action JSON Schema validation before the method runs
+- Close-match suggestions on unknown action names
+
+This is the pattern for agent-facing APIs where tool count matters and progressive disclosure beats a flat list of 150 tools.
+
+---
+
+## At a glance
+
+| Feature | Details |
+|---|---|
+| **Auto-discovery** | Walks URL patterns at startup; registers every ViewSet action as an MCP tool |
+| **Zero boilerplate** | Name, description, and input schema derived from DRF serializers automatically |
+| **`@mcp_dispatcher`** | One tool → many actions; built-in help mode; per-action validation |
+| **`@mcp_tool`** | Explicit single-function tool registration for custom logic |
+| **`@mcp_resource`** | Expose server-side content via `resources/list` / `resources/read` |
+| **Filter introspection** | `SearchFilter`, `OrderingFilter`, `DjangoFilterBackend` → schema properties on `list` |
+| **Allowlist / denylist** | `FRIESE_MCP_TOOL_ALLOWLIST` / `FRIESE_MCP_TOOL_DENYLIST` for surgical surface control |
+| **OAuth 2.0** | `contrib.oauth` — client credentials grant with RFC 8414 well-known discovery |
+| **Static tokens** | `contrib.tokens` — HMAC-hashed Bearer tokens for internal agents |
+| **Per-agent scoping** | `contrib.agents` — per-credential tool allowlists for multi-agent deployments |
+| **Tool middleware** | `FRIESE_MCP_TOOL_MIDDLEWARE` — audit logging, rate limiting, heartbeats |
+| **Rate limiting** | `RateLimitMiddleware` — built-in sliding-window, no Redis required |
+| **Pluggable backends** | Custom discovery and invocation backends via dotted-path settings |
+| **SSE support** | `Accept: text/event-stream` wraps any response in a single SSE event |
+| **Cursor pagination** | `FRIESE_MCP_TOOLS_PAGE_SIZE` for large tool manifests |
+| **MCP `2025-03-26`** | Streamable HTTP; `ping`, `initialize`, `tools/list`, `tools/call`, `resources/list` |
+
+---
+
+## Quickstart
+
+Install and add to `INSTALLED_APPS`:
+
+```bash
+pip install friese-mcp
+```
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "friese_mcp",
+]
+```
+
+Include the gateway URL:
+
+```python
+# urls.py
+from django.urls import include, path
+
+urlpatterns = [
+    ...
+    path("mcp/", include("friese_mcp.urls")),
+]
+```
+
+That's it. With auto-discovery enabled (the default), every DRF ViewSet in your URL tree is now an MCP tool.
+
+```python
+# myapp/views.py — nothing changes here
+class UserViewSet(viewsets.ModelViewSet):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
+```
+
+After startup, the gateway exposes:
+
+| Tool | Description |
+|---|---|
+| `users.list` | List User objects |
+| `users.retrieve` | Retrieve a User object by ID |
+| `users.create` | Create a new User object |
+| `users.update` | Replace a User object by ID |
+| `users.partial_update` | Partially update a User object by ID |
+| `users.destroy` | Delete a User object by ID |
+
+Connect an MCP client in one command:
+
+```bash
+python manage.py mcp_config --client claude-code --token mytoken123
+```
+
+```json
+{
+  "mcpServers": {
+    "friese-mcp": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp/",
+      "headers": { "Authorization": "Bearer mytoken123" }
+    }
+  }
+}
+```
+
+---
+
+## Architecture overview
+
+```
+MCP Client (Claude, Cursor, GPT, …)
+       │  JSON-RPC 2.0 over HTTP POST
+       ▼
+┌──────────────────────────────────────────────────┐
+│  McpEndpointView  (DRF APIView)                   │
+│  ├─ Authentication  (FRIESE_MCP_AUTHENTICATION_CLASSES) │
+│  ├─ Permissions     (FRIESE_MCP_PERMISSION_CLASSES)     │
+│  └─ Method dispatch                              │
+│       ├─ initialize / initialized / ping / help  │
+│       ├─ tools/list  ──────────────── ToolRegistry │
+│       ├─ tools/call  ── ToolMiddleware ── Registry │
+│       ├─ resources/list ───────── ResourceRegistry │
+│       └─ resources/read ───────── ResourceRegistry │
+└──────────────────────────────────────────────────┘
+       │
+┌──────────────────┐   ┌─────────────────────────┐
+│  ToolRegistry    │   │  Auto-discovery          │
+│  (module-level   │◄──│  (DRFSyncDiscovery)      │
+│   singleton)     │   │  Walks URL patterns at   │
+│                  │   │  AppConfig.ready()       │
+└──────────────────┘   └─────────────────────────┘
+       │
+┌──────────────────────────────────────────────────┐
+│  InvocationBackend  (SyncInvocation by default)  │
+│  Builds synthetic DRF Request → calls ViewSet    │
+│  action → returns ToolResult                     │
+└──────────────────────────────────────────────────┘
+```
+
+**Key design points:**
+
+- **Separation of discovery and invocation.** Two pluggable backends. Override either independently: use a custom discovery backend for Nautobot's app registry; use a custom invocation backend for Celery-delegated or async execution.
+- **Registry is the source of truth.** `@mcp_tool`, `@mcp_dispatcher`, and auto-discovery all write to the same `tool_registry` singleton. `tools/list` reads from it directly.
+- **Tool errors are `isError: true`, not JSON-RPC errors.** Permission denials, validation errors, and handler exceptions return `isError: true` inside a normal HTTP 200 response — the JSON-RPC session stays alive for the agent to inspect and retry.
+- **Two enforcement points.** Gateway-level permissions gate the entire `/mcp/` surface (`FRIESE_MCP_PERMISSION_CLASSES`). Tool-level permissions gate individual `tools/call` invocations via `ToolRegistry.dispatch()`.
 
 ---
 
@@ -156,65 +332,6 @@ When `--client claude-desktop` is used, the command also prints the config file 
 > **Security note:** `--token` embeds the Bearer value in the output JSON. Treat the command output as sensitive when a real token is used — do not commit it to version control.
 
 **Multi-server setups:** Use `--name` to produce entries with distinct keys, then merge the `mcpServers` objects manually.
-
----
-
-## Quickstart
-
-With auto-discovery enabled (the default), friese-mcp scans your URL patterns at startup and registers every DRF ViewSet action as an MCP tool. No additional code required.
-
-```python
-# myapp/views.py
-from rest_framework import serializers, viewsets
-from rest_framework.permissions import IsAuthenticated
-
-class UserSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ["id", "username", "email"]
-
-class UserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all()
-    serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated]
-```
-
-After startup, the following tools are registered automatically:
-
-| Tool name | Description |
-|---|---|
-| `users.list` | List User objects |
-| `users.retrieve` | Retrieve a User object by ID |
-| `users.create` | Create a new User object |
-| `users.update` | Replace a User object by ID |
-| `users.partial_update` | Partially update a User object by ID |
-| `users.destroy` | Delete a User object by ID |
-
-Send a `tools/list` request to inspect the live tool manifest:
-
-```
-POST /mcp/
-Content-Type: application/json
-
-{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-```
-
-Call a tool:
-
-```
-POST /mcp/
-Content-Type: application/json
-
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "tools/call",
-  "params": {
-    "name": "users.list",
-    "arguments": {}
-  }
-}
-```
 
 ---
 
@@ -1274,7 +1391,7 @@ Check your logs if expected auto-discovered tools go missing — a misspelled di
 
 3. **Mixed** (dispatchers for some resources, auto-discovery for others) — only the shadowed ViewSet tools are suppressed. Other ViewSets register normally alongside the dispatchers.
 
-**Works correctly with Darth Claude and fresh projects:** Darth Claude uses custom handlers, not DRF ViewSets — auto-discovery finds nothing and suppression never fires. A fresh project with only dispatchers or only auto-discovery is also unaffected.
+**Custom handlers and fresh projects:** Projects that use custom tool handlers (not DRF ViewSets) will find that auto-discovery produces no tools for those handlers — suppression never fires. Projects with only dispatchers or only auto-discovery are also unaffected.
 
 **Intentional-both edge case:** If you genuinely need both a `@mcp_dispatcher("exercises")` and flat auto-discovered `exercise.*` tools in `tools/list`, the suppression will remove the flat tools. This is intentional — advertising both would recreate the split-brain bug. Use distinct resource names if you need both surfaces.
 
@@ -1894,13 +2011,9 @@ When a tool raises an unhandled exception, `tools/call` returns `{"isError": tru
 
 `McpEndpointView` extends DRF's `APIView`. DRF exempts `APIView` from Django's CSRF middleware by default, so no `@csrf_exempt` decorator is needed. However, if `SessionAuthentication` is included in `FRIESE_MCP_AUTHENTICATION_CLASSES`, DRF will enforce CSRF for session-authenticated requests (standard DRF behaviour). MCP clients should use token authentication (Bearer / API key) rather than session cookies to avoid this complexity.
 
-### No SSE / streaming in v1
+### Rate limiting
 
-The gateway is HTTP POST + JSON response only. Server-Sent Events (SSE) and streaming responses are out of scope for v1.
-
-### No rate limiting
-
-Rate limiting is the host application's concern and is not provided by friese-mcp. Apply rate limiting at the API gateway, reverse proxy, or Django middleware layer.
+`RateLimitMiddleware` uses an in-process sliding-window counter. In multi-process deployments, each worker maintains its own counter — limits are not shared across workers. For shared rate limiting, use a custom middleware class backed by Redis or a database counter.
 
 ---
 
