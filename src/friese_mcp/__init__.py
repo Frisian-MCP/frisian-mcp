@@ -1,6 +1,13 @@
 """friese-mcp: Django MCP gateway with runtime introspection and permission-aware tool scoping."""
 
-from friese_mcp.decorators import mcp_action, mcp_dispatcher, mcp_ignore, mcp_resource, mcp_tool
+from friese_mcp.decorators import (
+    mcp_action,
+    mcp_dispatcher,
+    mcp_heavy,
+    mcp_ignore,
+    mcp_resource,
+    mcp_tool,
+)
 from friese_mcp.registry import (
     ToolInputError,
     ToolNotFoundError,
@@ -20,6 +27,7 @@ __all__ = [
     "ToolRegistry",
     "mcp_action",
     "mcp_dispatcher",
+    "mcp_heavy",
     "mcp_ignore",
     "mcp_resource",
     "mcp_tool",

@@ -36,6 +36,7 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import secrets
 import uuid
 from collections.abc import Generator
 from typing import Any
@@ -67,11 +68,93 @@ from friese_mcp.resources import ResourceNotFoundError, resource_registry
 logger = logging.getLogger(__name__)
 
 _TOOLS_LIST_CACHE_KEY = "friese_mcp:tools_list"
+_HEAVY_CACHE_PREFIX = "friese_mcp:heavy:"
+_HEAVY_CACHE_TTL: int = 300  # seconds; tokens expire after 5 minutes
 
 _REFRESH_HINT = (
     " Call tools/list to refresh your available tools"
     " — the server manifest may have changed."
 )
+
+# ---------------------------------------------------------------------------
+# Heavy response-negotiation helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
+    """Build the call-1 probe envelope for the two-call response-negotiation protocol."""
+    serialized = json.dumps(result)
+    if isinstance(result, dict):
+        preview = json.dumps({k: str(v)[:80] for k, v in list(result.items())[:5]})
+    elif isinstance(result, list):
+        preview = json.dumps(result[:3])
+    else:
+        preview = serialized[:200]
+    return {
+        "preview": preview[:200],
+        "total_size": len(serialized.encode()),
+        "available_modes": ["summary", "paginated", "filtered", "full"],
+        "continuation_token": token,
+    }
+
+
+def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
+    """Serve a cached heavy result in the requested response mode.
+
+    Modes:
+    * ``summary``   — first 10 dict keys / 5 list items; values truncated to 100 chars
+    * ``paginated`` — one page of a list or JSON-chunk of a scalar; honours ``page``
+      and ``page_size`` arguments (default page=1, page_size=FRIESE_MCP_HEAVY_PAGE_SIZE|20)
+    * ``filtered``  — result filtered to the keys listed in ``filter_keys`` argument
+    * ``full``      — complete cached result (default when mode is absent or unknown)
+    """
+    if mode == "full":
+        return result
+
+    if mode == "summary":
+        if isinstance(result, dict):
+            return {k: str(v)[:100] for k, v in list(result.items())[:10]}
+        if isinstance(result, list):
+            return result[:5]
+        return {"summary": str(result)[:500]}
+
+    if mode == "paginated":
+        page: int = max(1, int(arguments.get("page", 1)))
+        page_size: int = max(
+            1,
+            int(arguments.get("page_size", getattr(settings, "FRIESE_MCP_HEAVY_PAGE_SIZE", 20))),
+        )
+        if isinstance(result, list):
+            start = (page - 1) * page_size
+            end = start + page_size
+            return {
+                "items": result[start:end],
+                "page": page,
+                "page_size": page_size,
+                "total": len(result),
+                "has_more": end < len(result),
+            }
+        serialized = json.dumps(result)
+        chunk_size = page_size * 100
+        start = (page - 1) * chunk_size
+        end = start + chunk_size
+        return {"chunk": serialized[start:end], "page": page, "has_more": end < len(serialized)}
+
+    if mode == "filtered":
+        filter_keys: list[str] = list(arguments.get("filter_keys") or [])
+        if isinstance(result, dict) and filter_keys:
+            return {k: v for k, v in result.items() if k in filter_keys}
+        if isinstance(result, list) and filter_keys:
+            return [
+                {k: item[k] for k in filter_keys if k in item}
+                if isinstance(item, dict)
+                else item
+                for item in result
+            ]
+        return result
+
+    return result  # unknown mode → full
+
 
 # ---------------------------------------------------------------------------
 # JSON-RPC helpers
@@ -440,6 +523,40 @@ def _handle_tools_call(
                 },
             )
 
+    # Heavy response negotiation: if continuation_token is present, serve the cached
+    # result without dispatching to the tool again.  This short-circuits schema
+    # validation, which is intentional — call-2 arguments only need the token + mode.
+    cont_token: str | None = arguments.get("continuation_token")
+    if cont_token is not None:
+        cached = django_cache.get(f"{_HEAVY_CACHE_PREFIX}{cont_token}")
+        if cached is None:
+            return _jsonrpc_success(
+                request_id,
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "error": (
+                                        "Continuation token expired or not found."
+                                        " Re-invoke without continuation_token"
+                                        " to start a new negotiation."
+                                    )
+                                }
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
+            )
+        _mode: str = arguments.get("mode", "full")
+        served = _serve_heavy_mode(cached, _mode, arguments)
+        return _jsonrpc_success(
+            request_id,
+            {"content": [{"type": "text", "text": json.dumps(served)}], "isError": False},
+        )
+
     # Record last_seen_at for this agent connection (fire-and-forget UPDATE).
     if conn is not None:
         from friese_mcp.contrib.agents.models import (  # pylint: disable=import-outside-toplevel
@@ -537,6 +654,32 @@ def _handle_tools_call(
                 "isError": True,
             },
         )
+
+    # @mcp_heavy tools: cache the result and return a probe envelope so the agent
+    # can choose how much of the response to retrieve on the follow-up call.
+    _entry = tool_registry.get_entry(tool_name)
+    if _entry is not None and _entry.is_heavy:
+        _token = secrets.token_urlsafe(16)
+        django_cache.set(f"{_HEAVY_CACHE_PREFIX}{_token}", result, _HEAVY_CACHE_TTL)
+        probe = _build_probe_envelope(result, _token)
+        return _jsonrpc_success(
+            request_id,
+            {"content": [{"type": "text", "text": json.dumps(probe)}], "isError": False},
+        )
+
+    # Threshold backstop (secondary, v2): auto-negotiate any tool response that exceeds
+    # FRIESE_MCP_AUTO_NEGOTIATE_THRESHOLD bytes.  Prefer @mcp_heavy for explicit control.
+    _threshold: int | None = getattr(settings, "FRIESE_MCP_AUTO_NEGOTIATE_THRESHOLD", None)
+    if _threshold is not None:
+        _serialized = json.dumps(result)
+        if len(_serialized.encode()) > _threshold:
+            _token = secrets.token_urlsafe(16)
+            django_cache.set(f"{_HEAVY_CACHE_PREFIX}{_token}", result, _HEAVY_CACHE_TTL)
+            probe = _build_probe_envelope(result, _token)
+            return _jsonrpc_success(
+                request_id,
+                {"content": [{"type": "text", "text": json.dumps(probe)}], "isError": False},
+            )
 
     return _jsonrpc_success(
         request_id,
