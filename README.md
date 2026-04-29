@@ -359,15 +359,34 @@ Controls whether ViewSet auto-discovery runs at `AppConfig.ready()`. Set to `Fal
 FRIESE_MCP_AUTODISCOVER = False
 ```
 
+### `FRIESE_MCP_DISCOVERY_BACKENDS`
+
+**Type:** `list[str]` (dotted Python import paths) | **Default:** absent (uses `FRIESE_MCP_DISCOVERY_BACKEND`, then `DRFSyncDiscovery`)
+
+List of discovery backend classes to run at startup. Results are merged in order — later backends win on tool name clashes. Use this when you need to pull tools from multiple sources (e.g. standard DRF ViewSets plus a Nautobot app registry).
+
+```python
+FRIESE_MCP_DISCOVERY_BACKENDS = [
+    "friese_mcp.backends.discovery.DRFSyncDiscovery",
+    "myapp.backends.NautobotDiscovery",
+]
+```
+
+> **Requires `FRIESE_MCP_AUTODISCOVER = True` (the default).** When `FRIESE_MCP_AUTODISCOVER` is `False`, startup discovery is skipped entirely and this setting is never read — no tools will be auto-discovered regardless of what backends are configured.
+
+Each class must subclass `friese_mcp.backends.BaseDiscoveryBackend`.
+
 ### `FRIESE_MCP_DISCOVERY_BACKEND`
 
 **Type:** `str` (dotted Python import path) | **Default:** `"friese_mcp.backends.discovery.DRFSyncDiscovery"`
 
-The discovery backend class loaded at startup. Override to use a custom scanner (e.g. for Nautobot's app registry, or async ViewSets).
+Single discovery backend class. Use `FRIESE_MCP_DISCOVERY_BACKENDS` (plural) instead when you need multiple backends. This setting is ignored when `FRIESE_MCP_DISCOVERY_BACKENDS` is present.
 
 ```python
 FRIESE_MCP_DISCOVERY_BACKEND = "myapp.backends.NautobotDiscovery"
 ```
+
+> **Requires `FRIESE_MCP_AUTODISCOVER = True` (the default).** Setting `FRIESE_MCP_AUTODISCOVER = False` short-circuits startup before backends are consulted — this setting is silently ignored and no tools are auto-discovered.
 
 The referenced class must subclass `friese_mcp.backends.BaseDiscoveryBackend`.
 
@@ -508,6 +527,8 @@ FRIESE_MCP_TRUSTED_PROXY_COUNT = 1  # one nginx/Caddy/ALB in front of Django
 
 See [Reverse proxy configuration](#reverse-proxy-configuration) for a full example.
 
+> **Startup validation:** `friese_mcp.contrib.oauth` validates this setting at startup. If the value is not a non-negative integer, Django raises `ImproperlyConfigured` before the server accepts any requests. Booleans are explicitly rejected even though `bool` is a subclass of `int` in Python — set the actual count, not `True`.
+
 ### `FRIESE_MCP_HMAC_KEY`
 
 **Type:** `str` | **Default:** absent (falls back to `SECRET_KEY`)
@@ -521,6 +542,30 @@ FRIESE_MCP_HMAC_KEY = env("FRIESE_MCP_HMAC_KEY")  # read from environment, never
 When absent and `DEBUG = False`, friese-mcp logs a startup warning recommending you set this.
 
 > **Key rotation warning:** Changing `FRIESE_MCP_HMAC_KEY` (or `SECRET_KEY` when this is unset) invalidates every existing `FrieseMcpToken` and `OAuthClient.client_secret` instantly. Treat this key like a password pepper — set it once in production and do not rotate without first regenerating all credentials.
+
+### `FRIESE_MCP_TOOLS_LIST_CACHE_TTL`
+
+**Type:** `int | None` | **Default:** `None` (caching disabled)
+
+Caches the full `tools/list` manifest in Django's cache backend for the given number of seconds. When `None` (the default), every `tools/list` request rebuilds the manifest from the registry.
+
+```python
+FRIESE_MCP_TOOLS_LIST_CACHE_TTL = 60  # cache for 60 seconds
+```
+
+**When to enable:** if `tools/list` appears in your slow-request logs, enable caching. Deployments with 80+ tools see the most benefit, since schema serialisation time grows with tool count.
+
+**Per-agent filtering interaction:** when `contrib.agents` is active and the authenticated agent has an `allowed_tools` allowlist, the cache is automatically skipped for that request. A filtered view is never written to the shared cache, so one agent's restricted manifest cannot poison the result for other callers.
+
+**Cache invalidation:** the cache expires naturally after `FRIESE_MCP_TOOLS_LIST_CACHE_TTL` seconds. If you register tools at runtime (e.g. in a management command or test fixture), the new tools will not appear in `tools/list` until the TTL expires — unless you explicitly invalidate the cache:
+
+```python
+from friese_mcp import invalidate_tools_list_cache
+
+invalidate_tools_list_cache()  # next tools/list request rebuilds from registry
+```
+
+Call `invalidate_tools_list_cache()` immediately after any runtime registration change to make the new manifest visible without waiting for the TTL.
 
 ---
 
@@ -1887,6 +1932,12 @@ FRIESE_MCP_TOOLS_PAGE_SIZE = 20
 When `nextCursor` is absent, the client has reached the last page. Cursors are opaque base64url-encoded integer offsets. An invalid cursor returns `-32602 INVALID_PARAMS`.
 
 When `FRIESE_MCP_TOOLS_PAGE_SIZE` is absent (the default), `tools/list` behaves exactly as before — no `cursor` parameter is consumed and no `nextCursor` is returned.
+
+### `tools/list` manifest caching
+
+For deployments where `tools/list` is called frequently, enable manifest caching via `FRIESE_MCP_TOOLS_LIST_CACHE_TTL`. The manifest is stored in Django's configured cache backend and served without touching the registry on cache hits.
+
+Cache is automatically bypassed when `contrib.agents` is filtering tools for the authenticated agent — a filtered view is never written to the shared cache. See [`FRIESE_MCP_TOOLS_LIST_CACHE_TTL`](#friese_mcp_tools_list_cache_ttl) in the settings reference for full details, including the `invalidate_tools_list_cache()` helper for runtime invalidation.
 
 ### HTTP-level behaviour
 

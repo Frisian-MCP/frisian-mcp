@@ -37,6 +37,12 @@ from typing import Any
 from django.conf import settings
 from django.db import models
 
+_PERMISSION_CHOICES = [
+    ("read", "Read Only"),
+    ("read_write", "Read Write"),
+    ("admin", "Admin"),
+]
+
 
 def _hmac_token(raw: str) -> str:
     """Return HMAC-SHA256 of *raw* keyed by FRIESE_MCP_HMAC_KEY (or SECRET_KEY) as hex."""
@@ -75,6 +81,16 @@ class FrieseMcpToken(models.Model):
     is_active = models.BooleanField(
         default=True,
         help_text="Inactive tokens are rejected by the authentication class.",
+    )
+    permission = models.CharField(
+        max_length=10,
+        choices=_PERMISSION_CHOICES,
+        default="read_write",
+        help_text=(
+            "Controls which tier of tools this token can access: "
+            "Read Only (read tools only), Read Write (read + write tools), "
+            "or Admin (all tools)."
+        ),
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

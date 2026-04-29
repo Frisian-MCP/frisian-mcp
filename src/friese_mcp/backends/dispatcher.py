@@ -13,6 +13,8 @@ from django.http import HttpRequest
 
 from friese_mcp.registry import ToolInputError
 
+_TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
+
 
 @dataclasses.dataclass
 class ActionEntry:
@@ -23,6 +25,7 @@ class ActionEntry:
     params: dict[str, str]
     input_schema: dict[str, Any] | None
     method: Callable[..., Any]
+    permission_tier: str = "read"
 
 
 @dataclasses.dataclass
@@ -93,6 +96,21 @@ def _make_dispatcher_invoke(
             raise LookupError(f"Unknown action {action!r}.{hint}")
 
         entry = action_map[action]
+
+        # Action-level permission tier check. Dispatchers always appear in
+        # tools/list (tier="read") but individual actions may require higher
+        # permissions. Check here rather than at tools/list time.
+        auth_obj = getattr(request, "auth", None)
+        auth_permission = getattr(auth_obj, "permission", None)
+        if auth_permission is not None:
+            token_rank = _TIER_RANK.get(auth_permission, 0)
+            action_rank = _TIER_RANK.get(entry.permission_tier, 0)
+            if token_rank < action_rank:
+                raise PermissionError(
+                    f"Action {action!r} requires {entry.permission_tier!r} permission; "
+                    f"your token has {auth_permission!r} permission."
+                )
+
         if entry.input_schema is not None:
             try:
                 jsonschema.validate(instance=params, schema=entry.input_schema)

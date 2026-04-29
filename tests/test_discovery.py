@@ -811,3 +811,56 @@ class TestSuppressDispatcherShadowed:
             _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
         assert any("exercises.list" in r.message for r in caplog.records)
         assert any("exercises" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# DRFSyncDiscovery — HTTP method → permission_tier tagging
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("use_test_urls")
+class TestDRFSyncDiscoveryPermissionTier:
+    """DRFSyncDiscovery assigns permission_tier based on the HTTP method used."""
+
+    def test_list_action_is_read_tier(self) -> None:
+        """GET-based 'list' action gets permission_tier='read'."""
+        discovery = DRFSyncDiscovery()
+        tools = {t.name: t for t in discovery.discover_tools()}
+        assert tools["users.list"].permission_tier == "read"
+
+    def test_retrieve_action_is_read_tier(self) -> None:
+        """GET-based 'retrieve' action gets permission_tier='read'."""
+        discovery = DRFSyncDiscovery()
+        tools = {t.name: t for t in discovery.discover_tools()}
+        assert tools["users.retrieve"].permission_tier == "read"
+
+    def test_create_action_is_read_write_tier(self) -> None:
+        """POST-based 'create' action gets permission_tier='read_write'."""
+        discovery = DRFSyncDiscovery()
+        tools = {t.name: t for t in discovery.discover_tools()}
+        assert tools["users.create"].permission_tier == "read_write"
+
+    def test_update_action_is_read_write_tier(self) -> None:
+        """PUT-based 'update' action gets permission_tier='read_write'."""
+        discovery = DRFSyncDiscovery()
+        tools = {t.name: t for t in discovery.discover_tools()}
+        assert tools["users.update"].permission_tier == "read_write"
+
+    def test_partial_update_action_is_read_write_tier(self) -> None:
+        """PATCH-based 'partial_update' action gets permission_tier='read_write'."""
+        discovery = DRFSyncDiscovery()
+        tools = {t.name: t for t in discovery.discover_tools()}
+        assert tools["users.partial_update"].permission_tier == "read_write"
+
+    def test_destroy_action_is_read_write_tier(self) -> None:
+        """DELETE-based 'destroy' action gets permission_tier='read_write'."""
+        discovery = DRFSyncDiscovery()
+        tools = {t.name: t for t in discovery.discover_tools()}
+        assert tools["users.destroy"].permission_tier == "read_write"
+
+    def test_custom_get_action_is_read_tier(self) -> None:
+        """Custom @action with methods=['get'] gets permission_tier='read'."""
+        discovery = DRFSyncDiscovery()
+        tools = {t.name: t for t in discovery.discover_tools()}
+        # export action is GET-only
+        assert tools["export.export"].permission_tier == "read"

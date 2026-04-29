@@ -77,6 +77,22 @@ _REFRESH_HINT = (
 )
 
 
+def _get_token_permission(request: Any) -> str:
+    """
+    Return the effective permission tier for this request.
+
+    - Unauthenticated (request.auth is None): returns FRIESE_MCP_UNAUTHENTICATED_TIER
+      setting (default ``'read'``).
+    - Authenticated without a .permission attr: returns ``'read'`` (most
+      conservative) so that unknown auth backends don't silently expose all tiers.
+    - Authenticated with .permission: returns that value.
+    """
+    auth_obj = getattr(request, "auth", None)
+    if auth_obj is None:
+        return str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
+    return str(getattr(auth_obj, "permission", "read"))
+
+
 def invalidate_tools_list_cache() -> None:
     """
     Delete the cached tools/list manifest so the next request rebuilds it.
@@ -85,7 +101,14 @@ def invalidate_tools_list_cache() -> None:
     ``FRIESE_MCP_TOOLS_LIST_CACHE_TTL`` is set, rather than waiting for the
     TTL to expire naturally.
     """
-    django_cache.delete(_TOOLS_LIST_CACHE_KEY)
+    from friese_mcp.registry import _TIER_RANK  # pylint: disable=import-outside-toplevel
+
+    # Delete per-tier keys + the legacy :all key (written by any custom code using
+    # max_tier=None → cache_key={key}:all in older deployments).
+    keys = [f"{_TOOLS_LIST_CACHE_KEY}:all"] + [
+        f"{_TOOLS_LIST_CACHE_KEY}:{tier}" for tier in _TIER_RANK
+    ]
+    django_cache.delete_many(keys)
 
 
 # ---------------------------------------------------------------------------
@@ -459,16 +482,19 @@ def _handle_tools_list(
     upstream infrastructure.
     """
     conn = _get_agent_connection(request)
+    max_tier = _get_token_permission(request)
     cache_ttl: int | None = getattr(settings, "FRIESE_MCP_TOOLS_LIST_CACHE_TTL", None)
+    # Use a per-tier cache key so authenticated requests benefit from caching too.
+    cache_key = f"{_TOOLS_LIST_CACHE_KEY}:{max_tier or 'all'}"
     use_cache = cache_ttl is not None and (conn is None or conn.allowed_tools is None)
 
     if use_cache:
-        tools: list[dict[str, Any]] | None = django_cache.get(_TOOLS_LIST_CACHE_KEY)
+        tools: list[dict[str, Any]] | None = django_cache.get(cache_key)
         if tools is None:
-            tools = tool_registry.list_tools()
-            django_cache.set(_TOOLS_LIST_CACHE_KEY, tools, cache_ttl)
+            tools = tool_registry.list_tools(max_tier=max_tier)
+            django_cache.set(cache_key, tools, cache_ttl)
     else:
-        tools = tool_registry.list_tools()
+        tools = tool_registry.list_tools(max_tier=max_tier)
 
     if conn is not None and conn.allowed_tools is not None:
         allowed: frozenset[str] = frozenset(conn.allowed_tools)
@@ -590,7 +616,9 @@ def _handle_tools_call(
         #
         # Append close-match suggestions so agents can self-correct without an
         # extra tools/list round-trip.
-        known_names = [t["name"] for t in tool_registry.list_tools()]
+        known_names = [
+            t["name"] for t in tool_registry.list_tools(max_tier=_get_token_permission(request))
+        ]
         suggestions = difflib.get_close_matches(tool_name, known_names, n=3, cutoff=0.6)
         data = str(exc)
         if suggestions:

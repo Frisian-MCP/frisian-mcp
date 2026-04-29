@@ -9,15 +9,15 @@ from .models import OAuthAccessToken, OAuthClient
 class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin interface for :class:`~friese_mcp.contrib.oauth.models.OAuthClient`."""
 
-    list_display = ("name", "is_active", "scope", "created_at")
-    list_filter = ("is_active",)
+    list_display = ("name", "is_active", "permission", "created_at")
+    list_filter = ("is_active", "permission")
     search_fields = ("name", "client_id")
     readonly_fields = ("client_id", "client_secret", "created_at")
     fieldsets = (
         (
             None,
             {
-                "fields": ("name", "is_active", "scope"),
+                "fields": ("name", "is_active", "permission"),
             },
         ),
         (
@@ -44,15 +44,15 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 class OAuthAccessTokenAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin interface for :class:`~friese_mcp.contrib.oauth.models.OAuthAccessToken`."""
 
-    list_display = ("client", "scope", "expires_at", "created_at")
-    list_filter = ("client__is_active", "scope")
+    list_display = ("client", "permission", "expires_at", "created_at")
+    list_filter = ("client__is_active", "permission")
     search_fields = ("client__name",)
-    readonly_fields = ("token", "client", "expires_at", "scope", "created_at")
+    readonly_fields = ("token", "client", "expires_at", "permission", "created_at")
     fieldsets = (
         (
             None,
             {
-                "fields": ("client", "scope", "expires_at"),
+                "fields": ("client", "permission", "expires_at"),
             },
         ),
         (

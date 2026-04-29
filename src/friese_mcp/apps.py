@@ -200,6 +200,7 @@ class FrieseMcpConfig(AppConfig):
                 description=tool_def.description,
                 input_schema=tool_def.input_schema,
                 permission_classes=list(tool_def.permission_classes),
+                permission_tier=tool_def.permission_tier,
             )
 
         load_middleware()

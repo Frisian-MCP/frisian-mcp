@@ -262,7 +262,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
 
         include_actions, exclude_actions = _action_filters(cls)
 
-        for _http_method, action_name in actions.items():
+        for http_method, action_name in actions.items():
             if include_actions is not None and action_name not in include_actions:
                 logger.debug(
                     "friese_mcp: skipping %s.%s — not in mcp_include_actions",
@@ -287,6 +287,8 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             perm_classes: tuple[type[BasePermission], ...] = tuple(
                 getattr(cls, "permission_classes", [])
             )
+            _write_http = {"post", "put", "patch", "delete"}
+            permission_tier = "read_write" if http_method in _write_http else "read"
 
             tools.append(
                 ToolDefinition(
@@ -297,6 +299,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     source="auto",
                     view_class=cls,
                     action=action_name,
+                    permission_tier=permission_tier,
                 )
             )
             logger.debug("friese_mcp discovered tool %s.%s", resource, action_name)

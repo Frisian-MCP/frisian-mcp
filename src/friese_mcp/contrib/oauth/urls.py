@@ -20,11 +20,12 @@ Mount these in your project's ``urls.py``::
 
 from django.urls import path
 
-from .views import RegistrationView, TokenView
+from .views import AuthorizeView, RegistrationView, TokenView
 
 app_name = "friese_mcp_oauth"
 
 urlpatterns = [
+    path("authorize/", AuthorizeView.as_view(), name="authorize"),
     path("token/", TokenView.as_view(), name="token"),
     path("register/", RegistrationView.as_view(), name="register"),
 ]

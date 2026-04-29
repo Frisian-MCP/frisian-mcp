@@ -51,3 +51,18 @@ class OAuthConfig(AppConfig):
                 "Set FRIESE_MCP_HMAC_KEY to a dedicated secret so that rotating "
                 "SECRET_KEY does not invalidate all registered OAuth clients."
             )
+
+        _locmem = "django.core.cache.backends.locmem.LocMemCache"
+        cache_backend = (
+            getattr(settings, "CACHES", {}).get("default", {}).get("BACKEND", "")
+        )
+        if not getattr(settings, "DEBUG", False) and cache_backend == _locmem:
+            logger.warning(
+                "friese_mcp.contrib.oauth: CACHES['default'] is LocMemCache. "
+                "Authorization codes are stored in the per-process cache. "
+                "In a multi-worker production deployment (gunicorn, uWSGI) an "
+                "authorization code written by one worker will not be visible to "
+                "another, causing intermittent invalid_grant errors on token "
+                "exchange. Configure a shared cache backend (Redis, Memcached) "
+                "before deploying with multiple workers."
+            )
