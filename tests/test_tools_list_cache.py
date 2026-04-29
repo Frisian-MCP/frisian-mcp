@@ -10,6 +10,7 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
+from friese_mcp import invalidate_tools_list_cache
 from friese_mcp.registry import ToolRegistry
 from friese_mcp.views import _TOOLS_LIST_CACHE_KEY, McpView
 
@@ -249,3 +250,24 @@ class TestToolsListCacheBypassForAgentFilter:
             )
             _view(req)
         mock_cache.get.assert_called_once_with(_TOOLS_LIST_CACHE_KEY)
+
+
+# ---------------------------------------------------------------------------
+# Public invalidation helper
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidateToolsListCache:
+    """invalidate_tools_list_cache() deletes the tools/list cache entry."""
+
+    def test_calls_cache_delete_with_correct_key(self) -> None:
+        """cache.delete is called with _TOOLS_LIST_CACHE_KEY."""
+        with patch("friese_mcp.views.django_cache") as mock_cache:
+            invalidate_tools_list_cache()
+        mock_cache.delete.assert_called_once_with(_TOOLS_LIST_CACHE_KEY)
+
+    def test_importable_from_package_root(self) -> None:
+        """invalidate_tools_list_cache is exported from the friese_mcp package."""
+        import friese_mcp  # pylint: disable=import-outside-toplevel
+
+        assert callable(friese_mcp.invalidate_tools_list_cache)

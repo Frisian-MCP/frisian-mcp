@@ -14,7 +14,6 @@ from friese_mcp.decorators import _merge_negotiation_schema, mcp_heavy
 from friese_mcp.registry import ToolRegistry
 from friese_mcp.views import (
     McpEndpointView,
-    _HEAVY_CACHE_PREFIX,
     _build_probe_envelope,
     _serve_heavy_mode,
 )
@@ -93,7 +92,7 @@ class TestMergeNegotiationSchema:
         assert "additionalProperties" not in merged
 
     def test_preserves_required_array(self) -> None:
-        """required array from original schema is preserved unchanged."""
+        """Required array from original schema is preserved unchanged."""
         base = {
             "type": "object",
             "properties": {"q": {"type": "string"}},
@@ -103,7 +102,7 @@ class TestMergeNegotiationSchema:
         assert merged.get("required") == ["q"]
 
     def test_mode_enum_contains_all_modes(self) -> None:
-        """mode property includes all four negotiation modes."""
+        """Mode property includes all four negotiation modes."""
         merged = _merge_negotiation_schema({"type": "object", "properties": {}})
         modes = merged["properties"]["mode"]["enum"]
         assert set(modes) == {"summary", "paginated", "filtered", "full"}
@@ -122,7 +121,11 @@ class TestMcpHeavyDecorator:
         isolated = ToolRegistry()
         with patch("friese_mcp.decorators.tool_registry", isolated):
 
-            @mcp_heavy(name="heavy.test", description="Heavy test", input_schema={"type": "object", "properties": {}})
+            @mcp_heavy(
+                name="heavy.test",
+                description="Heavy test",
+                input_schema={"type": "object", "properties": {}},
+            )
             def _fn(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
                 return {"data": "result"}
 
@@ -135,7 +138,11 @@ class TestMcpHeavyDecorator:
         isolated = ToolRegistry()
         with patch("friese_mcp.decorators.tool_registry", isolated):
 
-            @mcp_heavy(name="heavy.ret", description="Return test", input_schema={"type": "object", "properties": {}})
+            @mcp_heavy(
+                name="heavy.ret",
+                description="Return test",
+                input_schema={"type": "object", "properties": {}},
+            )
             def _fn(_arguments: dict[str, Any], _request: Any) -> str:
                 return "original"
 
@@ -205,7 +212,7 @@ class TestBuildProbeEnvelope:
         assert env["total_size"] == len(json.dumps(result).encode())
 
     def test_preview_truncated_to_200(self) -> None:
-        """preview is at most 200 chars."""
+        """Preview is at most 200 chars."""
         env = _build_probe_envelope({"key": "x" * 1000}, "tok")
         assert len(env["preview"]) <= 200
 
@@ -225,7 +232,7 @@ class TestServeHeavyMode:
     """Unit tests for _serve_heavy_mode."""
 
     def test_full_mode_returns_complete_result(self) -> None:
-        """full mode returns the entire cached result."""
+        """Full mode returns the entire cached result."""
         result = {"a": 1, "b": 2}
         assert _serve_heavy_mode(result, "full", {}) == result
 
@@ -235,26 +242,26 @@ class TestServeHeavyMode:
         assert _serve_heavy_mode(result, "bogus", {}) == result
 
     def test_summary_dict_truncates_values(self) -> None:
-        """summary mode truncates dict values to 100 chars."""
+        """Summary mode truncates dict values to 100 chars."""
         result = {"key": "x" * 200}
         served = _serve_heavy_mode(result, "summary", {})
         assert isinstance(served, dict)
         assert len(served["key"]) <= 100
 
     def test_summary_list_returns_first_five(self) -> None:
-        """summary mode returns at most the first 5 list items."""
+        """Summary mode returns at most the first 5 list items."""
         result = list(range(50))
         served = _serve_heavy_mode(result, "summary", {})
         assert served == list(range(5))
 
     def test_summary_string_result(self) -> None:
-        """summary mode wraps a string result in a dict."""
+        """Summary mode wraps a string result in a dict."""
         served = _serve_heavy_mode("hello world", "summary", {})
         assert isinstance(served, dict)
         assert "summary" in served
 
     def test_paginated_list_first_page(self) -> None:
-        """paginated mode returns the first page of a list."""
+        """Paginated mode returns the first page of a list."""
         result = list(range(100))
         served = _serve_heavy_mode(result, "paginated", {"page": 1, "page_size": 10})
         assert served["items"] == list(range(10))
@@ -263,33 +270,33 @@ class TestServeHeavyMode:
         assert served["has_more"] is True
 
     def test_paginated_list_last_page(self) -> None:
-        """paginated mode marks has_more=False on the final page."""
+        """Paginated mode marks has_more=False on the final page."""
         result = list(range(15))
         served = _serve_heavy_mode(result, "paginated", {"page": 2, "page_size": 10})
         assert served["items"] == list(range(10, 15))
         assert served["has_more"] is False
 
     def test_paginated_non_list_chunks_json(self) -> None:
-        """paginated mode chunks a non-list result by JSON string."""
+        """Paginated mode chunks a non-list result by JSON string."""
         result = {"data": "x" * 500}
         served = _serve_heavy_mode(result, "paginated", {"page": 1, "page_size": 5})
         assert "chunk" in served
         assert "page" in served
 
     def test_filtered_dict_keeps_only_requested_keys(self) -> None:
-        """filtered mode retains only the keys in filter_keys."""
+        """Filtered mode retains only the keys in filter_keys."""
         result = {"a": 1, "b": 2, "c": 3}
         served = _serve_heavy_mode(result, "filtered", {"filter_keys": ["a", "c"]})
         assert served == {"a": 1, "c": 3}
 
     def test_filtered_list_of_dicts(self) -> None:
-        """filtered mode applies filter_keys to each dict item in a list."""
+        """Filtered mode applies filter_keys to each dict item in a list."""
         result = [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
         served = _serve_heavy_mode(result, "filtered", {"filter_keys": ["a"]})
         assert served == [{"a": 1}, {"a": 3}]
 
     def test_filtered_no_keys_returns_full(self) -> None:
-        """filtered mode with no filter_keys returns the original result."""
+        """Filtered mode with no filter_keys returns the original result."""
         result = {"a": 1}
         assert _serve_heavy_mode(result, "filtered", {}) == result
 
@@ -304,10 +311,12 @@ class TestMcpHeavyIntegration:
 
     @pytest.fixture()
     def rf(self) -> RequestFactory:
+        """Return a Django RequestFactory."""
         return RequestFactory()
 
     @pytest.fixture()
     def heavy_registry(self) -> ToolRegistry:
+        """Return an isolated ToolRegistry for test isolation."""
         isolated = ToolRegistry()
         return isolated
 

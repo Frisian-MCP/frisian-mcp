@@ -24,6 +24,13 @@ from django.urls import URLPattern, URLResolver, get_resolver
 from rest_framework.permissions import BasePermission
 from rest_framework.viewsets import ViewSetMixin
 
+try:
+    from django_filters.rest_framework import (  # pylint: disable=import-error
+        DjangoFilterBackend as _DjangoFilterBackend,
+    )
+except ImportError:
+    _DjangoFilterBackend = None  # type: ignore[assignment,misc]
+
 from friese_mcp.backends.base import BaseDiscoveryBackend, ToolDefinition
 
 logger = logging.getLogger(__name__)
@@ -459,7 +466,12 @@ def _schema_from_filter_backends(view_class: type) -> dict[str, Any]:
                         variants.append(f"-{field}")
                     prop["enum"] = variants
                 properties["ordering"] = prop
-            elif name == "DjangoFilterBackend":
+            elif (
+                _DjangoFilterBackend is not None
+                and issubclass(backend_class, _DjangoFilterBackend)
+            ) or (
+                _DjangoFilterBackend is None and name == "DjangoFilterBackend"
+            ):
                 properties.update(_filterset_properties(view_class))
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning(
@@ -503,7 +515,15 @@ def _filterset_properties(view_class: type) -> dict[str, Any]:
     filterset_class: Any = getattr(view_class, "filterset_class", None)
     if filterset_class is not None:
         try:
-            for field_name, filter_obj in filterset_class.base_filters.items():
+            # base_filters is the standard attribute (declared + auto-generated from Meta.fields).
+            # declared_filters is the fallback for FilterSet subclasses that only populate
+            # explicit declarations without auto-generating from Meta (e.g. Nautobot's FilterSet).
+            filters_dict: dict[str, Any] = (
+                getattr(filterset_class, "base_filters", None)
+                or getattr(filterset_class, "declared_filters", None)
+                or {}
+            )
+            for field_name, filter_obj in filters_dict.items():
                 if field_name not in properties:
                     label: Any = getattr(filter_obj, "label", None)
                     properties[field_name] = {
