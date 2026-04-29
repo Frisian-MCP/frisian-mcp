@@ -45,6 +45,7 @@ class TestMcpTool:
                 description="Test",
                 input_schema=schema,
                 permission_classes=None,
+                permission_tier="read",
             )
 
     def test_returns_original_callable(self) -> None:

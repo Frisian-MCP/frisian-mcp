@@ -20,6 +20,8 @@ def mcp_tool(
     description: str,
     input_schema: dict[str, Any],
     permission_classes: list[type[BasePermission]] | None = None,
+    write: bool = False,
+    admin: bool = False,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Register the decorated callable as a named MCP tool.
@@ -50,6 +52,8 @@ def mcp_tool(
         input_schema: JSON Schema (draft-07) for argument validation.
         permission_classes: DRF permission classes that guard this tool.
             Pass ``None`` or ``[]`` for unrestricted access.
+        write: Set ``True`` to assign ``permission_tier="read_write"``.
+        admin: Set ``True`` to assign ``permission_tier="admin"``.
 
     Returns:
         The original callable, unchanged, registered as a side-effect.
@@ -63,6 +67,7 @@ def mcp_tool(
             description=description,
             input_schema=input_schema,
             permission_classes=permission_classes,
+            permission_tier="admin" if admin else "read_write" if write else "read",
         )
         return fn
 
@@ -74,6 +79,8 @@ def mcp_action(
     description: str,
     params: dict[str, str] | None = None,
     input_schema: dict[str, Any] | None = None,
+    write: bool = False,
+    admin: bool = False,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Mark a method as a dispatchable action on an ``@mcp_dispatcher`` class.
@@ -86,6 +93,8 @@ def mcp_action(
         description: Human-readable description shown in help-mode responses.
         params: Optional mapping of param names to human-readable hints.
         input_schema: Optional JSON Schema (draft-07) for per-call validation.
+        write: Set ``True`` to assign ``permission_tier="read_write"``.
+        admin: Set ``True`` to assign ``permission_tier="admin"``.
 
     Returns:
         The original method, unchanged, with ``_mcp_action_meta`` attached.
@@ -98,6 +107,7 @@ def mcp_action(
             "description": description,
             "params": params or {},
             "input_schema": input_schema,
+            "permission_tier": "admin" if admin else "read_write" if write else "read",
         }
         return fn
 
@@ -148,12 +158,16 @@ def mcp_dispatcher(
                         params=action_meta["params"],
                         input_schema=action_meta["input_schema"],
                         method=attr,
+                        permission_tier=action_meta.get("permission_tier", "read"),
                     )
                     action_map[entry.name] = entry
 
         meta = DispatcherMeta(name=name, description=description, actions=action_map)
         invoke_fn = _make_dispatcher_invoke(cls, meta)
         input_schema = _build_dispatcher_input_schema(meta)
+        # Dispatchers are always registered as "read" so they appear in tools/list
+        # for all callers — they are navigation entry points, not gated resources.
+        # Per-action permission enforcement happens inside invoke_fn at dispatch time.
         tool_registry.register(
             name=name,
             fn=invoke_fn,
@@ -161,6 +175,7 @@ def mcp_dispatcher(
             input_schema=input_schema,
             permission_classes=permission_classes,
             is_dispatcher=True,
+            permission_tier="read",
         )
         return cls
 
@@ -256,6 +271,8 @@ def mcp_heavy(
     description: str,
     input_schema: dict[str, Any],
     permission_classes: list[type[BasePermission]] | None = None,
+    write: bool = False,
+    admin: bool = False,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Register the decorated callable as a heavy MCP tool with response-negotiation.
@@ -297,6 +314,8 @@ def mcp_heavy(
         input_schema: JSON Schema (draft-07) for argument validation.  Negotiation
             fields are merged in automatically.
         permission_classes: DRF permission classes that guard this tool.
+        write: Set ``True`` to assign ``permission_tier="read_write"``.
+        admin: Set ``True`` to assign ``permission_tier="admin"``.
 
     Returns:
         The original callable, unchanged, registered as a side-effect.
@@ -325,6 +344,7 @@ def mcp_heavy(
             input_schema=_merge_negotiation_schema(input_schema),
             permission_classes=permission_classes,
             is_heavy=True,
+            permission_tier="admin" if admin else "read_write" if write else "read",
         )
         return fn
 

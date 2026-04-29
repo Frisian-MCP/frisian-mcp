@@ -115,16 +115,17 @@ class TestOAuthClientModel:
         assert c1.client_secret != c2.client_secret
         assert c1.plaintext_client_secret != c2.plaintext_client_secret
 
-    def test_default_scope_is_mcp(self) -> None:
-        """Default scope is 'mcp'."""
-        client = OAuthClient.objects.create(name="default-scope")
-        assert client.scope == "mcp"
+    def test_default_permission_is_read_write(self) -> None:
+        """Default permission tier is read_write."""
+        client = OAuthClient.objects.create(name="default-perm")
+        assert client.permission == "read_write"
 
-    def test_custom_scope_stored(self) -> None:
-        """Custom scope is persisted correctly."""
-        client = OAuthClient.objects.create(name="scoped", scope="mcp read write")
-        client.refresh_from_db()
-        assert client.scope == "mcp read write"
+    def test_scope_string_maps_permission(self) -> None:
+        """scope_string property maps permission choices to RFC scope strings."""
+        client = OAuthClient.objects.create(name="read-client", permission="read")
+        assert client.scope_string == "mcp:read"
+        client.permission = "admin"
+        assert client.scope_string == "mcp:admin"
 
     def test_stored_secret_is_hmac_not_plaintext(self) -> None:
         """The stored client_secret is the HMAC, not the raw value."""
@@ -328,7 +329,7 @@ class TestTokenView:
         assert data["token_type"] == "Bearer"
         assert "access_token" in data
         assert data["expires_in"] == 3600
-        assert data["scope"] == "mcp"
+        assert data["scope"] == "mcp:write"
 
     def test_access_token_persisted_in_db(self, rf: RequestFactory) -> None:
         """Token returned from the endpoint is saved to the database."""
@@ -347,7 +348,7 @@ class TestTokenView:
 
     def test_wrong_grant_type_returns_400(self, rf: RequestFactory) -> None:
         """Unsupported grant_type returns 400 with error code."""
-        request = _post_token(rf, {"grant_type": "authorization_code"})
+        request = _post_token(rf, {"grant_type": "implicit"})
         response = _token_view(request)
         assert response.status_code == 400
         data = json.loads(response.content)
@@ -431,9 +432,9 @@ class TestTokenView:
         data = json.loads(response.content)
         assert data["error"] == "invalid_client"
 
-    def test_token_scope_matches_client_scope(self, rf: RequestFactory) -> None:
-        """Access token scope reflects the client's configured scope."""
-        client = OAuthClient.objects.create(name="scoped", scope="mcp read")
+    def test_token_scope_maps_from_client_permission(self, rf: RequestFactory) -> None:
+        """Access token scope string reflects the client's permission tier."""
+        client = OAuthClient.objects.create(name="read-client", permission="read")
         request = _post_token(
             rf,
             {
@@ -445,7 +446,7 @@ class TestTokenView:
         response = _token_view(request)
         assert response.status_code == 200
         data = json.loads(response.content)
-        assert data["scope"] == "mcp read"
+        assert data["scope"] == "mcp:read"
 
     def test_custom_expiry_seconds_reflected_in_response(
         self, rf: RequestFactory, settings: Any
@@ -502,20 +503,19 @@ class TestRegistrationView:
         assert data["client_name"] == "new-agent"
         assert OAuthClient.objects.filter(client_id=data["client_id"]).exists()
 
-    def test_registration_with_scope(self, rf: RequestFactory, settings: Any) -> None:
-        """Scope in registration body is stored on the created client."""
+    def test_registration_scope_string_in_response(self, rf: RequestFactory, settings: Any) -> None:
+        """Registration response includes scope string mapped from client permission."""
         settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
-        request = _post_register(rf, {"client_name": "scoped-agent", "scope": "mcp read"})
+        request = _post_register(rf, {"client_name": "new-client"})
         response = _register_view(request)
         assert response.status_code == 201
         data = json.loads(response.content)
-        client = OAuthClient.objects.get(client_id=data["client_id"])
-        assert client.scope == "mcp read"
+        assert data["scope"] == "mcp:write"  # default permission=read_write → mcp:write
 
     def test_missing_client_name_returns_400(self, rf: RequestFactory, settings: Any) -> None:
         """Missing client_name returns 400 with invalid_client_metadata error."""
         settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
-        request = _post_register(rf, {"scope": "mcp"})
+        request = _post_register(rf, {"other_field": "mcp"})
         response = _register_view(request)
         assert response.status_code == 400
         data = json.loads(response.content)
@@ -598,7 +598,8 @@ class TestWellKnownEndpoints:
         assert "authorization_servers" in data
         assert "bearer_methods_supported" in data
         assert "header" in data["bearer_methods_supported"]
-        assert "mcp" in data["scopes_supported"]
+        assert "mcp:read" in data["scopes_supported"]
+        assert "mcp:write" in data["scopes_supported"]
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +838,96 @@ class TestOAuthConfigReady:
         with pytest.raises(ImproperlyConfigured, match="must be >= 0"):
             self._call_ready()
 
+    def test_locmem_cache_in_production_logs_warning(
+        self, settings: Any, caplog: Any
+    ) -> None:
+        """LocMemCache + DEBUG=False emits a startup warning about multi-worker risk."""
+        import logging  # pylint: disable=import-outside-toplevel
+
+        settings.DEBUG = False
+        settings.CACHES = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="friese_mcp.contrib.oauth.apps"):
+            self._call_ready()
+        assert any("LocMemCache" in r.message for r in caplog.records)
+        assert any("multi-worker" in r.message for r in caplog.records)
+
+    def test_shared_cache_in_production_no_warning(
+        self, settings: Any, caplog: Any
+    ) -> None:
+        """A Redis cache backend in production does not trigger the LocMemCache warning."""
+        import logging  # pylint: disable=import-outside-toplevel
+
+        settings.DEBUG = False
+        settings.CACHES = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.redis.RedisCache",
+                "LOCATION": "redis://127.0.0.1:6379/1",
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="friese_mcp.contrib.oauth.apps"):
+            self._call_ready()
+        assert not any("LocMemCache" in r.message for r in caplog.records)
+
+    def test_locmem_in_debug_mode_no_warning(self, settings: Any, caplog: Any) -> None:
+        """LocMemCache in DEBUG=True does not emit the multi-worker warning."""
+        import logging  # pylint: disable=import-outside-toplevel
+
+        settings.DEBUG = True
+        settings.CACHES = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="friese_mcp.contrib.oauth.apps"):
+            self._call_ready()
+        assert not any("LocMemCache" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _verify_pkce helper
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyPkce:
+    """Tests for the _verify_pkce(code_verifier, code_challenge) -> bool helper."""
+
+    def test_valid_verifier_returns_true(self) -> None:
+        """Correct code_verifier matches its pre-computed S256 challenge."""
+        import base64  # pylint: disable=import-outside-toplevel
+        import hashlib  # pylint: disable=import-outside-toplevel
+
+        from friese_mcp.contrib.oauth.views import (
+            _verify_pkce,  # pylint: disable=import-outside-toplevel
+        )
+
+        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        assert _verify_pkce(verifier, challenge) is True
+
+    def test_wrong_verifier_returns_false(self) -> None:
+        """Wrong code_verifier does not match the challenge."""
+        from friese_mcp.contrib.oauth.views import (
+            _verify_pkce,  # pylint: disable=import-outside-toplevel
+        )
+
+        assert _verify_pkce("wrong-verifier", "some-challenge") is False
+
+    def test_empty_verifier_returns_false(self) -> None:
+        """Empty code_verifier does not match a real challenge."""
+        from friese_mcp.contrib.oauth.views import (
+            _verify_pkce,  # pylint: disable=import-outside-toplevel
+        )
+
+        assert _verify_pkce("", "some-challenge") is False
+
 
 # ---------------------------------------------------------------------------
 # FRIESE_MCP_HMAC_KEY switching for OAuth client secrets
@@ -879,3 +970,337 @@ class TestOAuthHmacKeySwitch:
         view = TokenView.as_view()
         response = view(request)
         assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# AuthorizeView — OAuth 2.0 authorization code + PKCE
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestAuthorizeView:
+    """Tests for GET /oauth/authorize/ and POST /oauth/authorize/."""
+
+    from friese_mcp.contrib.oauth.views import AuthorizeView
+
+    _view = AuthorizeView.as_view()
+
+    def _valid_params(self) -> dict[str, str]:
+        return {
+            "response_type": "code",
+            "client_id": "test-client",
+            "redirect_uri": "https://example.com/cb",
+            "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "code_challenge_method": "S256",
+            "state": "xyz",
+        }
+
+    def test_get_auto_approve_redirects_with_code(self, rf: RequestFactory) -> None:
+        """GET with valid params + FRIESE_MCP_OAUTH_AUTO_APPROVE=True redirects with a code."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        view = AuthorizeView.as_view()
+        request = rf.get("/oauth/authorize/", self._valid_params())
+        response = view(request)
+        assert response.status_code == 302
+        location = response["Location"]
+        assert location.startswith("https://example.com/cb")
+        assert "code=" in location
+        assert "state=xyz" in location
+
+    def test_get_auto_approve_false_renders_consent_template(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """GET with AUTO_APPROVE=False renders the consent HTML template."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = False
+        # Use Django test Client for template rendering
+
+        view = AuthorizeView.as_view()
+        request = rf.get("/oauth/authorize/", self._valid_params())
+        response = view(request)
+        # Template rendered → 200 TemplateResponse (not redirect)
+        assert response.status_code == 200
+
+    def test_get_missing_response_type_returns_400_no_redirect_uri(
+        self, rf: RequestFactory
+    ) -> None:
+        """GET with missing response_type and no redirect_uri returns 400 JSON (no redirect)."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        view = AuthorizeView.as_view()
+        params = self._valid_params()
+        params.pop("response_type")
+        params.pop("redirect_uri")
+        request = rf.get("/oauth/authorize/", params)
+        response = view(request)
+        assert response.status_code == 400
+        data = json.loads(response.content)
+        assert "error" in data
+
+    def test_get_wrong_response_type_redirects_with_error(
+        self, rf: RequestFactory
+    ) -> None:
+        """GET with response_type=token redirects with error=unsupported_response_type."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        view = AuthorizeView.as_view()
+        params = self._valid_params()
+        params["response_type"] = "token"
+        request = rf.get("/oauth/authorize/", params)
+        response = view(request)
+        assert response.status_code == 302
+        assert "error=unsupported_response_type" in response["Location"]
+
+    def test_get_wrong_code_challenge_method_redirects_error(
+        self, rf: RequestFactory
+    ) -> None:
+        """GET with code_challenge_method=plain redirects with error=invalid_request."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        view = AuthorizeView.as_view()
+        params = self._valid_params()
+        params["code_challenge_method"] = "plain"
+        request = rf.get("/oauth/authorize/", params)
+        response = view(request)
+        assert response.status_code == 302
+        assert "error=invalid_request" in response["Location"]
+
+    def test_post_allow_redirects_with_code(self, rf: RequestFactory) -> None:
+        """POST allow=true issues a code and redirects."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        view = AuthorizeView.as_view()
+        request = rf.post(
+            "/oauth/authorize/",
+            data={
+                "client_id": "test-client",
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                "state": "xyz",
+                "allow": "true",
+            },
+        )
+        response = view(request)
+        assert response.status_code == 302
+        assert "code=" in response["Location"]
+
+    def test_post_deny_redirects_with_access_denied(self, rf: RequestFactory) -> None:
+        """POST allow=false redirects with error=access_denied."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        view = AuthorizeView.as_view()
+        request = rf.post(
+            "/oauth/authorize/",
+            data={
+                "client_id": "test-client",
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": "abc",
+                "state": "xyz",
+                "allow": "false",
+            },
+        )
+        response = view(request)
+        assert response.status_code == 302
+        assert "error=access_denied" in response["Location"]
+
+
+# ---------------------------------------------------------------------------
+# TokenView — authorization_code grant (PKCE)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestTokenViewAuthorizationCodeGrant:
+    """Tests for POST /oauth/token/ with grant_type=authorization_code (PKCE)."""
+
+    def _setup_code_in_cache(
+        self,
+        client_id: str,
+        redirect_uri: str,
+        code_verifier: str,
+    ) -> str:
+        """Store a PKCE auth code in cache and return the code."""
+        import base64  # pylint: disable=import-outside-toplevel
+        import hashlib  # pylint: disable=import-outside-toplevel
+        import secrets  # pylint: disable=import-outside-toplevel
+
+        from django.core.cache import cache  # pylint: disable=import-outside-toplevel
+
+        from friese_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _AUTH_CODE_CACHE_PREFIX,
+            _AUTH_CODE_TTL,
+        )
+
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        code = secrets.token_urlsafe(32)
+        cache.set(
+            f"{_AUTH_CODE_CACHE_PREFIX}{code}",
+            {"client_id": client_id, "redirect_uri": redirect_uri, "code_challenge": challenge},
+            _AUTH_CODE_TTL,
+        )
+        return code
+
+    def test_valid_pkce_exchange_returns_token(self, rf: RequestFactory) -> None:
+        """Valid authorization_code + code_verifier returns access token."""
+        client = OAuthClient.objects.create(name="pkce-client")
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(
+            client.client_id, "https://example.com/cb", code_verifier
+        )
+
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": code_verifier,
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["token_type"] == "Bearer"
+        assert "access_token" in data
+
+    def test_wrong_code_verifier_returns_400(self, rf: RequestFactory) -> None:
+        """Wrong code_verifier returns 400 invalid_grant."""
+        client = OAuthClient.objects.create(name="pkce-wrong")
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(
+            client.client_id, "https://example.com/cb", code_verifier
+        )
+
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": "wrong-verifier",
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_grant"
+
+    def test_expired_or_missing_code_returns_400(self, rf: RequestFactory) -> None:
+        """Non-existent auth code returns 400 invalid_grant."""
+        client = OAuthClient.objects.create(name="pkce-expired")
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": "no-such-code",
+                "code_verifier": "anything",
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_grant"
+
+    def test_code_is_single_use(self, rf: RequestFactory) -> None:
+        """Auth code cannot be reused; second exchange returns 400."""
+        client = OAuthClient.objects.create(name="pkce-one-time")
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(
+            client.client_id, "https://example.com/cb", code_verifier
+        )
+        payload = {
+            "grant_type": "authorization_code",
+            "client_id": client.client_id,
+            "redirect_uri": "https://example.com/cb",
+            "code": code,
+            "code_verifier": code_verifier,
+        }
+        _token_view(rf.post("/oauth/token/", data=payload))
+        response2 = _token_view(rf.post("/oauth/token/", data=payload))
+        assert response2.status_code == 400
+
+    def test_access_token_inherits_client_permission(self, rf: RequestFactory) -> None:
+        """OAuthAccessToken created via auth_code inherits the client's permission tier."""
+        client = OAuthClient.objects.create(name="pkce-perm", permission="admin")
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(
+            client.client_id, "https://example.com/cb", code_verifier
+        )
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": code_verifier,
+            },
+        )
+        response = _token_view(request)
+        data = json.loads(response.content)
+        token = OAuthAccessToken.objects.get(token=data["access_token"])
+        assert token.permission == "admin"
+
+
+# ---------------------------------------------------------------------------
+# Well-known: authorization_endpoint and FRIESE_MCP_OAUTH_AUTHORIZE_URL
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestWellKnownAuthorizationEndpoint:
+    """Well-known metadata advertises the correct authorization_endpoint."""
+
+    def test_authorization_endpoint_advertised(self, rf: RequestFactory) -> None:
+        """Authorization server metadata includes authorization_endpoint."""
+        request = rf.get("/.well-known/oauth-authorization-server")
+        response = _auth_server_view(request)
+        data = json.loads(response.content)
+        assert "authorization_endpoint" in data
+        assert data["authorization_endpoint"].endswith("/oauth/authorize/")
+
+    def test_authorization_code_in_grant_types(self, rf: RequestFactory) -> None:
+        """authorization_code is listed in grant_types_supported."""
+        request = rf.get("/.well-known/oauth-authorization-server")
+        response = _auth_server_view(request)
+        data = json.loads(response.content)
+        assert "authorization_code" in data["grant_types_supported"]
+
+    def test_s256_in_code_challenge_methods(self, rf: RequestFactory) -> None:
+        """S256 is listed in code_challenge_methods_supported."""
+        request = rf.get("/.well-known/oauth-authorization-server")
+        response = _auth_server_view(request)
+        data = json.loads(response.content)
+        assert "S256" in data["code_challenge_methods_supported"]
+
+    def test_custom_authorize_url_override(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """FRIESE_MCP_OAUTH_AUTHORIZE_URL overrides the advertised authorization_endpoint."""
+        settings.FRIESE_MCP_OAUTH_AUTHORIZE_URL = "https://auth.example.com/authorize"
+        request = rf.get("/.well-known/oauth-authorization-server")
+        response = _auth_server_view(request)
+        data = json.loads(response.content)
+        assert data["authorization_endpoint"] == "https://auth.example.com/authorize"

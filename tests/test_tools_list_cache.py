@@ -90,10 +90,10 @@ class TestToolsListCacheEnabled:
         ):
             mock_cache.get.return_value = None
             _view(_tools_list_request())
-        mock_cache.get.assert_called_once_with(_TOOLS_LIST_CACHE_KEY)
+        mock_cache.get.assert_called_once_with(f"{_TOOLS_LIST_CACHE_KEY}:read")
         mock_cache.set.assert_called_once()
         args = mock_cache.set.call_args
-        assert args[0][0] == _TOOLS_LIST_CACHE_KEY
+        assert args[0][0] == f"{_TOOLS_LIST_CACHE_KEY}:read"
         assert args[0][2] == 60
 
     @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
@@ -123,7 +123,7 @@ class TestToolsListCacheEnabled:
         ):
             mock_cache.get.return_value = None
             _view(_tools_list_request())
-        mock_cache.get.assert_called_once_with(_TOOLS_LIST_CACHE_KEY)
+        mock_cache.get.assert_called_once_with(f"{_TOOLS_LIST_CACHE_KEY}:read")
 
     @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
     def test_cache_ttl_matches_setting(self) -> None:
@@ -249,7 +249,7 @@ class TestToolsListCacheBypassForAgentFilter:
                 HTTP_AUTHORIZATION=f"Bearer {token.plaintext_token}",
             )
             _view(req)
-        mock_cache.get.assert_called_once_with(_TOOLS_LIST_CACHE_KEY)
+        mock_cache.get.assert_called_once_with(f"{_TOOLS_LIST_CACHE_KEY}:read_write")
 
 
 # ---------------------------------------------------------------------------
@@ -260,11 +260,16 @@ class TestToolsListCacheBypassForAgentFilter:
 class TestInvalidateToolsListCache:
     """invalidate_tools_list_cache() deletes the tools/list cache entry."""
 
-    def test_calls_cache_delete_with_correct_key(self) -> None:
-        """cache.delete is called with _TOOLS_LIST_CACHE_KEY."""
+    def test_calls_cache_delete_many_with_all_tier_keys(self) -> None:
+        """cache.delete_many is called with all per-tier keys."""
         with patch("friese_mcp.views.django_cache") as mock_cache:
             invalidate_tools_list_cache()
-        mock_cache.delete.assert_called_once_with(_TOOLS_LIST_CACHE_KEY)
+        mock_cache.delete_many.assert_called_once()
+        deleted_keys = mock_cache.delete_many.call_args[0][0]
+        assert f"{_TOOLS_LIST_CACHE_KEY}:all" in deleted_keys
+        assert f"{_TOOLS_LIST_CACHE_KEY}:read" in deleted_keys
+        assert f"{_TOOLS_LIST_CACHE_KEY}:read_write" in deleted_keys
+        assert f"{_TOOLS_LIST_CACHE_KEY}:admin" in deleted_keys
 
     def test_importable_from_package_root(self) -> None:
         """invalidate_tools_list_cache is exported from the friese_mcp package."""

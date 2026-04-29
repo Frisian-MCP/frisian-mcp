@@ -62,6 +62,7 @@ class ToolDefinition:  # pylint: disable=too-many-instance-attributes
     view_class: type | None = None
     action: str | None = None
     is_dispatcher: bool = False
+    permission_tier: str = "read"
 
 
 @dataclasses.dataclass

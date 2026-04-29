@@ -32,19 +32,44 @@ URL configuration example::
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac as _hmac
 import json
 import logging
+import secrets
 from typing import Any
+from urllib.parse import urlencode
 
 from django.conf import settings
-from django.http import HttpRequest, JsonResponse
+from django.core.cache import cache as django_cache
+from django.http import HttpRequest, HttpResponseRedirect, JsonResponse
+from django.shortcuts import render
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
 from .models import OAuthAccessToken, OAuthClient, _hmac_secret
 
+_AUTH_CODE_CACHE_PREFIX = "friese_mcp:oauth_code:"
+_AUTH_CODE_TTL = 300  # 5 minutes
+
 logger = logging.getLogger(__name__)
+
+
+def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
+    """
+    Return True if the PKCE S256 code_verifier matches code_challenge.
+
+    Uses hmac.compare_digest() for constant-time comparison to prevent
+    timing attacks.  Strips base64url padding per RFC 7636.
+    """
+    digest = (
+        base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    return _hmac.compare_digest(digest, code_challenge)
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +146,16 @@ class TokenView(View):
         client_id = _str_field(data, "client_id")
         client_secret = _str_field(data, "client_secret")
 
+        if grant_type == "authorization_code":
+            return self._handle_authorization_code(data)
+
         if grant_type != "client_credentials":
             return JsonResponse(
                 {
                     "error": "unsupported_grant_type",
-                    "error_description": "Only client_credentials grant is supported.",
+                    "error_description": (
+                        "Supported grant types: client_credentials, authorization_code."
+                    ),
                 },
                 status=400,
             )
@@ -163,7 +193,9 @@ class TokenView(View):
                 status=401,
             )
 
-        access_token = OAuthAccessToken.objects.create(client=client, scope=client.scope)
+        access_token = OAuthAccessToken.objects.create(
+            client=client, permission=client.permission
+        )
         expiry: int = getattr(settings, "FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS", 3600)
 
         logger.info("oauth_token_issued", extra={"client_name": client.name})
@@ -172,7 +204,79 @@ class TokenView(View):
                 "access_token": access_token.token,
                 "token_type": "Bearer",
                 "expires_in": expiry,
-                "scope": access_token.scope,
+                "scope": access_token.scope_string,
+            }
+        )
+
+    def _handle_authorization_code(self, data: dict[str, Any]) -> JsonResponse:
+        """Exchange an authorization code (PKCE) for a Bearer token."""
+        code = _str_field(data, "code")
+        redirect_uri = _str_field(data, "redirect_uri")
+        client_id = _str_field(data, "client_id")
+        code_verifier = _str_field(data, "code_verifier")
+
+        if not code or not redirect_uri or not client_id or not code_verifier:
+            return JsonResponse(
+                {
+                    "error": "invalid_request",
+                    "error_description": (
+                        "code, redirect_uri, client_id, and code_verifier are required."
+                    ),
+                },
+                status=400,
+            )
+
+        cached = django_cache.get(f"{_AUTH_CODE_CACHE_PREFIX}{code}")
+        if cached is None:
+            return JsonResponse(
+                {
+                    "error": "invalid_grant",
+                    "error_description": "Authorization code expired or not found.",
+                },
+                status=400,
+            )
+
+        if cached["client_id"] != client_id:
+            return JsonResponse(
+                {"error": "invalid_grant", "error_description": "client_id mismatch."},
+                status=400,
+            )
+        if cached["redirect_uri"] != redirect_uri:
+            return JsonResponse(
+                {"error": "invalid_grant", "error_description": "redirect_uri mismatch."},
+                status=400,
+            )
+
+        # PKCE S256: constant-time comparison via _verify_pkce (RFC 7636)
+        if not _verify_pkce(code_verifier, cached["code_challenge"]):
+            return JsonResponse(
+                {"error": "invalid_grant", "error_description": "PKCE code_verifier mismatch."},
+                status=400,
+            )
+
+        # One-time use: delete the code
+        django_cache.delete(f"{_AUTH_CODE_CACHE_PREFIX}{code}")
+
+        try:
+            client = OAuthClient.objects.get(client_id=client_id, is_active=True)
+        except OAuthClient.DoesNotExist:
+            return JsonResponse(
+                {"error": "invalid_client", "error_description": "Unknown or inactive client."},
+                status=401,
+            )
+
+        access_token = OAuthAccessToken.objects.create(
+            client=client, permission=client.permission
+        )
+        expiry: int = getattr(settings, "FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS", 3600)
+
+        logger.info("oauth_token_issued_code_flow", extra={"client_name": client.name})
+        return JsonResponse(
+            {
+                "access_token": access_token.token,
+                "token_type": "Bearer",
+                "expires_in": expiry,
+                "scope": access_token.scope_string,
             }
         )
 
@@ -240,8 +344,7 @@ class RegistrationView(View):
                 status=400,
             )
 
-        scope: str = body.get("scope", "mcp") if isinstance(body.get("scope"), str) else "mcp"
-        client = OAuthClient.objects.create(name=client_name.strip(), scope=scope)
+        client = OAuthClient.objects.create(name=client_name.strip())
 
         logger.info("oauth_client_registered", extra={"client_name": client.name})
         return JsonResponse(
@@ -249,7 +352,7 @@ class RegistrationView(View):
                 "client_id": client.client_id,
                 "client_secret": client.plaintext_client_secret,
                 "client_name": client.name,
-                "scope": client.scope,
+                "scope": client.scope_string,
             },
             status=201,
         )
@@ -282,13 +385,25 @@ class OAuthAuthorizationServerView(View):
         token_path: str = getattr(settings, "FRIESE_MCP_OAUTH_TOKEN_PATH", "/oauth/token/")
         token_endpoint = f"{base}{token_path}"
 
+        # authorization_endpoint: prefer the override setting, fall back to package default.
+        authorize_url_override: str = getattr(settings, "FRIESE_MCP_OAUTH_AUTHORIZE_URL", "")
+        if authorize_url_override:
+            authorization_endpoint = authorize_url_override
+        else:
+            authorize_path: str = getattr(
+                settings, "FRIESE_MCP_OAUTH_AUTHORIZE_PATH", "/oauth/authorize/"
+            )
+            authorization_endpoint = f"{base}{authorize_path}"
+
         metadata: dict[str, Any] = {
             "issuer": base,
+            "authorization_endpoint": authorization_endpoint,
             "token_endpoint": token_endpoint,
-            "grant_types_supported": ["client_credentials"],
-            "token_endpoint_auth_methods_supported": ["client_secret_post"],
-            "response_types_supported": ["token"],
-            "scopes_supported": ["mcp"],
+            "grant_types_supported": ["client_credentials", "authorization_code"],
+            "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+            "response_types_supported": ["token", "code"],
+            "code_challenge_methods_supported": ["S256"],
+            "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
         }
 
         if getattr(settings, "FRIESE_MCP_OAUTH_REGISTRATION_OPEN", False):
@@ -319,6 +434,141 @@ class OAuthProtectedResourceView(View):
                 "resource": resource_url,
                 "authorization_servers": [base],
                 "bearer_methods_supported": ["header"],
-                "scopes_supported": ["mcp"],
+                "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Authorization code endpoint (RFC 6749 §4.1 + PKCE RFC 7636)
+# ---------------------------------------------------------------------------
+
+
+class AuthorizeView(View):
+    """
+    OAuth 2.0 authorization code endpoint with PKCE (RFC 7636).
+
+    Canonical path: ``GET /oauth/authorize/``
+
+    Required query parameters:
+        * ``response_type`` — must be ``"code"``
+        * ``client_id``
+        * ``redirect_uri``
+        * ``code_challenge`` — base64url(sha256(code_verifier))
+        * ``code_challenge_method`` — must be ``"S256"``
+
+    Optional:
+        * ``state`` — opaque value echoed back in the redirect
+
+    Behaviour is controlled by ``FRIESE_MCP_OAUTH_AUTO_APPROVE`` (default ``True``):
+
+    * ``True``: immediately redirects to *redirect_uri* with an authorization code.
+      Appropriate for public demo deployments and machine-to-machine flows.
+    * ``False``: renders ``friese_mcp/oauth/authorize.html`` with a consent form.
+      POST the form with ``allow=true`` or ``allow=false`` to proceed.
+      Host apps may override the template via standard Django template discovery.
+    """
+
+    def get(self, request: HttpRequest) -> Any:
+        """Handle the initial authorization request."""
+        response_type = request.GET.get("response_type", "")
+        client_id = request.GET.get("client_id", "")
+        redirect_uri = request.GET.get("redirect_uri", "")
+        code_challenge = request.GET.get("code_challenge", "")
+        code_challenge_method = request.GET.get("code_challenge_method", "")
+        state = request.GET.get("state", "")
+
+        error = self._validate_authorize_params(
+            response_type, client_id, redirect_uri, code_challenge, code_challenge_method
+        )
+        if error:
+            if redirect_uri:
+                return self._error_redirect(redirect_uri, error, state)
+            return JsonResponse({"error": error}, status=400)
+
+        if getattr(settings, "FRIESE_MCP_OAUTH_AUTO_APPROVE", True):
+            return self._issue_code_redirect(
+                client_id, redirect_uri, code_challenge, state
+            )
+
+        # Render consent page
+        return render(
+            request,
+            "friese_mcp/oauth/authorize.html",
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": code_challenge,
+                "state": state,
+            },
+        )
+
+    def post(self, request: HttpRequest) -> Any:
+        """Handle the consent form submission (auto_approve=False path)."""
+        client_id = request.POST.get("client_id", "")
+        redirect_uri = request.POST.get("redirect_uri", "")
+        code_challenge = request.POST.get("code_challenge", "")
+        state = request.POST.get("state", "")
+        allow = request.POST.get("allow", "false").lower() == "true"
+
+        if not allow:
+            return self._error_redirect(redirect_uri, "access_denied", state)
+
+        return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _validate_authorize_params(
+        self,
+        response_type: str,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        code_challenge_method: str,
+    ) -> str:
+        """Return an error string or empty string if params are valid."""
+        if response_type != "code":
+            return "unsupported_response_type"
+        if not client_id:
+            return "invalid_request"
+        if not redirect_uri:
+            return "invalid_request"
+        if not code_challenge:
+            return "invalid_request"
+        if code_challenge_method != "S256":
+            return "invalid_request"
+        return ""
+
+    def _issue_code_redirect(
+        self,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        state: str,
+    ) -> HttpResponseRedirect:
+        """Generate an auth code, cache it, and redirect to redirect_uri."""
+        code = secrets.token_urlsafe(32)
+        django_cache.set(
+            f"{_AUTH_CODE_CACHE_PREFIX}{code}",
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": code_challenge,
+            },
+            _AUTH_CODE_TTL,
+        )
+        params: dict[str, str] = {"code": code}
+        if state:
+            params["state"] = state
+        return HttpResponseRedirect(f"{redirect_uri}?{urlencode(params)}")
+
+    def _error_redirect(
+        self, redirect_uri: str, error: str, state: str
+    ) -> HttpResponseRedirect:
+        """Redirect to redirect_uri with an error parameter."""
+        params: dict[str, str] = {"error": error}
+        if state:
+            params["state"] = state
+        return HttpResponseRedirect(f"{redirect_uri}?{urlencode(params)}")

@@ -15,6 +15,8 @@ from django.conf import settings
 from django.http import HttpRequest
 from rest_framework.permissions import BasePermission
 
+_TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
+
 
 def _camel_to_snake(name: str) -> str:
     """Convert a camelCase or PascalCase identifier to snake_case."""
@@ -52,6 +54,7 @@ class _ToolEntry:
         "is_heavy",
         "name",
         "permission_classes",
+        "permission_tier",
     )
 
     def __init__(
@@ -63,6 +66,7 @@ class _ToolEntry:
         permission_classes: list[type[BasePermission]],
         is_dispatcher: bool = False,
         is_heavy: bool = False,
+        permission_tier: str = "read",
     ) -> None:
         self.name = name
         self.fn = fn
@@ -71,6 +75,7 @@ class _ToolEntry:
         self.permission_classes = permission_classes
         self.is_dispatcher = is_dispatcher
         self.is_heavy = is_heavy
+        self.permission_tier = permission_tier
 
 
 class ToolRegistry:
@@ -97,6 +102,7 @@ class ToolRegistry:
         permission_classes: list[type[BasePermission]] | None = None,
         is_dispatcher: bool = False,
         is_heavy: bool = False,
+        permission_tier: str = "read",
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -113,6 +119,10 @@ class ToolRegistry:
                 ``@mcp_dispatcher``.
             is_heavy: ``True`` when the tool was registered via ``@mcp_heavy``
                 and uses the two-call response-negotiation protocol.
+            permission_tier: Minimum token permission required to see this tool
+                in ``tools/list``.  One of ``"read"``, ``"read_write"``, or
+                ``"admin"``.  Dispatcher tools always use ``"read"`` so they
+                are always visible as entry points.
 
         """
         with self._lock:
@@ -124,6 +134,7 @@ class ToolRegistry:
                 permission_classes=list(permission_classes or []),
                 is_dispatcher=is_dispatcher,
                 is_heavy=is_heavy,
+                permission_tier=permission_tier,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:
@@ -138,17 +149,20 @@ class ToolRegistry:
                 entry.name for entry in self._tools.values() if entry.is_dispatcher
             )
 
-    def list_tools(self) -> list[dict[str, Any]]:
+    def list_tools(self, max_tier: str | None = None) -> list[dict[str, Any]]:
         """
         Return the tool listing in MCP ``tools/list`` response format.
 
-        **Auth note:** This method returns all registered tools regardless of the caller's
-        identity.  friese-mcp deliberately does not filter the tool manifest by permissions:
-        the package does not own authentication or authorisation.  The host application is
-        responsible for placing auth-gating in front of the MCP endpoint at the
-        infrastructure level.  Object-level permission filtering (``has_object_permission``)
-        is also not applied here — this is a known architectural gap documented for v2.
+        Args:
+            max_tier: When set to ``"read"``, ``"read_write"``, or ``"admin"``,
+                only tools whose ``permission_tier`` is at or below this level
+                are returned.  ``None`` returns all tools (unauthenticated
+                behaviour is unchanged).  Dispatcher tools always use tier
+                ``"read"`` so they are always included regardless of the caller's
+                permission.
+
         """
+        max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
         with self._lock:
             return [
                 {
@@ -157,6 +171,7 @@ class ToolRegistry:
                     "inputSchema": entry.input_schema,
                 }
                 for entry in self._tools.values()
+                if _TIER_RANK.get(entry.permission_tier, 0) <= max_rank
             ]
 
     def dispatch(

@@ -30,6 +30,18 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+_PERMISSION_CHOICES = [
+    ("read", "Read Only"),
+    ("read_write", "Read Write"),
+    ("admin", "Admin"),
+]
+
+_SCOPE_MAP: dict[str, str] = {
+    "read": "mcp:read",
+    "read_write": "mcp:write",
+    "admin": "mcp:admin",
+}
+
 
 def _hmac_secret(raw: str) -> str:
     """Return HMAC-SHA256 of *raw* keyed by FRIESE_MCP_HMAC_KEY (or SECRET_KEY) as hex."""
@@ -76,10 +88,14 @@ class OAuthClient(models.Model):
         default=True,
         help_text="Inactive clients cannot obtain new tokens; existing tokens are rejected.",
     )
-    scope = models.CharField(
-        max_length=200,
-        default="mcp",
-        help_text="Space-separated list of permitted scopes for this client.",
+    permission = models.CharField(
+        max_length=10,
+        choices=_PERMISSION_CHOICES,
+        default="read_write",
+        help_text=(
+            "Controls which tier of tools tokens issued to this client can access: "
+            "Read Only, Read Write, or Admin."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -89,6 +105,11 @@ class OAuthClient(models.Model):
         verbose_name = "OAuth Client"
         verbose_name_plural = "OAuth Clients"
         ordering = ["-created_at"]
+
+    @property
+    def scope_string(self) -> str:
+        """Return the RFC 6749 scope string for this client's permission tier."""
+        return _SCOPE_MAP.get(self.permission, "mcp:read")
 
     def __str__(self) -> str:
         """Return a human-readable representation."""
@@ -135,10 +156,11 @@ class OAuthAccessToken(models.Model):
         default=_default_expires_at,
         help_text="Token expiry time.  Tokens past this time are rejected.",
     )
-    scope = models.CharField(
-        max_length=200,
-        default="mcp",
-        help_text="Space-separated list of scopes granted to this token.",
+    permission = models.CharField(
+        max_length=10,
+        choices=_PERMISSION_CHOICES,
+        default="read_write",
+        help_text="Permission tier inherited from the issuing client at token creation time.",
     )
     last_used_at = models.DateTimeField(
         null=True,
@@ -156,6 +178,11 @@ class OAuthAccessToken(models.Model):
         indexes = [
             models.Index(fields=["token", "expires_at"], name="friese_mcp_oat_expires_idx"),
         ]
+
+    @property
+    def scope_string(self) -> str:
+        """Return the RFC 6749 scope string for this token's permission tier."""
+        return _SCOPE_MAP.get(self.permission, "mcp:read")
 
     def __str__(self) -> str:
         """Return a human-readable representation."""
