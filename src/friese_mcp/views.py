@@ -76,6 +76,18 @@ _REFRESH_HINT = (
     " — the server manifest may have changed."
 )
 
+
+def invalidate_tools_list_cache() -> None:
+    """
+    Delete the cached tools/list manifest so the next request rebuilds it.
+
+    Call this after registering tools at runtime when
+    ``FRIESE_MCP_TOOLS_LIST_CACHE_TTL`` is set, rather than waiting for the
+    TTL to expire naturally.
+    """
+    django_cache.delete(_TOOLS_LIST_CACHE_KEY)
+
+
 # ---------------------------------------------------------------------------
 # Heavy response-negotiation helpers
 # ---------------------------------------------------------------------------
@@ -99,7 +111,8 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
 
 
 def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
-    """Serve a cached heavy result in the requested response mode.
+    """
+    Serve a cached heavy result in the requested response mode.
 
     Modes:
     * ``summary``   — first 10 dict keys / 5 list items; values truncated to 100 chars

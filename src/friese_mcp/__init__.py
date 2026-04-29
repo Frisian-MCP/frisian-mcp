@@ -16,6 +16,7 @@ from friese_mcp.registry import (
     tool_registry,
 )
 from friese_mcp.resources import ResourceNotFoundError, ResourceRegistry, resource_registry
+from friese_mcp.views import invalidate_tools_list_cache
 
 __version__ = "0.1.0"
 
@@ -25,6 +26,7 @@ __all__ = [
     "ToolInputError",
     "ToolNotFoundError",
     "ToolRegistry",
+    "invalidate_tools_list_cache",
     "mcp_action",
     "mcp_dispatcher",
     "mcp_heavy",
