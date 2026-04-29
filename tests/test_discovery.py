@@ -577,6 +577,63 @@ class TestSchemaFromFilterBackends:
         props = _filterset_properties(FilterSetClassViewSet)
         assert props["status"]["description"] == "Filter by status"
 
+    def test_subclassed_filter_backend_detected(self, monkeypatch: Any) -> None:
+        """A DjangoFilterBackend subclass is detected via issubclass, not name match."""
+        from rest_framework.response import (
+            Response,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        )
+        from rest_framework.viewsets import (
+            ViewSet,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        )
+
+        import friese_mcp.backends.discovery as _disc  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+        class _FakeBase:
+            pass
+
+        class _SubclassBackend(_FakeBase):
+            """Simulates NautobotFilterBackend(DjangoFilterBackend)."""
+
+        class _SubclassViewSet(ViewSet):  # pylint: disable=abstract-method
+            filter_backends = [_SubclassBackend]
+            filterset_fields = ["site", "rack"]
+
+            def list(self, request: Any) -> Response:
+                """List."""
+                return Response([])
+
+        monkeypatch.setattr(_disc, "_DjangoFilterBackend", _FakeBase)
+        props = _schema_from_filter_backends(_SubclassViewSet)
+        assert "site" in props
+        assert "rack" in props
+
+    def test_declared_filters_fallback(self) -> None:
+        """_filterset_properties() uses declared_filters when base_filters is absent."""
+        from rest_framework.viewsets import (
+            ViewSet,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        )
+
+        class _Filter:
+            def __init__(self, label: str) -> None:
+                self.label = label
+
+        class _DeclaredFilterSet:
+            """FilterSet with only declared_filters — no base_filters (Nautobot pattern)."""
+
+            declared_filters = {
+                "site": _Filter("Filter by site"),
+                "rack": _Filter("Filter by rack"),
+            }
+
+        class _DeclaredViewSet(ViewSet):  # pylint: disable=abstract-method
+            filter_backends = []
+            filterset_class = _DeclaredFilterSet
+
+        props = _filterset_properties(_DeclaredViewSet)
+        assert "site" in props
+        assert "rack" in props
+        assert props["site"]["description"] == "Filter by site"
+
 
 class TestFilterBackendsInDiscovery:
     """Integration tests: filter properties appear in discovered list schemas."""
