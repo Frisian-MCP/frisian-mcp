@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "friese-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "The Django MCP gateway that discovers your API automatically — zero boilerplate, auto-discovery, dispatcher pattern, OAuth 2.0"
 readme = "README.md"
 license = "Apache-2.0"

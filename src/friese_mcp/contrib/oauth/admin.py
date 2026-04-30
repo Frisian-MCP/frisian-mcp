@@ -1,6 +1,8 @@
 """Django admin registration for OAuthClient and OAuthAccessToken."""
 
+from django.conf import settings
 from django.contrib import admin
+from django.utils.html import format_html
 
 from .models import OAuthAccessToken, OAuthClient
 
@@ -12,7 +14,9 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_display = ("name", "is_active", "permission", "created_at")
     list_filter = ("is_active", "permission")
     search_fields = ("name", "client_id")
-    readonly_fields = ("client_id", "client_secret", "created_at")
+    readonly_fields = (
+        "client_id", "client_secret", "created_at", "connector_mcp_url", "connector_client_id"
+    )
     fieldsets = (
         (
             None,
@@ -31,6 +35,16 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             },
         ),
         (
+            "Connector config",
+            {
+                "fields": ("connector_mcp_url", "connector_client_id"),
+                "description": (
+                    "Copy these values into your MCP client's Advanced settings. "
+                    "Use client_secret from the Credentials section as the Client Secret."
+                ),
+            },
+        ),
+        (
             "Metadata",
             {
                 "fields": ("created_at",),
@@ -38,6 +52,18 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             },
         ),
     )
+
+    @admin.display(description="Client ID")
+    def connector_client_id(self, obj: OAuthClient) -> str:
+        """Return client_id in <code> tags for copy-paste into connector config."""
+        return format_html("<code>{}</code>", obj.client_id)
+
+    @admin.display(description="MCP Server URL")
+    def connector_mcp_url(self, obj: OAuthClient) -> str:  # pylint: disable=unused-argument
+        """Return the MCP server base URL for copy-paste into connector config."""
+        issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "").rstrip("/")
+        url = f"{issuer}/mcp/"
+        return format_html("<code>{}</code>", url)
 
 
 @admin.register(OAuthAccessToken)
