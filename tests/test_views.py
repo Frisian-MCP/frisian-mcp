@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import patch
@@ -111,6 +112,22 @@ class TestHttpGuards:
         request.user = _anon_user()
         response = _view(request)
         assert response["Cache-Control"] == "no-cache"
+
+    def test_get_sets_x_accel_buffering(self, rf: RequestFactory) -> None:
+        """GET SSE response includes X-Accel-Buffering: no to prevent nginx proxy buffering."""
+        request = rf.get("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        assert response["X-Accel-Buffering"] == "no"
+
+    def test_get_stream_first_chunk_is_keepalive(self, rf: RequestFactory) -> None:
+        """GET SSE stream first yields an SSE keepalive comment, not an empty body."""
+        request = rf.get("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        # _iterator holds the raw async generator; read one chunk without blocking
+        first_chunk = asyncio.run(response._iterator.__anext__())  # pylint: disable=protected-access
+        assert first_chunk == ": keepalive\n\n"
 
     def test_unsupported_method_returns_405(self, rf: RequestFactory) -> None:
         """Unsupported HTTP methods (e.g. PUT) return HTTP 405."""
