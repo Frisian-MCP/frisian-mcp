@@ -30,6 +30,7 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
   separately by :data:`~friese_mcp.registry.tool_registry`.
 """
 
+import asyncio
 import base64
 import difflib
 import hashlib
@@ -38,7 +39,7 @@ import json
 import logging
 import secrets
 import uuid
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
 from django.conf import settings
@@ -946,20 +947,22 @@ class McpView(APIView):
 
     def get(self, request: DRFRequest, *args: Any, **kwargs: Any) -> StreamingHttpResponse:
         """
-        Handle GET — open an empty SSE channel per MCP Streamable HTTP spec.
+        Handle GET — open an SSE keepalive channel per MCP Streamable HTTP spec.
 
         The MCP 2025-03-26 Streamable HTTP transport requires GET to return a
-        ``text/event-stream`` response so that clients can establish an
-        SSE channel before submitting POST requests.  The stream body is empty;
-        the connection stays open until the client disconnects.
+        ``text/event-stream`` response so that clients can establish an SSE
+        channel before submitting POST requests.  A keepalive comment is sent
+        every 15 seconds to prevent proxy and client timeouts.
         """
 
-        def _empty_stream() -> Generator[str, None, None]:
-            return
-            yield  # pragma: no cover  # makes this a generator function
+        async def _keepalive_stream() -> AsyncGenerator[str, None]:
+            while True:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(15)
 
-        resp = StreamingHttpResponse(_empty_stream(), content_type="text/event-stream")
+        resp = StreamingHttpResponse(_keepalive_stream(), content_type="text/event-stream")
         resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
         return resp
 
     def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse:
