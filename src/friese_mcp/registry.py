@@ -48,6 +48,7 @@ class ToolInputError(ValueError):
 class _ToolEntry:
     __slots__ = (
         "description",
+        "dispatcher_meta",
         "fn",
         "input_schema",
         "is_dispatcher",
@@ -67,6 +68,7 @@ class _ToolEntry:
         is_dispatcher: bool = False,
         is_heavy: bool = False,
         permission_tier: str = "read",
+        dispatcher_meta: Any = None,
     ) -> None:
         self.name = name
         self.fn = fn
@@ -76,6 +78,11 @@ class _ToolEntry:
         self.is_dispatcher = is_dispatcher
         self.is_heavy = is_heavy
         self.permission_tier = permission_tier
+        # ``dispatcher_meta`` is a ``backends.dispatcher.DispatcherMeta`` for
+        # tools registered via ``@mcp_dispatcher``; ``None`` for plain
+        # ``@mcp_tool`` / ``@mcp_heavy`` entries.  Typed as ``Any`` to avoid
+        # a circular import between ``registry`` and ``backends.dispatcher``.
+        self.dispatcher_meta = dispatcher_meta
 
 
 class ToolRegistry:
@@ -103,6 +110,7 @@ class ToolRegistry:
         is_dispatcher: bool = False,
         is_heavy: bool = False,
         permission_tier: str = "read",
+        dispatcher_meta: Any = None,
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -123,6 +131,13 @@ class ToolRegistry:
                 in ``tools/list``.  One of ``"read"``, ``"read_write"``, or
                 ``"admin"``.  Dispatcher tools always use ``"read"`` so they
                 are always visible as entry points.
+            dispatcher_meta: For dispatcher tools, the
+                ``backends.dispatcher.DispatcherMeta`` capturing the action
+                map.  Used by ``list_tools(max_tier=...)`` to rebuild the
+                ``inputSchema.action.enum`` filtered to only the caller's
+                visible actions, so write/admin action names never leak via
+                ``tools/list`` to lower-privilege callers.  Typed ``Any`` to
+                avoid a circular import.
 
         """
         with self._lock:
@@ -135,6 +150,7 @@ class ToolRegistry:
                 is_dispatcher=is_dispatcher,
                 is_heavy=is_heavy,
                 permission_tier=permission_tier,
+                dispatcher_meta=dispatcher_meta,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:
@@ -156,23 +172,61 @@ class ToolRegistry:
         Args:
             max_tier: When set to ``"read"``, ``"read_write"``, or ``"admin"``,
                 only tools whose ``permission_tier`` is at or below this level
-                are returned.  ``None`` returns all tools (unauthenticated
-                behaviour is unchanged).  Dispatcher tools always use tier
-                ``"read"`` so they are always included regardless of the caller's
-                permission.
+                are returned.  ``None`` returns all tools (legacy/internal
+                behaviour, used for cache-key generation and for callers that
+                opt out of tier filtering).  Dispatcher tools always use tier
+                ``"read"`` so the dispatcher itself remains visible — but its
+                ``inputSchema.action.enum`` is rebuilt to expose only the
+                sub-actions visible at the caller's tier.  When a dispatcher
+                has zero visible actions at the caller's tier, the dispatcher
+                is omitted entirely so it is not advertised as a callable
+                navigation entry-point with no callable actions.
 
         """
         max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
+
+        # Lazy-import to avoid a circular dependency with backends.dispatcher,
+        # which itself imports from this module.
+        # pylint: disable=import-outside-toplevel
+        from friese_mcp.backends.dispatcher import _build_dispatcher_input_schema
+
         with self._lock:
-            return [
-                {
-                    "name": entry.name,
-                    "description": entry.description,
-                    "inputSchema": entry.input_schema,
-                }
-                for entry in self._tools.values()
-                if _TIER_RANK.get(entry.permission_tier, 0) <= max_rank
-            ]
+            tools: list[dict[str, Any]] = []
+            for entry in self._tools.values():
+                if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
+                    continue
+
+                # Plain (non-dispatcher) tool: include the registered schema
+                # verbatim — the entry's own permission_tier already gated it
+                # above, so the schema does not need filtering.
+                if not entry.is_dispatcher or entry.dispatcher_meta is None:
+                    tools.append(
+                        {
+                            "name": entry.name,
+                            "description": entry.description,
+                            "inputSchema": entry.input_schema,
+                        }
+                    )
+                    continue
+
+                # Dispatcher: rebuild the inputSchema with the action enum
+                # filtered to the caller's tier.  Hide the dispatcher entirely
+                # when no actions remain visible (avoids exposing an empty
+                # navigation tool that can only return help with zero actions).
+                filtered_schema = _build_dispatcher_input_schema(
+                    entry.dispatcher_meta, max_tier=max_tier
+                )
+                visible_actions = filtered_schema["properties"]["action"]["enum"]
+                if max_tier is not None and not visible_actions:
+                    continue
+                tools.append(
+                    {
+                        "name": entry.name,
+                        "description": entry.description,
+                        "inputSchema": filtered_schema,
+                    }
+                )
+            return tools
 
     def dispatch(
         self,

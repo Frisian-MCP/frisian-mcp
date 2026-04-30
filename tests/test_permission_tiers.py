@@ -361,3 +361,168 @@ class TestDispatcherActionPermissionTier:
         entry = reg.get_entry("tools")
         assert entry is not None
         assert entry.permission_tier == "read"
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher action-list filtering in tools/list (no tier-leak via inputSchema)
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherInputSchemaTierFiltering:
+    """tools/list must not leak write/admin action names to lower-tier callers."""
+
+    def _build_registry_with_mixed_dispatcher(self) -> ToolRegistry:
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("ops", description="Mixed-tier ops dispatcher.")
+            class _Ops:
+                @mcp_action("status", description="Read status.")
+                def status(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    return {"ok": True}
+
+                @mcp_action("create", description="Create resource.", write=True)
+                def create(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    return {"created": True}
+
+                @mcp_action("purge", description="Purge everything.", admin=True)
+                def purge(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    return {"purged": True}
+
+        return reg
+
+    def _action_enum(self, tools: list[dict[str, Any]], name: str) -> list[str]:
+        for t in tools:
+            if t["name"] == name:
+                enum: list[str] = t["inputSchema"]["properties"]["action"]["enum"]
+                return enum
+        raise AssertionError(f"Tool {name!r} not found in tools list")
+
+    def test_unauthenticated_read_tier_sees_only_read_actions(self) -> None:
+        """Read-tier callers must see only read-tier action names in dispatcher enum."""
+        reg = self._build_registry_with_mixed_dispatcher()
+        tools = reg.list_tools(max_tier="read")
+        actions = self._action_enum(tools, "ops")
+        assert actions == ["status"]
+
+    def test_read_write_tier_sees_read_and_write_actions(self) -> None:
+        """read_write callers see read + read_write actions but not admin."""
+        reg = self._build_registry_with_mixed_dispatcher()
+        tools = reg.list_tools(max_tier="read_write")
+        actions = self._action_enum(tools, "ops")
+        assert set(actions) == {"status", "create"}
+
+    def test_admin_tier_sees_all_actions(self) -> None:
+        """Admin callers see every action name."""
+        reg = self._build_registry_with_mixed_dispatcher()
+        tools = reg.list_tools(max_tier="admin")
+        actions = self._action_enum(tools, "ops")
+        assert set(actions) == {"status", "create", "purge"}
+
+    def test_no_max_tier_returns_full_action_enum(self) -> None:
+        """list_tools(max_tier=None) returns the full enum (legacy / cache-key path)."""
+        reg = self._build_registry_with_mixed_dispatcher()
+        tools = reg.list_tools(max_tier=None)
+        actions = self._action_enum(tools, "ops")
+        assert set(actions) == {"status", "create", "purge"}
+
+    def test_dispatcher_with_only_privileged_actions_hidden_from_lower_tier(
+        self,
+    ) -> None:
+        """A dispatcher whose every action is admin-only is hidden from read callers."""
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("admin_only", description="Admin-only navigation.")
+            class _AdminOnly:
+                @mcp_action("a", description="A.", admin=True)
+                def a(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    return {}
+
+                @mcp_action("b", description="B.", admin=True)
+                def b(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    return {}
+
+        names_read = {t["name"] for t in reg.list_tools(max_tier="read")}
+        names_admin = {t["name"] for t in reg.list_tools(max_tier="admin")}
+        assert "admin_only" not in names_read
+        assert "admin_only" in names_admin
+
+    def test_registered_input_schema_unchanged_for_execution(self) -> None:
+        """The stored entry.input_schema keeps the full enum for dispatch validation."""
+        reg = self._build_registry_with_mixed_dispatcher()
+        entry = reg.get_entry("ops")
+        assert entry is not None
+        enum: list[str] = entry.input_schema["properties"]["action"]["enum"]
+        assert set(enum) == {"status", "create", "purge"}
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher action="help" filtering by caller tier
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherHelpResponseTierFiltering:
+    """action='help' must not enumerate actions the caller is not allowed to see."""
+
+    def _build_registry_with_dispatcher(self) -> ToolRegistry:
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("widgets", description="Widget operations.")
+            class _Widgets:
+                @mcp_action("get", description="Get widget.")
+                def get(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    return {}
+
+                @mcp_action("update", description="Update widget.", write=True)
+                def update(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    return {}
+
+                @mcp_action("delete_all", description="Delete all.", admin=True)
+                def delete_all(
+                    self, request: Any, params: dict[str, Any]
+                ) -> dict[str, Any]:
+                    return {}
+
+        return reg
+
+    def _help_action_names(self, reg: ToolRegistry, auth: Any) -> set[str]:
+        request = _rf.get("/")
+        if auth is not None:
+            request.auth = auth  # type: ignore[attr-defined]
+        result = reg.dispatch(request, "widgets", {"action": "help"})
+        return {a["name"] for a in result["actions"]}
+
+    def test_unauthenticated_help_returns_only_read_actions(self) -> None:
+        """request.auth=None → help lists only read-tier actions."""
+        reg = self._build_registry_with_dispatcher()
+        names = self._help_action_names(reg, auth=None)
+        assert names == {"get"}
+
+    def test_read_write_help_returns_read_and_write_actions(self) -> None:
+        """read_write token → help lists read + read_write actions."""
+        reg = self._build_registry_with_dispatcher()
+        names = self._help_action_names(reg, auth=_fake_auth("read_write"))
+        assert names == {"get", "update"}
+
+    def test_admin_help_returns_all_actions(self) -> None:
+        """Admin token → help lists every action."""
+        reg = self._build_registry_with_dispatcher()
+        names = self._help_action_names(reg, auth=_fake_auth("admin"))
+        assert names == {"get", "update", "delete_all"}
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    def test_unauthenticated_tier_setting_overrides_help_filter(self) -> None:
+        """FRIESE_MCP_UNAUTHENTICATED_TIER='admin' exposes all actions in help."""
+        reg = self._build_registry_with_dispatcher()
+        names = self._help_action_names(reg, auth=None)
+        assert names == {"get", "update", "delete_all"}
+
+    def test_omitted_action_returns_filtered_help(self) -> None:
+        """Omitting 'action' is equivalent to 'help' and must also be tier-filtered."""
+        reg = self._build_registry_with_dispatcher()
+        request = _rf.get("/")
+        request.auth = _fake_auth("read")  # type: ignore[attr-defined]
+        result = reg.dispatch(request, "widgets", {})
+        assert {a["name"] for a in result["actions"]} == {"get"}
