@@ -3,23 +3,26 @@ URL configuration for the friese-mcp gateway.
 
 Include in the host project's root URLconf::
 
-    from django.urls import include, path
+    from django.urls import include, re_path
 
     urlpatterns = [
         ...
-        path("mcp/", include("friese_mcp.urls")),
+        re_path(r"^mcp/?", include("friese_mcp.urls")),
     ]
 
-This exposes a single endpoint at ``<prefix>/`` (e.g. ``/mcp/``) that handles
-all JSON-RPC 2.0 traffic over HTTP POST.
+Use ``re_path`` with an optional trailing slash so that MCP clients such as
+Claude.ai and Cursor — which strip trailing slashes from the server URL — reach
+the gateway directly without a 308 redirect.  Django's ``APPEND_SLASH``
+mechanism issues a 308 for ``/mcp`` → ``/mcp/`` and MCP protocol clients do
+not follow 308 redirects, causing the connection to fail silently.
 """
 
-from django.urls import URLPattern, path
+from django.urls import URLPattern, re_path
 
 from friese_mcp.views import McpView
 
 app_name: str = "friese_mcp"
 
 urlpatterns: list[URLPattern] = [
-    path("", McpView.as_view(), name="gateway"),
+    re_path(r"^/?$", McpView.as_view(), name="gateway"),
 ]
