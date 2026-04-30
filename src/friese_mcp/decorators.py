@@ -168,6 +168,11 @@ def mcp_dispatcher(
         # Dispatchers are always registered as "read" so they appear in tools/list
         # for all callers — they are navigation entry points, not gated resources.
         # Per-action permission enforcement happens inside invoke_fn at dispatch time.
+        # The dispatcher meta is stashed on the registry entry so that
+        # ToolRegistry.list_tools(max_tier=...) can rebuild the inputSchema with
+        # the action enum filtered to only the actions visible at the caller's
+        # tier — preventing write/admin action names from leaking through
+        # tools/list to unauthenticated callers.
         tool_registry.register(
             name=name,
             fn=invoke_fn,
@@ -176,6 +181,7 @@ def mcp_dispatcher(
             permission_classes=permission_classes,
             is_dispatcher=True,
             permission_tier="read",
+            dispatcher_meta=meta,
         )
         return cls
 
