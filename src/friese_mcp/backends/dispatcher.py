@@ -167,16 +167,26 @@ def _make_dispatcher_invoke(
         # Action-level permission tier check. Dispatchers always appear in
         # tools/list (tier="read") but individual actions may require higher
         # permissions. Check here rather than at tools/list time.
-        auth_obj = getattr(request, "auth", None)
-        auth_permission = getattr(auth_obj, "permission", None)
-        if auth_permission is not None:
-            token_rank = _TIER_RANK.get(auth_permission, 0)
-            action_rank = _TIER_RANK.get(entry.permission_tier, 0)
-            if token_rank < action_rank:
-                raise PermissionError(
-                    f"Action {action!r} requires {entry.permission_tier!r} permission; "
-                    f"your token has {auth_permission!r} permission."
-                )
+        #
+        # The caller's effective tier is resolved via :func:`_resolve_request_tier`,
+        # which handles all three cases uniformly:
+        #
+        # * ``request.auth is None`` (unauthenticated)        → ``FRIESE_MCP_UNAUTHENTICATED_TIER``
+        #   (default ``"read"``)
+        # * ``request.auth`` without ``.permission`` attr     → ``"read"`` (most conservative)
+        # * ``request.auth.permission`` set                   → that value
+        #
+        # The previous implementation only enforced when ``auth.permission`` was
+        # truthy, which silently let unauthenticated callers invoke write/admin
+        # actions — a critical authorisation bypass.
+        caller_tier = _resolve_request_tier(request)
+        caller_rank = _TIER_RANK.get(caller_tier, 0)
+        action_rank = _TIER_RANK.get(entry.permission_tier, 0)
+        if caller_rank < action_rank:
+            raise PermissionError(
+                f"Action {action!r} requires {entry.permission_tier!r} permission; "
+                f"caller has {caller_tier!r} permission."
+            )
 
         if entry.input_schema is not None:
             try:

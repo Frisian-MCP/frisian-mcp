@@ -18,6 +18,29 @@ from rest_framework.permissions import BasePermission
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
 
 
+def _resolve_request_tier(request: Any) -> str:
+    """
+    Return the effective permission tier for *request*.
+
+    Mirrors :func:`friese_mcp.views._get_token_permission` and
+    :func:`friese_mcp.backends.dispatcher._resolve_request_tier`:
+
+    * ``request.auth is None``                          → ``FRIESE_MCP_UNAUTHENTICATED_TIER``
+      (default ``"read"``)
+    * ``request.auth`` without a ``.permission`` attr   → ``"read"`` (most conservative;
+      unknown auth backends never silently expose higher tiers)
+    * ``request.auth.permission`` set                   → that value
+
+    Defined at module level so :class:`ToolRegistry` can enforce tier at
+    dispatch time without importing :mod:`friese_mcp.views` (avoiding a
+    circular import).
+    """
+    auth_obj = getattr(request, "auth", None)
+    if auth_obj is None:
+        return str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
+    return str(getattr(auth_obj, "permission", "read"))
+
+
 def _camel_to_snake(name: str) -> str:
     """Convert a camelCase or PascalCase identifier to snake_case."""
     s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
@@ -284,6 +307,28 @@ class ToolRegistry:
                 jsonschema.validate(instance=arguments, schema=entry.input_schema)
             except jsonschema.exceptions.ValidationError as exc:
                 raise ToolInputError(exc.message) from exc
+
+        # Tier enforcement at dispatch time.  ``permission_tier`` was previously
+        # only used to filter ``tools/list``; a caller who knew the tool name
+        # could still invoke a write/admin tool directly.  Now the same
+        # tier-rank comparison is applied at execution time so that the
+        # ``tools/list`` filter cannot be bypassed by name guessing.
+        #
+        # Dispatcher tools are intentionally registered with tier="read" so
+        # they remain visible as navigation entry-points; per-action tier
+        # enforcement happens inside the dispatcher invoke callable.  For
+        # those entries the check here is a no-op (read ≥ read), and the
+        # action-level check inside ``_make_dispatcher_invoke`` is what
+        # rejects unauthorised sub-actions.
+        if not entry.is_dispatcher:
+            caller_tier = _resolve_request_tier(request)
+            caller_rank = _TIER_RANK.get(caller_tier, 0)
+            tool_rank = _TIER_RANK.get(entry.permission_tier, 0)
+            if caller_rank < tool_rank:
+                raise PermissionError(
+                    f"Tool {entry.name!r} requires {entry.permission_tier!r} permission; "
+                    f"caller has {caller_tier!r} permission."
+                )
 
         for perm_class in entry.permission_classes:
             perm = perm_class()
