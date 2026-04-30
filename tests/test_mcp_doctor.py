@@ -134,3 +134,86 @@ class TestMcpDoctorExitCodes:
         """No SystemExit (implicit 0) when there are only warnings, no errors."""
         out, _ = _run()
         assert "No errors." in out
+
+
+class TestMcpDoctorUnauthTier:
+    """FRIESE_MCP_UNAUTHENTICATED_TIER checks."""
+
+    def test_ok_when_not_set(self) -> None:
+        """When FRIESE_MCP_UNAUTHENTICATED_TIER is not configured, default 'read' is explicit."""
+        out, _ = _run()
+        assert "not set — defaulting to 'read'" in out
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="read")
+    def test_ok_when_explicitly_read(self) -> None:
+        """Explicit read tier reports as OK."""
+        out, _ = _run()
+        assert "FRIESE_MCP_UNAUTHENTICATED_TIER='read'" in out
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="read_write")
+    def test_warn_when_read_write(self) -> None:
+        """Warning emitted when FRIESE_MCP_UNAUTHENTICATED_TIER=read_write."""
+        out, _ = _run()
+        assert "FRIESE_MCP_UNAUTHENTICATED_TIER='read_write'" in out
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    def test_warn_when_admin(self) -> None:
+        """Warning emitted when FRIESE_MCP_UNAUTHENTICATED_TIER=admin."""
+        out, _ = _run()
+        assert "FRIESE_MCP_UNAUTHENTICATED_TIER='admin'" in out
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="superuser")
+    def test_warn_when_unrecognised(self) -> None:
+        """Warning emitted when FRIESE_MCP_UNAUTHENTICATED_TIER is an unknown value."""
+        out, _ = _run()
+        assert "is not a recognised tier" in out
+
+
+class TestMcpDoctorOAuthAuthorizeUrl:
+    """FRIESE_MCP_OAUTH_AUTHORIZE_URL reachability checks."""
+
+    def test_skipped_when_not_set(self) -> None:
+        """No output about authorize URL when FRIESE_MCP_OAUTH_AUTHORIZE_URL is not set."""
+        out, _ = _run()
+        assert "FRIESE_MCP_OAUTH_AUTHORIZE_URL" not in out
+
+    @override_settings(FRIESE_MCP_OAUTH_AUTHORIZE_URL="http://localhost:9999/oauth/authorize/")
+    def test_ok_when_reachable_200(self) -> None:
+        """OK message when authorize URL returns HTTP 200."""
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.status = 200
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            out, _ = _run()
+        assert "FRIESE_MCP_OAUTH_AUTHORIZE_URL reachable (HTTP 200)" in out
+
+    @override_settings(FRIESE_MCP_OAUTH_AUTHORIZE_URL="http://localhost:9999/oauth/authorize/")
+    def test_warn_when_http_error(self) -> None:
+        """Warning emitted when authorize URL returns a non-200 HTTP status."""
+        import urllib.error
+        from unittest.mock import patch
+
+        exc = urllib.error.HTTPError(
+            url="http://localhost:9999/oauth/authorize/",
+            code=404,
+            msg="Not Found",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=exc):
+            out, _ = _run()
+        assert "returned HTTP 404" in out
+
+    @override_settings(FRIESE_MCP_OAUTH_AUTHORIZE_URL="http://localhost:9999/oauth/authorize/")
+    def test_warn_when_unreachable(self) -> None:
+        """Warning emitted when authorize URL cannot be reached (network error)."""
+        import urllib.error
+        from unittest.mock import patch
+
+        exc = urllib.error.URLError(reason="Connection refused")
+        with patch("urllib.request.urlopen", side_effect=exc):
+            out, _ = _run()
+        assert "could not be reached" in out

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
 from typing import Any
 
 from django.conf import settings
@@ -34,6 +36,7 @@ class Command(BaseCommand):
         self._check_cache_backend(warnings)
         self._check_performance_hints(warnings)
         self._check_oauth_registration(warnings)
+        self._check_oauth_authorize_url(warnings)
 
         self.stdout.write("")
         if errors:
@@ -177,8 +180,14 @@ class Command(BaseCommand):
                 " Set FRIESE_MCP_HMAC_KEY to decouple them.",
             )
 
-        unauth_tier: str = str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
-        if unauth_tier == "read":
+        _unauth_raw = getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", None)
+        unauth_tier: str = str(_unauth_raw) if _unauth_raw is not None else "read"
+        if _unauth_raw is None:
+            self._ok(
+                "FRIESE_MCP_UNAUTHENTICATED_TIER not set — defaulting to 'read'"
+                " (anonymous callers see only read-tier tools)"
+            )
+        elif unauth_tier == "read":
             self._ok(
                 "FRIESE_MCP_UNAUTHENTICATED_TIER='read'"
                 " — anonymous callers see only read-tier tools"
@@ -296,6 +305,42 @@ class Command(BaseCommand):
                 " Discovering agents (e.g. Claude.ai) will see no registration_endpoint in"
                 " the .well-known metadata and must use pre-provisioned credentials."
                 " Set to True if you want end-to-end agent autodiscovery.",
+            )
+
+    def _check_oauth_authorize_url(self, warnings: list[str]) -> None:
+        """Check that FRIESE_MCP_OAUTH_AUTHORIZE_URL is reachable when set."""
+        url: str | None = getattr(settings, "FRIESE_MCP_OAUTH_AUTHORIZE_URL", None)
+        if url is None:
+            return
+
+        if not url.startswith(("http://", "https://")):
+            self._warn_msg(
+                warnings,
+                f"FRIESE_MCP_OAUTH_AUTHORIZE_URL={url!r} — must be an http:// or https:// URL",
+            )
+            return
+
+        status: int = 0
+        try:
+            req = urllib.request.Request(url, method="GET")  # noqa: S310
+            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._warn_msg(
+                warnings,
+                f"FRIESE_MCP_OAUTH_AUTHORIZE_URL={url!r} is set but could not be reached: {exc}",
+            )
+            return
+
+        if status == 200:
+            self._ok(f"FRIESE_MCP_OAUTH_AUTHORIZE_URL reachable (HTTP {status})")
+        else:
+            self._warn_msg(
+                warnings,
+                f"FRIESE_MCP_OAUTH_AUTHORIZE_URL={url!r} returned HTTP {status} (expected 200)"
+                " — OAuth /authorize endpoint may not be mounted correctly",
             )
 
     # ------------------------------------------------------------------
