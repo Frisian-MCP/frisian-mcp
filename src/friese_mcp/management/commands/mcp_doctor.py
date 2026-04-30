@@ -31,6 +31,7 @@ class Command(BaseCommand):
         self._check_url_mounting(warnings)
         self._check_auth_wiring(warnings)
         self._check_security_settings(warnings)
+        self._check_cache_backend(warnings)
         self._check_performance_hints(warnings)
         self._check_oauth_registration(warnings)
 
@@ -176,6 +177,26 @@ class Command(BaseCommand):
                 " Set FRIESE_MCP_HMAC_KEY to decouple them.",
             )
 
+        unauth_tier: str = str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
+        if unauth_tier == "read":
+            self._ok(
+                "FRIESE_MCP_UNAUTHENTICATED_TIER='read'"
+                " — anonymous callers see only read-tier tools"
+            )
+        elif unauth_tier in ("read_write", "admin"):
+            self._warn_msg(
+                warnings,
+                f"FRIESE_MCP_UNAUTHENTICATED_TIER='{unauth_tier}' — anonymous callers can invoke"
+                f" {unauth_tier}-tier tools without authentication."
+                " Acceptable for internal or demo deployments; not recommended for production.",
+            )
+        else:
+            self._warn_msg(
+                warnings,
+                f"FRIESE_MCP_UNAUTHENTICATED_TIER='{unauth_tier}' is not a recognised tier"
+                " (expected 'read', 'read_write', or 'admin') — defaulting to 'read' at runtime",
+            )
+
         proxy_count: int = getattr(settings, "FRIESE_MCP_TRUSTED_PROXY_COUNT", 0)
         if not debug and proxy_count == 0:
             self._warn_msg(
@@ -189,15 +210,28 @@ class Command(BaseCommand):
 
     def _check_performance_hints(self, warnings: list[str]) -> None:
         """Check performance-related settings against the registered tool count."""
-        from friese_mcp.registry import tool_registry  # pylint: disable=import-outside-toplevel
+        from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
+            _TIER_RANK,
+            tool_registry,
+        )
 
         try:
-            tool_count = len(tool_registry.list_tools())
+            all_tools = tool_registry.list_tools(max_tier=None)
+            tool_count = len(all_tools)
         except Exception:  # pylint: disable=broad-exception-caught
+            all_tools = []
             tool_count = 0
 
         if tool_count:
-            self._ok(f"{tool_count} tool(s) registered")
+            tier_counts: dict[str, int] = dict.fromkeys(_TIER_RANK, 0)
+            for tool in all_tools:
+                entry = tool_registry.get_entry(tool["name"])
+                if entry is not None:
+                    tier_counts[entry.permission_tier] = (
+                        tier_counts.get(entry.permission_tier, 0) + 1
+                    )
+            dist = ", ".join(f"{t}={tier_counts[t]}" for t in _TIER_RANK)
+            self._ok(f"{tool_count} tool(s) registered — tier distribution: {dist}")
 
         page_size: int | None = getattr(settings, "FRIESE_MCP_TOOLS_PAGE_SIZE", None)
         if tool_count > 80 and page_size is None:
@@ -221,6 +255,30 @@ class Command(BaseCommand):
             )
         elif cache_ttl:
             self._ok(f"FRIESE_MCP_TOOLS_LIST_CACHE_TTL={cache_ttl}s")
+
+    def _check_cache_backend(self, warnings: list[str]) -> None:
+        """Warn when LocMemCache is the default backend and contrib.oauth is installed."""
+        _locmem = "django.core.cache.backends.locmem.LocMemCache"
+        cache_backend = getattr(settings, "CACHES", {}).get("default", {}).get("BACKEND", "")
+        oauth_installed = "friese_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
+
+        if cache_backend == _locmem and oauth_installed:
+            self._warn_msg(
+                warnings,
+                "CACHES['default'] is LocMemCache and contrib.oauth is installed — authorization"
+                " codes are stored per-process. In a multi-worker deployment (gunicorn, uWSGI)"
+                " a code written by one worker will not be visible to another, causing"
+                " intermittent invalid_grant errors. Configure a shared cache backend"
+                " (Redis, Memcached) before going to production.",
+            )
+        elif cache_backend == _locmem:
+            self._warn_msg(
+                warnings,
+                "CACHES['default'] is LocMemCache — per-process only."
+                " Acceptable for development; switch to Redis or Memcached in production.",
+            )
+        else:
+            self._ok(f"Cache backend: {cache_backend or '(default)'}")
 
     def _check_oauth_registration(self, warnings: list[str]) -> None:
         """Warn when OAuth registration is closed — blocks agent self-bootstrap."""

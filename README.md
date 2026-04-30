@@ -62,7 +62,7 @@ This is the pattern for agent-facing APIs where tool count matters and progressi
 | **`@mcp_resource`** | Expose server-side content via `resources/list` / `resources/read` |
 | **Filter introspection** | `SearchFilter`, `OrderingFilter`, `DjangoFilterBackend` → schema properties on `list` |
 | **Allowlist / denylist** | `FRIESE_MCP_TOOL_ALLOWLIST` / `FRIESE_MCP_TOOL_DENYLIST` for surgical surface control |
-| **OAuth 2.0** | `contrib.oauth` — client credentials grant with RFC 8414 well-known discovery |
+| **OAuth 2.0** | `contrib.oauth` — authorization code (PKCE) + client credentials; permission-tier tool filtering |
 | **Static tokens** | `contrib.tokens` — HMAC-hashed Bearer tokens for internal agents |
 | **Per-agent scoping** | `contrib.agents` — per-credential tool allowlists for multi-agent deployments |
 | **Tool middleware** | `FRIESE_MCP_TOOL_MIDDLEWARE` — audit logging, rate limiting, heartbeats |
@@ -195,7 +195,7 @@ MCP Client (Claude, Cursor, GPT, …)
 - [Authentication and permissions](#authentication-and-permissions)
 - [Built-in authentication](#built-in-authentication)
   - [contrib.tokens — static Bearer tokens](#contribtokens--static-bearer-tokens)
-  - [contrib.oauth — OAuth 2.0 client credentials](#contriboauth--oauth-20-client-credentials)
+  - [contrib.oauth — OAuth 2.0](#contriboauth--oauth-20)
   - [contrib.agents — per-agent tool allowlists](#contribagents--per-agent-tool-allowlists)
 - [Auto-discovery](#auto-discovery)
 - [Decorators](#decorators)
@@ -567,6 +567,24 @@ invalidate_tools_list_cache()  # next tools/list request rebuilds from registry
 
 Call `invalidate_tools_list_cache()` immediately after any runtime registration change to make the new manifest visible without waiting for the TTL.
 
+### `FRIESE_MCP_UNAUTHENTICATED_TIER`
+
+**Type:** `str | None` | **Default:** `"read"`
+
+Controls which tool tier is visible to unauthenticated callers (i.e. when `request.auth is None`). The default `"read"` means only read-tagged tools appear in `tools/list` for unauthenticated requests — admin-tagged tools are not enumerable without a token.
+
+```python
+# Expose all tools to unauthenticated callers (open demo surface)
+FRIESE_MCP_UNAUTHENTICATED_TIER = "admin"
+
+# Expose only read-tier tools (default — prevents admin tool name enumeration)
+FRIESE_MCP_UNAUTHENTICATED_TIER = "read"
+```
+
+Set to `None` to disable tier filtering for unauthenticated requests entirely (equivalent to `"admin"` but more explicit).
+
+> **Security note:** The default `"read"` prevents unauthenticated callers from enumerating admin-tagged tool names. Even with `FRIESE_MCP_UNAUTHENTICATED_TIER = "admin"`, unauthenticated callers can only *see* tools in `tools/list` — `tools/call` still enforces `permission_classes` on each tool. Tier filtering is a visibility control, not an execution guard.
+
 ---
 
 ## Reverse proxy configuration
@@ -633,6 +651,34 @@ friese-mcp has two independent permission enforcement points:
 | **Tool** | Access to a specific tool within `tools/call` | `permission_classes` on the ViewSet or `@mcp_tool` |
 
 A request denied at gateway level receives a DRF 403 response before it reaches the JSON-RPC handler. A request denied at tool level receives an `isError: true` tool-level content response — not a JSON-RPC protocol error code. This keeps the JSON-RPC session alive so the agent can inspect the error and retry or call a different tool.
+
+### Permission tiers — tools/list filtering
+
+friese-mcp supports a three-tier permission model that controls which tools appear in `tools/list` for a given token. This lets you expose a minimal read-only surface to public callers while keeping write and admin tools hidden until a token grants access.
+
+| Tier | Value | What it sees |
+|---|---|---|
+| Read | `"read"` | Tools tagged `read` only |
+| Read-Write | `"read_write"` | Tools tagged `read` and `read_write` |
+| Admin | `"admin"` | All tools |
+
+**How tools are tagged:**
+
+- `@mcp_tool(write=True)` → `"read_write"` tier
+- `@mcp_tool(admin=True)` → `"admin"` tier
+- `@mcp_tool(...)` (no kwargs) → `"read"` tier (default)
+- `@mcp_action(write=True)` and `@mcp_heavy(write=True)` follow the same pattern
+- ViewSet auto-discovery: GET actions → `"read"`, POST/PUT/PATCH/DELETE → `"read_write"`
+
+**How tier is determined at request time:**
+
+- Authenticated with `FrieseMcpToken` or `OAuthAccessToken`: tier is `token.permission`
+- Authenticated but token lacks a `.permission` attribute: conservative fallback to `"read"`
+- Unauthenticated (`request.auth is None`): `FRIESE_MCP_UNAUTHENTICATED_TIER` (default `"read"`)
+
+**Dispatcher tools are always visible:** `@mcp_dispatcher` tools always appear in `tools/list` regardless of their action tiers — they are navigation entry points. Permission enforcement for write/admin actions within a dispatcher happens at `tools/call` time (the dispatcher returns a permission error, not a `tools/list` absence).
+
+**Tier filtering and caching:** `FRIESE_MCP_TOOLS_LIST_CACHE_TTL` caches per-tier. A read-tier cache entry does not pollute the admin-tier result.
 
 ### Example: JWT-gated MCP surface
 
@@ -753,9 +799,10 @@ Content-Type: application/json
 
 | Field | Type | Description |
 |---|---|---|
-| `token` | `CharField(64)` | HMAC-SHA256 of the raw Bearer token keyed by `SECRET_KEY`. The raw value is exposed once as `instance.plaintext_token` immediately after creation and is never stored. |
+| `token` | `CharField(64)` | HMAC-SHA256 of the raw Bearer token keyed by `FRIESE_MCP_HMAC_KEY`. The raw value is exposed once as `instance.plaintext_token` immediately after creation and is never stored. |
 | `name` | `CharField(200)` | Human-readable label (e.g. `"claude-agent"`). |
 | `is_active` | `BooleanField` | Set to `False` to revoke. Inactive tokens are rejected. |
+| `permission` | `CharField` | Permission tier: `"read"`, `"read_write"` (default), or `"admin"`. Controls which tool tier this token can see in `tools/list`. |
 | `user` | `ForeignKey(AUTH_USER_MODEL, null=True)` | Optional user. `None` for service tokens. |
 | `created_at` | `DateTimeField` | Auto-set on creation. |
 | `last_used_at` | `DateTimeField(null=True)` | Updated on each successful authentication (queryset update, no signals). |
@@ -772,9 +819,14 @@ Reads `Authorization: Bearer <token>`. Returns `(user, token)` on success, where
 
 ---
 
-### `contrib.oauth` — OAuth 2.0 client credentials
+### `contrib.oauth` — OAuth 2.0
 
-Full OAuth 2.0 `client_credentials` grant for AI agent clients (Claude, GPT, etc.). Clients exchange `client_id` + `client_secret` for a short-lived Bearer token. Tokens expire and must be refreshed. Includes RFC 8414 authorization server metadata and MCP-spec protected resource metadata for automatic client discovery.
+Full OAuth 2.0 for AI agent clients (Claude, GPT, Cursor, etc.). Supports two grant types:
+
+- **Authorization code + PKCE (RFC 7636)** — the standard flow for AI clients that connect via OAuth in a browser (e.g. Claude.ai Add Connector). The client is redirected to `/oauth/authorize/`, receives a one-time code, and exchanges it for a Bearer token using a PKCE code verifier.
+- **Client credentials (RFC 6749 §4.4)** — headless M2M flow. Clients exchange `client_id` + `client_secret` directly for a token. No browser redirect.
+
+Both grant types issue `OAuthAccessToken` records with a configurable lifetime. Includes RFC 8414 authorization server metadata and MCP-spec protected resource metadata for automatic client discovery.
 
 #### Setup
 
@@ -796,6 +848,8 @@ FRIESE_MCP_PERMISSION_CLASSES = [
 # Optional — defaults shown
 FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 3600   # 1 hour
 FRIESE_MCP_OAUTH_REGISTRATION_OPEN = False      # disable dynamic client registration
+FRIESE_MCP_OAUTH_AUTO_APPROVE = True            # skip consent screen; set False to show it
+# FRIESE_MCP_OAUTH_AUTHORIZE_URL = ""           # override authorization_endpoint in well-known
 ```
 
 ```python
@@ -826,9 +880,59 @@ print(client.client_id)                 # 32-hex-char public identifier
 print(client.plaintext_client_secret)   # raw secret — save this now, it cannot be retrieved later
 ```
 
-**Django admin:** Navigate to **OAuth Clients → Add**. Set a name and scope and save. `client_id` is visible in the detail page; the raw `client_secret` is **not** — use the shell method above to capture it at creation time.
+**Django admin:** Navigate to **OAuth Clients → Add**. Set a name and permission level, then save. `client_id` is visible in the detail page; the raw `client_secret` is **not** — use the shell method above to capture it at creation time.
 
-#### OAuth flow
+#### Authorization code flow (AI client connect — PKCE)
+
+Used by AI clients that connect via OAuth in a browser, such as the Claude.ai "Add Connector" flow. PKCE (RFC 7636) is required — S256 only. No client secret is used for this grant.
+
+**Step 1 — Redirect user to `/oauth/authorize/`:**
+
+```
+GET /oauth/authorize/
+  ?response_type=code
+  &client_id=<client_id>
+  &redirect_uri=https://your-client.example.com/callback
+  &code_challenge=<base64url(sha256(code_verifier))>
+  &code_challenge_method=S256
+  &state=<random-csrf-token>
+```
+
+If `FRIESE_MCP_OAUTH_AUTO_APPROVE = True` (the default), the server redirects immediately with a one-time code:
+
+```
+https://your-client.example.com/callback?code=<code>&state=<state>
+```
+
+If `FRIESE_MCP_OAUTH_AUTO_APPROVE = False`, a consent page is rendered first (`friese_mcp/oauth/authorize.html`, overridable). The user clicks Allow or Deny; Allow redirects with the code.
+
+**Step 2 — Exchange the code for a token:**
+
+```
+POST /oauth/token/
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code&code=<code>&redirect_uri=<same-as-step-1>&client_id=<id>&code_verifier=<verifier>
+```
+
+Response:
+
+```json
+{
+  "access_token": "<64-hex-char token>",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "mcp:read"
+}
+```
+
+The scope string reflects the client's permission tier: `mcp:read`, `mcp:write`, or `mcp:admin`. Authorization codes are single-use and expire after 300 seconds.
+
+**Step 3 — Use the token:** same as the client credentials flow below.
+
+> **Production cache requirement:** Authorization codes are stored in Django's cache backend (300 s TTL). The default `LocMemCache` is per-process — in a multi-worker gunicorn deployment, a code written by worker A will not be found by worker B, causing intermittent `invalid_grant` errors. Set a shared cache backend (Redis, Memcached) in production. `OAuthConfig.ready()` logs a startup warning when `LocMemCache` is detected with `DEBUG = False`.
+
+#### Client credentials flow (headless M2M)
 
 **Step 1 — Exchange credentials for a token:**
 
@@ -856,7 +960,7 @@ Response:
   "access_token": "<64-hex-char token>",
   "token_type": "Bearer",
   "expires_in": 3600,
-  "scope": "mcp"
+  "scope": "mcp:read"
 }
 ```
 
@@ -876,18 +980,21 @@ Content-Type: application/json
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/oauth/token/` | Issue an access token (RFC 6749 §4.4). Form-encoded or JSON. |
+| `GET` | `/oauth/authorize/` | Authorization code endpoint (RFC 6749 §4.1 + PKCE). Redirects with code on success. |
+| `POST` | `/oauth/authorize/` | Consent form submission (only when `FRIESE_MCP_OAUTH_AUTO_APPROVE = False`). |
+| `POST` | `/oauth/token/` | Issue an access token. Supports `authorization_code` and `client_credentials` grants. |
 | `POST` | `/oauth/register/` | Dynamic client registration (RFC 7591). Disabled unless `FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True`. |
-| `GET` | `/.well-known/oauth-authorization-server` | Authorization server metadata (RFC 8414). |
+| `GET` | `/.well-known/oauth-authorization-server` | Authorization server metadata (RFC 8414). Includes `authorization_endpoint`. |
 | `GET` | `/.well-known/oauth-protected-resource` | Protected resource metadata (MCP spec). |
 
 #### Token endpoint errors
 
 | `error` | HTTP | Cause |
 |---|---|---|
-| `unsupported_grant_type` | 400 | `grant_type` is not `client_credentials` |
-| `invalid_request` | 400 | `client_id` or `client_secret` missing |
+| `unsupported_grant_type` | 400 | `grant_type` is not `client_credentials` or `authorization_code` |
+| `invalid_request` | 400 | Required parameter missing |
 | `invalid_client` | 401 | Credentials not found, or client is inactive |
+| `invalid_grant` | 400 | Authorization code not found, expired, already used, or PKCE mismatch |
 
 #### Dynamic client registration
 
@@ -936,10 +1043,10 @@ Reads `Authorization: Bearer <token>`. Looks up the token in `OAuthAccessToken`,
 | Field | Type | Description |
 |---|---|---|
 | `client_id` | `CharField(32)` | Auto-generated 32-hex-char public identifier. Readable at any time. |
-| `client_secret` | `CharField(64)` | HMAC-SHA256 of the raw client secret keyed by `SECRET_KEY`. The raw value is exposed once as `instance.plaintext_client_secret` immediately after creation and is never stored. |
+| `client_secret` | `CharField(64)` | HMAC-SHA256 of the raw client secret keyed by `FRIESE_MCP_HMAC_KEY`. The raw value is exposed once as `instance.plaintext_client_secret` immediately after creation and is never stored. |
 | `name` | `CharField(200)` | Human-readable label. |
 | `is_active` | `BooleanField` | Set to `False` to revoke all token issuance. Existing tokens are also rejected. |
-| `scope` | `CharField(200)` | Space-separated scopes (default `"mcp"`). |
+| `permission` | `CharField` | Permission tier: `"read"`, `"read_write"` (default), or `"admin"`. Determines which tool tier the issued access token can see. |
 | `created_at` | `DateTimeField` | Auto-set on creation. |
 
 > **Pre-v1 clients:** If your project created `OAuthClient` records before upgrading to v1.0 (when `client_secret` stored the raw value), those clients will no longer be able to authenticate. Delete and recreate them — this is a one-time migration step for early adopters.
@@ -953,7 +1060,7 @@ Reads `Authorization: Bearer <token>`. Looks up the token in `OAuthAccessToken`,
 | `token` | `CharField(64)` | Auto-generated 64-hex-char Bearer token. |
 | `client` | `ForeignKey(OAuthClient)` | Issuing client. Cascade-deletes with client. |
 | `expires_at` | `DateTimeField` | Defaults to `now() + FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS`. |
-| `scope` | `CharField(200)` | Scopes granted (copied from client at issuance). |
+| `permission` | `CharField` | Permission tier inherited from `client.permission` at issuance. Controls tool visibility in `tools/list`. |
 | `created_at` | `DateTimeField` | Auto-set on creation. |
 
 `is_expired()` method returns `True` if `now() >= expires_at`.
@@ -970,6 +1077,8 @@ Reads `Authorization: Bearer <token>`. Looks up the token in `OAuthAccessToken`,
 | `FRIESE_MCP_OAUTH_TOKEN_PATH` | `str` | `"/oauth/token/"` | Token endpoint path in well-known metadata. |
 | `FRIESE_MCP_OAUTH_REGISTER_PATH` | `str` | `"/oauth/register/"` | Registration endpoint path in well-known metadata. |
 | `FRIESE_MCP_PATH` | `str` | `"/mcp/"` | MCP gateway path used in protected-resource metadata. |
+| `FRIESE_MCP_OAUTH_AUTO_APPROVE` | `bool` | `True` | Skip consent screen on `GET /oauth/authorize/`. When `False`, renders `friese_mcp/oauth/authorize.html` — overridable via Django's template override mechanism. |
+| `FRIESE_MCP_OAUTH_AUTHORIZE_URL` | `str` | `""` | Override the `authorization_endpoint` advertised in `/.well-known/oauth-authorization-server`. Use when your IdP or SSO provider hosts the authorize endpoint. When empty, the package-provided `/oauth/authorize/` URL is used. |
 
 #### Using both contrib modules together
 
@@ -1225,6 +1334,8 @@ def cancel_order(arguments: dict, request: HttpRequest) -> dict:
 | `description` | `str` | Yes | Human-readable description shown in `tools/list`. |
 | `input_schema` | `dict` | Yes | JSON Schema (draft-07) for argument validation. |
 | `permission_classes` | `list[type[BasePermission]]` | No | DRF permission classes. Pass `None` or `[]` for unrestricted access. |
+| `write` | `bool` | No | Set `True` to assign `permission_tier="read_write"`. The tool is hidden from `tools/list` for read-only tokens. Default `False`. |
+| `admin` | `bool` | No | Set `True` to assign `permission_tier="admin"`. The tool is only visible to admin-tier tokens. Takes precedence over `write`. Default `False`. |
 
 The decorated callable must have the signature `(arguments: dict, request: HttpRequest) -> Any` and return a JSON-serialisable value.
 
@@ -1318,7 +1429,7 @@ class TasksDispatcher:
 
 **`@mcp_dispatcher(name, description)`** — class decorator. Scans the class for `@mcp_action` methods, instantiates the class once at decoration time, and registers it as a single MCP tool with a compact `inputSchema`. The class instance is reused across calls; `request` is passed per-call.
 
-**`@mcp_action(name, description, params=None, input_schema=None)`** — method decorator. Marks a method as a dispatchable action. Does not alter the method's behaviour.
+**`@mcp_action(name, description, params=None, input_schema=None, write=False, admin=False)`** — method decorator. Marks a method as a dispatchable action. Does not alter the method's behaviour.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1326,6 +1437,10 @@ class TasksDispatcher:
 | `description` | `str` | Yes | Human-readable description shown in help-mode responses. |
 | `params` | `dict[str, str]` | No | Mapping of param name → human-readable hint. Shown in help-mode. |
 | `input_schema` | `dict` | No | JSON Schema (draft-07) for server-side validation of `params` before the method is called. |
+| `write` | `bool` | No | Set `True` to assign `permission_tier="read_write"` to this action. Default `False`. |
+| `admin` | `bool` | No | Set `True` to assign `permission_tier="admin"` to this action. Takes precedence over `write`. Default `False`. |
+
+> **Dispatcher tools are always visible:** The parent `@mcp_dispatcher` tool always appears in `tools/list` for all callers regardless of its actions' tiers — it is a navigation entry point. Per-action tier enforcement fires at `tools/call` time: if a token's tier is insufficient for an action, the dispatcher returns a permission error response rather than hiding the tool from `tools/list`.
 
 Action method signature:
 
