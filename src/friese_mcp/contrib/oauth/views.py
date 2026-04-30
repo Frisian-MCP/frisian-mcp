@@ -423,7 +423,7 @@ class OAuthProtectedResourceView(View):
     Canonical path: ``GET /.well-known/oauth-protected-resource``
     """
 
-    def get(self, request: HttpRequest) -> JsonResponse:
+    def get(self, request: HttpRequest, **kwargs: object) -> JsonResponse:
         """Return MCP OAuth Protected Resource Metadata."""
         base = _get_base_url(request)
         mcp_path: str = getattr(settings, "FRIESE_MCP_PATH", "/mcp/")
