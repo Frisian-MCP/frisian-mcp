@@ -362,6 +362,162 @@ class TestDispatcherActionPermissionTier:
         assert entry is not None
         assert entry.permission_tier == "read"
 
+    def test_unauthenticated_cannot_call_write_action(self) -> None:
+        """Unauthenticated caller (request.auth is None) cannot invoke a write action."""
+        reg = self._build_registry_with_dispatcher()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        with pytest.raises(PermissionError, match="read_write"):
+            reg.dispatch(request, "tools", {"action": "delete"})
+
+    def test_unauthenticated_cannot_call_admin_action(self) -> None:
+        """Unauthenticated caller (request.auth is None) cannot invoke an admin action."""
+        reg = self._build_registry_with_dispatcher()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        with pytest.raises(PermissionError, match="admin"):
+            reg.dispatch(request, "tools", {"action": "nuke"})
+
+    def test_unauthenticated_can_call_read_action(self) -> None:
+        """Unauthenticated caller can still invoke a read-tier action (default tier)."""
+        reg = self._build_registry_with_dispatcher()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        assert reg.dispatch(request, "tools", {"action": "list"}) == {"items": []}
+
+    def test_request_without_auth_attr_cannot_call_write_action(self) -> None:
+        """Request lacking the .auth attribute entirely is treated as unauthenticated."""
+        reg = self._build_registry_with_dispatcher()
+        request = _rf.get("/")
+        # Do not set request.auth at all — _resolve_request_tier must handle this.
+        with pytest.raises(PermissionError, match="read_write"):
+            reg.dispatch(request, "tools", {"action": "delete"})
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    def test_unauthenticated_tier_admin_setting_allows_write_action(self) -> None:
+        """FRIESE_MCP_UNAUTHENTICATED_TIER='admin' lifts the unauthenticated tier ceiling."""
+        reg = self._build_registry_with_dispatcher()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        assert reg.dispatch(request, "tools", {"action": "delete"}) == {"deleted": True}
+        assert reg.dispatch(request, "tools", {"action": "nuke"}) == {"nuked": True}
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="read_write")
+    def test_unauthenticated_tier_read_write_allows_write_blocks_admin(self) -> None:
+        """FRIESE_MCP_UNAUTHENTICATED_TIER='read_write' allows write but not admin."""
+        reg = self._build_registry_with_dispatcher()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        assert reg.dispatch(request, "tools", {"action": "delete"}) == {"deleted": True}
+        with pytest.raises(PermissionError, match="admin"):
+            reg.dispatch(request, "tools", {"action": "nuke"})
+
+
+# ---------------------------------------------------------------------------
+# Plain @mcp_tool / @mcp_heavy execution-time tier enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestPlainToolExecutionTierEnforcement:
+    """
+    Plain @mcp_tool(write/admin) tools are blocked at dispatch time below tier.
+
+    Previously the only enforcement was filtering the tool out of
+    ``tools/list``, which meant any caller that knew (or guessed) the tool name
+    could still invoke it.  Now ``ToolRegistry.dispatch`` re-checks the tier so
+    the listing filter cannot be bypassed by name guessing.
+    """
+
+    def _build_registry(self) -> ToolRegistry:
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_tool(name="things.read", description="Read.", input_schema={"type": "object"})
+            def _r(_a: Any, _r2: Any) -> dict[str, Any]:
+                return {"ok": "read"}
+
+            @mcp_tool(
+                name="things.write",
+                description="Write.",
+                input_schema={"type": "object"},
+                write=True,
+            )
+            def _w(_a: Any, _r2: Any) -> dict[str, Any]:
+                return {"ok": "write"}
+
+            @mcp_tool(
+                name="things.admin",
+                description="Admin.",
+                input_schema={"type": "object"},
+                admin=True,
+            )
+            def _ad(_a: Any, _r2: Any) -> dict[str, Any]:
+                return {"ok": "admin"}
+
+        return reg
+
+    def test_unauthenticated_cannot_call_write_tool(self) -> None:
+        """Unauthenticated caller cannot invoke a write-tier @mcp_tool."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        with pytest.raises(PermissionError, match="read_write"):
+            reg.dispatch(request, "things.write", {})
+
+    def test_unauthenticated_cannot_call_admin_tool(self) -> None:
+        """Unauthenticated caller cannot invoke an admin-tier @mcp_tool."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        with pytest.raises(PermissionError, match="admin"):
+            reg.dispatch(request, "things.admin", {})
+
+    def test_unauthenticated_can_call_read_tool(self) -> None:
+        """Unauthenticated caller can still invoke a read-tier @mcp_tool."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        assert reg.dispatch(request, "things.read", {}) == {"ok": "read"}
+
+    def test_read_token_cannot_call_write_tool(self) -> None:
+        """Read-tier token cannot invoke a write-tier @mcp_tool."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = _fake_auth("read")  # type: ignore[attr-defined]
+        with pytest.raises(PermissionError, match="read_write"):
+            reg.dispatch(request, "things.write", {})
+
+    def test_read_write_token_can_call_write_tool(self) -> None:
+        """read_write token can invoke a write-tier @mcp_tool."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = _fake_auth("read_write")  # type: ignore[attr-defined]
+        assert reg.dispatch(request, "things.write", {}) == {"ok": "write"}
+
+    def test_read_write_token_cannot_call_admin_tool(self) -> None:
+        """read_write token cannot invoke an admin-tier @mcp_tool."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = _fake_auth("read_write")  # type: ignore[attr-defined]
+        with pytest.raises(PermissionError, match="admin"):
+            reg.dispatch(request, "things.admin", {})
+
+    def test_admin_token_can_call_admin_tool(self) -> None:
+        """Admin token can invoke an admin-tier @mcp_tool."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = _fake_auth("admin")  # type: ignore[attr-defined]
+        assert reg.dispatch(request, "things.admin", {}) == {"ok": "admin"}
+
+    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    def test_unauthenticated_tier_admin_lifts_block(self) -> None:
+        """FRIESE_MCP_UNAUTHENTICATED_TIER='admin' allows unauthenticated write/admin calls."""
+        reg = self._build_registry()
+        request = _rf.get("/")
+        request.auth = None  # type: ignore[attr-defined]
+        assert reg.dispatch(request, "things.write", {}) == {"ok": "write"}
+        assert reg.dispatch(request, "things.admin", {}) == {"ok": "admin"}
+
 
 # ---------------------------------------------------------------------------
 # Dispatcher action-list filtering in tools/list (no tier-leak via inputSchema)
