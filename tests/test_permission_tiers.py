@@ -682,3 +682,96 @@ class TestDispatcherHelpResponseTierFiltering:
         request.auth = _fake_auth("read")  # type: ignore[attr-defined]
         result = reg.dispatch(request, "widgets", {})
         assert {a["name"] for a in result["actions"]} == {"get"}
+
+    def test_help_response_does_not_leak_privileged_action_descriptions(self) -> None:
+        """
+        Help response must not embed descriptions of filtered-out actions.
+
+        Regression: filtering must remove BOTH the enum entry and the descriptive
+        text for write/admin actions. A read-tier caller who sees the help payload
+        should not be able to recover privileged action names from any string
+        field in the response (name, description, params, or input_schema).
+        """
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("ops", description="Mixed-tier operations.")
+            class _Ops:  # pylint: disable=unused-variable
+                @mcp_action(
+                    "status",
+                    description="Read status.",
+                    params={"id": "Resource id."},
+                )
+                def status(
+                    self, request: Any, _params: dict[str, Any]
+                ) -> dict[str, Any]:
+                    """Read-tier action; body is irrelevant for this test."""
+                    return {}
+
+                @mcp_action(
+                    "annihilate",
+                    description="Annihilate the resource permanently.",
+                    params={"target": "Annihilate this resource."},
+                    write=True,
+                )
+                def annihilate(
+                    self, request: Any, _params: dict[str, Any]
+                ) -> dict[str, Any]:
+                    """Write-tier action; must be filtered out for read callers."""
+                    return {}
+
+                @mcp_action(
+                    "godmode",
+                    description="Grant godmode privileges.",
+                    params={"user": "Grant godmode to user."},
+                    admin=True,
+                )
+                def godmode(
+                    self, request: Any, _params: dict[str, Any]
+                ) -> dict[str, Any]:
+                    """Admin-tier action; must be filtered out for read callers."""
+                    return {}
+
+        request = _rf.get("/")  # auth=None → read tier
+        result = reg.dispatch(request, "ops", {"action": "help"})
+        payload = json.dumps(result)
+        # Privileged action names and descriptions must not appear anywhere.
+        assert "annihilate" not in payload, "write-tier action name leaked in help"
+        assert "Annihilate" not in payload, "write-tier description leaked in help"
+        assert "godmode" not in payload, "admin-tier action name leaked in help"
+        assert "godmode privileges" not in payload, "admin-tier description leaked"
+
+    def test_tools_list_input_schema_description_is_generic(self) -> None:
+        """
+        Verify the 'action' parameter description does not name any actions.
+
+        Regression: a generic boilerplate description ('Operation to perform...')
+        is required so the schema does not enumerate filtered-out names through
+        a side channel. If a future contributor changes the boilerplate to
+        include action examples, this test fails.
+        """
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("svc", description="Service operations.")
+            class _Svc:  # pylint: disable=unused-variable
+                @mcp_action("ping", description="Ping.")
+                def ping(
+                    self, request: Any, _params: dict[str, Any]
+                ) -> dict[str, Any]:
+                    """Read-tier action used to prove the dispatcher is built."""
+                    return {}
+
+                @mcp_action("destroy", description="Destroy.", admin=True)
+                def destroy(
+                    self, request: Any, _params: dict[str, Any]
+                ) -> dict[str, Any]:
+                    """Admin-tier action whose name must not leak into schema text."""
+                    return {}
+
+        tools = reg.list_tools(max_tier="read")
+        svc = next(t for t in tools if t["name"] == "svc")
+        action_desc = svc["inputSchema"]["properties"]["action"]["description"]
+        # The description must not name any specific action — must stay generic.
+        assert "destroy" not in action_desc
+        assert "ping" not in action_desc
