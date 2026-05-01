@@ -91,6 +91,56 @@ def _apply_tool_filters(tool_defs: list[ToolDefinition]) -> list[ToolDefinition]
     return result
 
 
+#: Dotted path of the auto-installed HTTP middleware that strips a trailing
+#: slash from the MCP gateway URL.  Hard-coded to the canonical location so
+#: that idempotency checks remain stable across :meth:`AppConfig.ready` calls.
+TRAILING_SLASH_MIDDLEWARE_PATH: str = "friese_mcp.middleware.McpTrailingSlashMiddleware"
+
+#: Dotted path of Django's CommonMiddleware.  We insert immediately before
+#: this entry so that path normalisation runs before APPEND_SLASH redirects.
+COMMON_MIDDLEWARE_PATH: str = "django.middleware.common.CommonMiddleware"
+
+
+def _install_trailing_slash_middleware() -> bool:
+    """
+    Auto-install :class:`~friese_mcp.middleware.McpTrailingSlashMiddleware`.
+
+    Inserts :data:`TRAILING_SLASH_MIDDLEWARE_PATH` into ``settings.MIDDLEWARE``
+    immediately before :data:`COMMON_MIDDLEWARE_PATH`.  When ``CommonMiddleware``
+    is not present the entry is prepended at position 0.
+
+    The function is **idempotent**: subsequent calls are no-ops if the
+    middleware is already registered.  The MIDDLEWARE list is rebuilt with
+    :class:`list` (rather than mutated in place) so that :class:`tuple`
+    settings — which Django still accepts — are upgraded transparently.
+
+    Returns:
+        ``True`` when the middleware was inserted by this call, ``False`` when
+        it was already present (or when ``MIDDLEWARE`` is missing entirely,
+        which Django treats as no middleware configured).
+
+    """
+    middleware: list[str] | tuple[str, ...] | None = getattr(settings, "MIDDLEWARE", None)
+    if middleware is None:
+        # MIDDLEWARE undefined: Django treats this as an empty middleware
+        # stack.  Set it to a single-entry list so our middleware still runs.
+        settings.MIDDLEWARE = [TRAILING_SLASH_MIDDLEWARE_PATH]
+        return True
+
+    middleware_list: list[str] = list(middleware)
+    if TRAILING_SLASH_MIDDLEWARE_PATH in middleware_list:
+        return False
+
+    if COMMON_MIDDLEWARE_PATH in middleware_list:
+        idx = middleware_list.index(COMMON_MIDDLEWARE_PATH)
+        middleware_list.insert(idx, TRAILING_SLASH_MIDDLEWARE_PATH)
+    else:
+        middleware_list.insert(0, TRAILING_SLASH_MIDDLEWARE_PATH)
+
+    settings.MIDDLEWARE = middleware_list
+    return True
+
+
 def _make_invocation_fn(
     tool_def: ToolDefinition,
     invocation: BaseInvocationBackend,
@@ -167,6 +217,18 @@ class FrieseMcpConfig(AppConfig):
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             logger.debug("friese_mcp disabled — skipping auto-discovery")
             return
+
+        # Auto-install the trailing-slash HTTP middleware before any other
+        # discovery work.  This must happen on every ready() invocation where
+        # the gateway is enabled because settings.MIDDLEWARE may have been
+        # rebound by @override_settings in tests; the helper itself is
+        # idempotent so re-running is safe in normal startup as well.
+        if _install_trailing_slash_middleware():
+            logger.debug(
+                "friese_mcp: auto-installed %s before CommonMiddleware",
+                TRAILING_SLASH_MIDDLEWARE_PATH,
+            )
+
         if not getattr(settings, "FRIESE_MCP_AUTODISCOVER", True):
             logger.debug("friese_mcp auto-discovery disabled — skipping")
             return
