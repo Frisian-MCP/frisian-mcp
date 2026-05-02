@@ -945,15 +945,21 @@ class McpView(APIView):
             return []
         return [cls() for cls in classes]
 
-    def get(self, request: DRFRequest, *args: Any, **kwargs: Any) -> StreamingHttpResponse:
+    def get(self, request: DRFRequest, *args: Any, **kwargs: Any) -> StreamingHttpResponse | HttpResponse:
         """
         Handle GET — open an SSE keepalive channel per MCP Streamable HTTP spec.
 
-        The MCP 2025-03-26 Streamable HTTP transport requires GET to return a
-        ``text/event-stream`` response so that clients can establish an SSE
-        channel before submitting POST requests.  A keepalive comment is sent
-        every 15 seconds to prevent proxy and client timeouts.
+        When ``FRIESE_MCP_SSE_CHANNEL`` is ``False``, the server does not
+        support server-initiated messages and returns HTTP 405 so MCP clients
+        fall back to receiving responses in the POST response body.  Use this
+        for stateless deployments (e.g. multi-pod Kubernetes) that cannot route
+        POST responses through a long-lived per-client SSE stream.
+
+        When ``FRIESE_MCP_SSE_CHANNEL`` is ``True`` (default), a keepalive
+        comment is sent every 15 seconds to prevent proxy and client timeouts.
         """
+        if not getattr(settings, "FRIESE_MCP_SSE_CHANNEL", True):
+            return HttpResponse(status=405)
 
         async def _keepalive_stream() -> AsyncGenerator[str, None]:
             while True:
