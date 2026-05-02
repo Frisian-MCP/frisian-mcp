@@ -297,22 +297,15 @@ class ToolRegistry:
         if getattr(settings, "FRIESE_MCP_NORMALIZE_INPUT_CASE", True):
             arguments = _normalize_argument_keys(arguments)
 
-        # Dispatcher tools handle action="help" internally (same path as a missing
-        # action). Skip schema validation so "help" reaches the invoke callable
-        # without triggering an enum mismatch — "help" is intentionally absent from
-        # the action enum in the inputSchema.
-        is_dispatcher_help = entry.is_dispatcher and arguments.get("action") == "help"
-        if not is_dispatcher_help:
-            try:
-                jsonschema.validate(instance=arguments, schema=entry.input_schema)
-            except jsonschema.exceptions.ValidationError as exc:
-                raise ToolInputError(exc.message) from exc
-
         # Tier enforcement at dispatch time.  ``permission_tier`` was previously
         # only used to filter ``tools/list``; a caller who knew the tool name
         # could still invoke a write/admin tool directly.  Now the same
         # tier-rank comparison is applied at execution time so that the
         # ``tools/list`` filter cannot be bypassed by name guessing.
+        #
+        # Runs before argument validation so that callers who lack permission
+        # receive a clear tier error rather than an argument schema error that
+        # leaks the tool's input contract.
         #
         # Dispatcher tools are intentionally registered with tier="read" so
         # they remain visible as navigation entry-points; per-action tier
@@ -334,6 +327,17 @@ class ToolRegistry:
             perm = perm_class()
             if not perm.has_permission(request, None):  # type: ignore[arg-type]
                 raise PermissionError(f"Permission denied by {perm_class.__name__}")
+
+        # Dispatcher tools handle action="help" internally (same path as a missing
+        # action). Skip schema validation so "help" reaches the invoke callable
+        # without triggering an enum mismatch — "help" is intentionally absent from
+        # the action enum in the inputSchema.
+        is_dispatcher_help = entry.is_dispatcher and arguments.get("action") == "help"
+        if not is_dispatcher_help:
+            try:
+                jsonschema.validate(instance=arguments, schema=entry.input_schema)
+            except jsonschema.exceptions.ValidationError as exc:
+                raise ToolInputError(exc.message) from exc
 
         if asyncio.iscoroutinefunction(entry.fn):
             return async_to_sync(entry.fn)(arguments, request)
