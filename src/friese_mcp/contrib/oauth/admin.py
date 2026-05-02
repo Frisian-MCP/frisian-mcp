@@ -15,7 +15,7 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_filter = ("is_active", "permission")
     search_fields = ("name", "client_id")
     readonly_fields = (
-        "client_id", "client_secret", "created_at", "connector_mcp_url", "connector_client_id"
+        "client_id", "client_secret", "created_at", "connector_mcp_url",
     )
     fieldsets = (
         (
@@ -37,10 +37,10 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         (
             "Connector config",
             {
-                "fields": ("connector_mcp_url", "connector_client_id"),
+                "fields": ("connector_mcp_url",),
                 "description": (
-                    "Copy these values into your MCP client's Advanced settings. "
-                    "Use client_secret from the Credentials section as the Client Secret."
+                    "Copy this URL into your MCP client's connector settings. "
+                    "Use client_id and client_secret from the Credentials section above."
                 ),
             },
         ),
@@ -53,16 +53,12 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         ),
     )
 
-    @admin.display(description="Client ID")
-    def connector_client_id(self, obj: OAuthClient) -> str:
-        """Return client_id in <code> tags for copy-paste into connector config."""
-        return format_html("<code>{}</code>", obj.client_id)
-
     @admin.display(description="MCP Server URL")
     def connector_mcp_url(self, obj: OAuthClient) -> str:  # pylint: disable=unused-argument
-        """Return the MCP server base URL for copy-paste into connector config."""
+        """Return the auth-required MCP endpoint URL for copy-paste into connector config."""
         issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "").rstrip("/")
-        url = f"{issuer}/mcp/"
+        mcp_path: str = getattr(settings, "FRIESE_MCP_PATH", "/mcp/")
+        url = f"{issuer}{mcp_path}"
         return format_html("<code>{}</code>", url)
 
 
