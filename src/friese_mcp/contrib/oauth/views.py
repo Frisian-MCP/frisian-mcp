@@ -260,10 +260,25 @@ class TokenView(View):
         try:
             client = OAuthClient.objects.get(client_id=client_id, is_active=True)
         except OAuthClient.DoesNotExist:
-            return JsonResponse(
-                {"error": "invalid_client", "error_description": "Unknown or inactive client."},
-                status=401,
+            # PKCE clients (e.g. Claude.ai, Cursor) generate their own client_id and
+            # never pre-register.  When FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER is True the
+            # server creates a new OAuthClient on first use rather than rejecting the
+            # exchange.  The permission tier defaults to
+            # FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION (default "read").
+            if not getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False):
+                return JsonResponse(
+                    {"error": "invalid_client", "error_description": "Unknown or inactive client."},
+                    status=401,
+                )
+            default_permission = getattr(
+                settings, "FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read"
             )
+            client = OAuthClient.objects.create(
+                client_id=client_id,
+                name=f"pkce-{client_id[:8]}",
+                permission=default_permission,
+            )
+            logger.info("oauth_pkce_client_auto_registered", extra={"client_id": client_id})
 
         access_token = OAuthAccessToken.objects.create(
             client=client, permission=client.permission
