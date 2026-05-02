@@ -149,7 +149,12 @@ def _make_dispatcher_invoke(
 
     def invoke(arguments: dict[str, Any], request: HttpRequest) -> dict[str, Any]:
         action: str | None = arguments.get("action")
-        params: dict[str, Any] = arguments.get("params") or {}
+        # Accept both nested {action, params: {...}} and flat {action, key: val} forms.
+        # Schema-driven agents (GPT function-calling) pass args flat; reasoning agents
+        # use the params wrapper. Fall back to flat when params is absent or empty.
+        params: dict[str, Any] = arguments.get("params") or {
+            k: v for k, v in arguments.items() if k != "action"
+        }
 
         if action is None or action == "help":
             # Filter the help response to only actions the caller can see, so
