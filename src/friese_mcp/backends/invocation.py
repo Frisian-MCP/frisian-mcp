@@ -266,6 +266,10 @@ class SyncInvocation(BaseInvocationBackend):
             req._stream = BytesIO(body_bytes)  # type: ignore[attr-defined]  # pylint: disable=protected-access
         else:
             req._stream = BytesIO(b"")  # type: ignore[attr-defined]  # pylint: disable=protected-access
+        # DRF 3.17 _load_stream() accesses _request._read_started directly; the
+        # attribute is not initialised in HttpRequest.__init__ but only set on
+        # first read().  Set it explicitly so the synthetic request works.
+        req._read_started = False  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
         # Forward the authenticated user from the original MCP gateway request.
         # Fall back to AnonymousUser when AuthenticationMiddleware has not been

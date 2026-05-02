@@ -1,22 +1,35 @@
 """
-FrieseMcpTokenAuthentication — DRF authentication class for static Bearer tokens.
+Authentication classes for friese-mcp Bearer tokens.
 
-Reads the ``Authorization: Bearer <token>`` header, looks up the token in
-:class:`~friese_mcp.contrib.tokens.models.FrieseMcpToken`, and returns the
-associated user (or ``AnonymousUser`` for service tokens).
+Two classes are provided:
 
-Wire into the MCP gateway via settings::
+``FrieseMcpTokenAuthentication``
+    DB-backed tokens: looks up the HMAC of the Bearer value in
+    :class:`~friese_mcp.contrib.tokens.models.FrieseMcpToken`.
+
+``FrieseMcpApiKeyAuthentication``
+    Settings-backed static keys: reads the ``FRIESE_MCP_API_KEYS`` dict
+    (``{raw_key: tier}``) and authenticates without any DB lookup.
+
+Wire both into the MCP gateway via settings::
 
     FRIESE_MCP_AUTHENTICATION_CLASSES = [
+        "friese_mcp.contrib.tokens.authentication.FrieseMcpApiKeyAuthentication",
         "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication",
     ]
+
+``FrieseMcpApiKeyAuthentication`` should come first so that static keys are
+recognised before ``FrieseMcpTokenAuthentication`` (which raises
+``AuthenticationFailed`` for tokens it does not recognise).
 
 """
 
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
@@ -87,4 +100,66 @@ class FrieseMcpTokenAuthentication(BaseAuthentication):
             base = _get_base_url(request)
             resource_metadata = f"{base}/.well-known/oauth-protected-resource"
             return f'Bearer realm="friese-mcp", resource_metadata="{resource_metadata}"'
+        return 'Bearer realm="friese-mcp"'
+
+
+class _ApiKeyAuth:
+    """Lightweight auth object set as ``request.auth`` for API key authentications."""
+
+    __slots__ = ("permission",)
+
+    def __init__(self, permission: str) -> None:
+        self.permission = permission
+
+    is_authenticated: bool = True
+
+
+class FrieseMcpApiKeyAuthentication(BaseAuthentication):
+    """
+    DRF authentication class for settings-backed static API keys.
+
+    Reads ``FRIESE_MCP_API_KEYS`` from Django settings — a ``dict`` mapping
+    plaintext raw keys to permission tier strings (e.g. ``"read"``,
+    ``"read_write"``, ``"admin"``).  No database queries are performed.
+
+    Only requests carrying ``Authorization: Bearer <key>`` are handled.
+    All other requests return ``None`` so that DRF can try the next
+    configured authenticator.
+
+    On success, returns ``(AnonymousUser, _ApiKeyAuth(permission=tier))``.
+    On failure (no matching key), returns ``None`` so subsequent authenticators
+    can try.  Never raises ``AuthenticationFailed`` — unrecognised tokens are
+    passed through rather than rejected.
+
+    All key comparisons use :func:`secrets.compare_digest` to prevent
+    timing-based key enumeration.
+
+    """
+
+    def authenticate(self, request: Any) -> tuple[Any, Any] | None:
+        """
+        Authenticate the request from a static API key.
+
+        Returns ``(AnonymousUser, _ApiKeyAuth(permission=tier))`` on a match,
+        or ``None`` when the header is absent or no key matches.
+
+        """
+        api_keys: dict[str, str] = getattr(settings, "FRIESE_MCP_API_KEYS", {})
+        if not api_keys:
+            return None
+
+        auth_header: str = request.META.get("HTTP_AUTHORIZATION", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+
+        raw_key = auth_header[len("Bearer ") :]
+
+        for key, tier in api_keys.items():
+            if secrets.compare_digest(raw_key, key):
+                return (AnonymousUser(), _ApiKeyAuth(permission=tier))
+
+        return None
+
+    def authenticate_header(self, request: Any) -> str:
+        """Return the WWW-Authenticate header value for 401 responses."""
         return 'Bearer realm="friese-mcp"'

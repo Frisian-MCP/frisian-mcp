@@ -12,7 +12,11 @@ from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 from rest_framework.exceptions import AuthenticationFailed
 
-from friese_mcp.contrib.tokens.authentication import FrieseMcpTokenAuthentication
+from friese_mcp.contrib.tokens.authentication import (
+    FrieseMcpApiKeyAuthentication,
+    FrieseMcpTokenAuthentication,
+    _ApiKeyAuth,
+)
 from friese_mcp.contrib.tokens.models import FrieseMcpToken
 from friese_mcp.registry import ToolRegistry
 from friese_mcp.views import McpEndpointView
@@ -308,3 +312,186 @@ class TestHmacKeySwitch:
         result = auth.authenticate(request)
         assert result is not None
         assert result[1] == token
+
+
+# ---------------------------------------------------------------------------
+# _ApiKeyAuth helper
+# ---------------------------------------------------------------------------
+
+
+class TestApiKeyAuthObject:
+    """Unit tests for the _ApiKeyAuth lightweight auth object."""
+
+    def test_permission_stored(self) -> None:
+        """Permission tier is accessible on the auth object."""
+        auth = _ApiKeyAuth(permission="read_write")
+        assert auth.permission == "read_write"
+
+    def test_is_authenticated_true(self) -> None:
+        """is_authenticated class attribute is True."""
+        assert _ApiKeyAuth(permission="read").is_authenticated is True
+
+    def test_different_tiers(self) -> None:
+        """All standard tier strings are stored verbatim."""
+        for tier in ("read", "read_write", "admin"):
+            assert _ApiKeyAuth(permission=tier).permission == tier
+
+
+# ---------------------------------------------------------------------------
+# FrieseMcpApiKeyAuthentication
+# ---------------------------------------------------------------------------
+
+
+class TestFrieseMcpApiKeyAuthentication:
+    """Tests for the settings-backed static API key auth class."""
+
+    @staticmethod
+    def _auth() -> FrieseMcpApiKeyAuthentication:
+        return FrieseMcpApiKeyAuthentication()
+
+    @staticmethod
+    def _fake_request(meta: dict[str, str]) -> Any:
+        class _Req:
+            META = meta
+
+        return _Req()
+
+    def test_no_header_returns_none(self, settings: Any) -> None:
+        """No Authorization header → None."""
+        settings.FRIESE_MCP_API_KEYS = {"somekey": "read"}
+        req = self._fake_request({})
+        assert self._auth().authenticate(req) is None
+
+    def test_wrong_prefix_returns_none(self, settings: Any) -> None:
+        """Authorization: Token <x> (not Bearer) → None."""
+        settings.FRIESE_MCP_API_KEYS = {"somekey": "read"}
+        req = self._fake_request({"HTTP_AUTHORIZATION": "Token somekey"})
+        assert self._auth().authenticate(req) is None
+
+    def test_empty_api_keys_returns_none(self, settings: Any) -> None:
+        """FRIESE_MCP_API_KEYS = {} → None (nothing to match against)."""
+        settings.FRIESE_MCP_API_KEYS = {}
+        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer anything"})
+        assert self._auth().authenticate(req) is None
+
+    def test_missing_api_keys_setting_returns_none(self, settings: Any) -> None:
+        """FRIESE_MCP_API_KEYS absent → None."""
+        if hasattr(settings, "FRIESE_MCP_API_KEYS"):
+            del settings.FRIESE_MCP_API_KEYS
+        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer anything"})
+        assert self._auth().authenticate(req) is None
+
+    def test_valid_key_returns_anonymous_user_with_tier(self, settings: Any) -> None:
+        """Matching key returns (AnonymousUser, _ApiKeyAuth) with correct tier."""
+        settings.FRIESE_MCP_API_KEYS = {"my-secret-key": "read_write"}
+        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer my-secret-key"})
+        result = self._auth().authenticate(req)
+        assert result is not None
+        user, auth = result
+        assert isinstance(user, AnonymousUser)
+        assert isinstance(auth, _ApiKeyAuth)
+        assert auth.permission == "read_write"
+
+    def test_unrecognised_key_returns_none(self, settings: Any) -> None:
+        """Unrecognised Bearer token → None (does NOT raise AuthenticationFailed)."""
+        settings.FRIESE_MCP_API_KEYS = {"correct-key": "read"}
+        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer wrong-key"})
+        assert self._auth().authenticate(req) is None
+
+    def test_multiple_keys_first_match_wins(self, settings: Any) -> None:
+        """Multiple keys in the dict — matching key's tier is returned."""
+        settings.FRIESE_MCP_API_KEYS = {
+            "read-key": "read",
+            "rw-key": "read_write",
+        }
+        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer rw-key"})
+        result = self._auth().authenticate(req)
+        assert result is not None
+        assert result[1].permission == "read_write"
+
+    def test_authenticate_header_returns_bearer(self) -> None:
+        """authenticate_header() returns a Bearer realm string."""
+        req = self._fake_request({})
+        header = self._auth().authenticate_header(req)
+        assert header.startswith("Bearer")
+        assert "friese-mcp" in header
+
+    def test_is_authenticated_on_result(self, settings: Any) -> None:
+        """The returned auth object has is_authenticated=True."""
+        settings.FRIESE_MCP_API_KEYS = {"key": "read"}
+        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer key"})
+        _, auth = self._auth().authenticate(req)
+        assert auth.is_authenticated is True
+
+
+# ---------------------------------------------------------------------------
+# Integration: McpEndpointView + FrieseMcpApiKeyAuthentication
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestMcpEndpointApiKeyIntegration:
+    """Integration tests: McpEndpointView + FrieseMcpApiKeyAuthentication."""
+
+    def test_no_key_returns_401(self, rf: RequestFactory, settings: Any) -> None:
+        """No Authorization header → 401 (authenticate_header triggers WWW-Auth challenge)."""
+        settings.FRIESE_MCP_AUTHENTICATION_CLASSES = [
+            "friese_mcp.contrib.tokens.authentication.FrieseMcpApiKeyAuthentication",
+        ]
+        settings.FRIESE_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+        settings.FRIESE_MCP_API_KEYS = {"secret": "read"}
+        isolated = ToolRegistry()
+        isolated.register("ping", lambda a, r: {}, "Ping", {})
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            request = _post_mcp(rf, payload)
+            response = _view(request)
+
+        assert response.status_code == 401
+
+    def test_unrecognised_key_returns_401(self, rf: RequestFactory, settings: Any) -> None:
+        """Bearer token that doesn't match any API key or DB token → 401.
+
+        FrieseMcpTokenAuthentication is listed second and raises AuthenticationFailed
+        for unrecognised tokens, so a wrong key falls through and is rejected.
+        """
+        settings.FRIESE_MCP_AUTHENTICATION_CLASSES = [
+            "friese_mcp.contrib.tokens.authentication.FrieseMcpApiKeyAuthentication",
+            "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication",
+        ]
+        settings.FRIESE_MCP_PERMISSION_CLASSES = []
+        settings.FRIESE_MCP_API_KEYS = {"correct": "read"}
+        isolated = ToolRegistry()
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            request = _post_mcp(rf, payload, _bearer("wrong"))
+            response = _view(request)
+
+        assert response.status_code == 401
+
+    def test_valid_key_allows_request(self, rf: RequestFactory, settings: Any) -> None:
+        """Valid API key with no permission guard → request succeeds.
+
+        The MCP gateway is tier-based, not IsAuthenticated-based.  API keys
+        authenticate the request (setting request.auth.permission) without
+        requiring a linked Django user, so AllowAny / empty permission classes
+        is the correct gate for this authenticator.
+        """
+        settings.FRIESE_MCP_AUTHENTICATION_CLASSES = [
+            "friese_mcp.contrib.tokens.authentication.FrieseMcpApiKeyAuthentication",
+        ]
+        settings.FRIESE_MCP_PERMISSION_CLASSES = []
+        settings.FRIESE_MCP_API_KEYS = {"valid-key": "read"}
+        isolated = ToolRegistry()
+        isolated.register("ping", lambda a, r: {}, "Ping", {})
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+        with patch("friese_mcp.views.tool_registry", isolated):
+            request = _post_mcp(rf, payload, _bearer("valid-key"))
+            response = _view(request)
+
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["result"] == {}
