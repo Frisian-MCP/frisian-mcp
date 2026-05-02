@@ -74,6 +74,13 @@ def _build_dispatcher_input_schema(
     (legacy/internal behaviour).
     """
     visible = _visible_actions(meta, max_tier)
+    # Build a self-documenting params description so agents that only read the
+    # top-level schema (and don't call help) can see per-action parameter names.
+    param_hints = "; ".join(
+        f"{name}: {{{', '.join(entry.params.keys())}}}" if entry.params else f"{name}: (no params)"
+        for name, entry in visible.items()
+    )
+    params_description = f"Action-specific parameters. {param_hints}."
     return {
         "type": "object",
         "properties": {
@@ -88,7 +95,7 @@ def _build_dispatcher_input_schema(
             "params": {
                 "type": "object",
                 "additionalProperties": True,
-                "description": "Parameters for the chosen action. See help for details.",
+                "description": params_description,
             },
         },
     }
