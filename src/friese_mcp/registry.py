@@ -68,11 +68,12 @@ class ToolInputError(ValueError):
     """Raised when tool arguments fail JSON Schema validation."""
 
 
-class _ToolEntry:
+class _ToolEntry:  # pylint: disable=too-many-instance-attributes
     __slots__ = (
         "description",
         "dispatcher_meta",
         "fn",
+        "hidden",
         "input_schema",
         "is_dispatcher",
         "is_heavy",
@@ -81,7 +82,7 @@ class _ToolEntry:
         "permission_tier",
     )
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         name: str,
         fn: Callable[..., Any],
@@ -92,6 +93,7 @@ class _ToolEntry:
         is_heavy: bool = False,
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
+        hidden: bool = False,
     ) -> None:
         self.name = name
         self.fn = fn
@@ -106,6 +108,10 @@ class _ToolEntry:
         # ``@mcp_tool`` / ``@mcp_heavy`` entries.  Typed as ``Any`` to avoid
         # a circular import between ``registry`` and ``backends.dispatcher``.
         self.dispatcher_meta = dispatcher_meta
+        # ``hidden`` tools remain dispatchable by name but are excluded from
+        # ``list_tools()`` output — used by FRIESE_MCP_DISPATCH_GROUPS to bury
+        # bundled flat tools behind their group dispatcher.
+        self.hidden = hidden
 
 
 class ToolRegistry:
@@ -123,7 +129,7 @@ class ToolRegistry:
         self._tools: dict[str, _ToolEntry] = {}
         self._lock: threading.Lock = threading.Lock()
 
-    def register(
+    def register(  # pylint: disable=too-many-arguments
         self,
         name: str,
         fn: Callable[..., Any],
@@ -134,6 +140,7 @@ class ToolRegistry:
         is_heavy: bool = False,
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
+        hidden: bool = False,
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -161,6 +168,10 @@ class ToolRegistry:
                 visible actions, so write/admin action names never leak via
                 ``tools/list`` to lower-privilege callers.  Typed ``Any`` to
                 avoid a circular import.
+            hidden: When ``True``, the tool is excluded from
+                :meth:`list_tools` output but remains dispatchable by name.
+                Used by ``FRIESE_MCP_DISPATCH_GROUPS`` to bury bundled flat
+                tools behind their group dispatcher.
 
         """
         with self._lock:
@@ -174,6 +185,7 @@ class ToolRegistry:
                 is_heavy=is_heavy,
                 permission_tier=permission_tier,
                 dispatcher_meta=dispatcher_meta,
+                hidden=hidden,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:
@@ -187,6 +199,30 @@ class ToolRegistry:
             return frozenset(
                 entry.name for entry in self._tools.values() if entry.is_dispatcher
             )
+
+    def list_names(self) -> list[str]:
+        """Return a snapshot of all currently-registered tool names."""
+        with self._lock:
+            return list(self._tools.keys())
+
+    def set_hidden(self, name: str, hidden: bool = True) -> bool:
+        """
+        Toggle the *hidden* flag on a registered tool.
+
+        Hidden tools remain dispatchable by name but are excluded from
+        :meth:`list_tools` so they do not appear in MCP ``tools/list`` output.
+        Used by ``FRIESE_MCP_DISPATCH_GROUPS`` post-processing to bury
+        bundled flat tools behind their group dispatcher.
+
+        Returns ``True`` when the flag was applied, ``False`` when *name*
+        is not registered.
+        """
+        with self._lock:
+            entry = self._tools.get(name)
+            if entry is None:
+                return False
+            entry.hidden = hidden
+            return True
 
     def list_tools(self, max_tier: str | None = None) -> list[dict[str, Any]]:
         """
@@ -216,6 +252,8 @@ class ToolRegistry:
         with self._lock:
             tools: list[dict[str, Any]] = []
             for entry in self._tools.values():
+                if entry.hidden:
+                    continue
                 if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
                     continue
 

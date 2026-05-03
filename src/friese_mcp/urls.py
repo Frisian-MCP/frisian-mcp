@@ -24,5 +24,5 @@ from friese_mcp.views import McpView
 app_name: str = "friese_mcp"
 
 urlpatterns: list[URLPattern] = [
-    re_path(r"^/?$", McpView.as_view(), name="gateway"),
+    re_path(r"^$", McpView.as_view(), name="gateway"),
 ]

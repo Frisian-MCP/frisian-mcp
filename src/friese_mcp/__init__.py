@@ -1,5 +1,7 @@
 """friese-mcp: Django MCP gateway with runtime introspection and permission-aware tool scoping."""
 
+from typing import Any
+
 from friese_mcp.decorators import (
     mcp_action,
     mcp_dispatcher,
@@ -19,12 +21,15 @@ from friese_mcp.resources import ResourceNotFoundError, ResourceRegistry, resour
 
 __version__ = "0.2.0"
 
+# ``invalidate_tools_list_cache`` is exposed via ``__getattr__`` (PEP 562),
+# not as a top-level binding — pylint cannot statically resolve such entries.
 __all__ = [
     "ResourceNotFoundError",
     "ResourceRegistry",
     "ToolInputError",
     "ToolNotFoundError",
     "ToolRegistry",
+    "invalidate_tools_list_cache",  # pylint: disable=undefined-all-variable
     "mcp_action",
     "mcp_dispatcher",
     "mcp_heavy",
@@ -35,3 +40,23 @@ __all__ = [
     "resource_registry",
     "tool_registry",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """
+    Lazy attribute resolution for view-layer re-exports.
+
+    ``invalidate_tools_list_cache`` lives in :mod:`friese_mcp.views`, which
+    imports DRF view classes that touch Django's app registry on import.  An
+    eager top-level import here would trigger ``AppRegistryNotReady`` during
+    management commands (``migrate``, ``post_upgrade``) that run before
+    ``apps.populate()`` finishes.  Resolving on first attribute access defers
+    that import until Django is ready.
+    """
+    if name == "invalidate_tools_list_cache":
+        from friese_mcp.views import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+            invalidate_tools_list_cache as _impl,
+        )
+
+        return _impl
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

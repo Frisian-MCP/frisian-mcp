@@ -22,6 +22,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpRequest, QueryDict
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.request import Request
 from rest_framework.settings import api_settings
 
@@ -155,6 +156,20 @@ class SyncInvocation(BaseInvocationBackend):
         # application/json bodies from write actions.
         parsers = [cls() for cls in api_settings.DEFAULT_PARSER_CLASSES]  # type: ignore[operator]
         drf_request = Request(inner_req, parsers=parsers)
+
+        # Populate accepted_renderer / accepted_media_type so ViewSets that access
+        # these attributes (standard since DRF 3.14) do not raise AttributeError.
+        # APIView.dispatch() normally calls perform_content_negotiation() which sets
+        # these; the synthetic path bypasses dispatch, so we do it explicitly here.
+        (
+            drf_request.accepted_renderer,
+            drf_request.accepted_media_type,
+        ) = DefaultContentNegotiation().select_renderer(
+            drf_request,
+            [cls() for cls in api_settings.DEFAULT_RENDERER_CLASSES],  # type: ignore[operator]
+            None,
+        )
+
         viewset = tool.view_class(
             request=drf_request,
             kwargs=view_kwargs,

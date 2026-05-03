@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -141,6 +142,146 @@ def _install_trailing_slash_middleware() -> bool:
     return True
 
 
+#: Attribute name used as a sentinel to identify auto-registered URL patterns.
+#: Prevents double-injection across multiple ready() calls in a single process.
+_MCP_AUTO_URL_ATTR: str = "_friese_mcp_auto_url"
+
+
+def _install_mcp_url() -> bool:
+    """
+    Auto-register :class:`~friese_mcp.views.McpView` in the live URL resolver.
+
+    Inserts ``re_path(r'^{path}/?', include('friese_mcp.urls'))`` at position 0
+    of the root resolver's ``url_patterns`` and calls
+    :func:`~django.urls.clear_url_caches` so subsequent requests pick up the
+    new pattern immediately.
+
+    The URL path is read from ``settings.FRIESE_MCP_PATH`` (default: ``'mcp'``);
+    leading and trailing slashes are stripped for consistent regex construction.
+
+    The function is **idempotent**: subsequent calls are no-ops when either the
+    auto-registered sentinel is already present or the operator has already
+    included ``friese_mcp.urls`` explicitly (detected by ``app_name``).
+
+    Returns:
+        ``True`` when the URL was injected by this call, ``False`` when already
+        present or when ``ROOT_URLCONF`` is not configured.
+
+    """
+    if not getattr(settings, "ROOT_URLCONF", None):
+        return False
+
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        include,
+        re_path,
+    )
+
+    resolver = get_resolver()
+
+    # Already auto-registered in this process.
+    if any(getattr(p, _MCP_AUTO_URL_ATTR, False) for p in resolver.url_patterns):
+        return False
+
+    # Operator already included friese_mcp.urls explicitly — app_name is set
+    # by the `app_name = "friese_mcp"` declaration in friese_mcp/urls.py.
+    for pattern in resolver.url_patterns:
+        if getattr(pattern, "app_name", None) == "friese_mcp":
+            return False
+
+    mcp_path = re.escape(getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/"))
+    auto_resolver = re_path(rf"^{mcp_path}/?", include("friese_mcp.urls"))
+    setattr(auto_resolver, _MCP_AUTO_URL_ATTR, True)
+    resolver.url_patterns.insert(0, auto_resolver)
+    clear_url_caches()
+    return True
+
+
+def _install_dispatch_groups() -> tuple[int, int]:
+    """
+    Build group dispatcher tools from ``settings.FRIESE_MCP_DISPATCH_GROUPS``.
+
+    Reads the mapping ``{group_name: [resource_prefix, ...]}`` from settings
+    and, for each group, registers ONE dispatcher tool that routes
+    ``{"resource": R, "action": A, "params": P}`` to the registered flat
+    tool ``f"{R}.{A}"``.  Member flat tools are marked hidden so they no
+    longer appear in ``tools/list`` (they remain dispatchable by name for
+    advanced callers and for the group dispatcher's own routing).
+
+    Idempotency is implicit: this is called once per ``ready()`` invocation
+    via the ``_mcp_ready`` guard in :meth:`FrieseMcpConfig.ready`.
+
+    Returns:
+        A 2-tuple ``(group_count, bundled_tool_count)`` where *group_count* is
+        the number of group dispatchers registered and *bundled_tool_count* is
+        the total number of flat tools bundled across all groups (each bundled
+        tool counted once even if matched by multiple groups).
+
+    """
+    groups: dict[str, list[str]] | None = getattr(
+        settings, "FRIESE_MCP_DISPATCH_GROUPS", None
+    )
+    if not groups:
+        return 0, 0
+
+    # Deferred imports: backends.group_dispatcher imports from registry which
+    # depends on django.contrib.auth — safe only after AppConfig.ready().
+    from friese_mcp.backends.group_dispatcher import (  # pylint: disable=import-outside-toplevel
+        build_group_input_schema,
+        make_group_invoke,
+    )
+    from friese_mcp.registry import tool_registry  # pylint: disable=import-outside-toplevel
+
+    registered_count = 0
+    all_bundled: set[str] = set()
+    all_names = tool_registry.list_names()
+
+    for group_name, resource_prefixes in groups.items():
+        prefix_set = frozenset(resource_prefixes)
+        member_tools: set[str] = set()
+        for tool_name in all_names:
+            prefix = tool_name.split(".", 1)[0] if "." in tool_name else tool_name
+            if prefix in prefix_set:
+                member_tools.add(tool_name)
+
+        if not member_tools:
+            logger.warning(
+                "FRIESE_MCP_DISPATCH_GROUPS: group %r has no matching resources "
+                "(prefixes=%s) — no dispatcher registered",
+                group_name,
+                sorted(prefix_set),
+            )
+            continue
+
+        invoke_fn = make_group_invoke(
+            group_name, frozenset(member_tools), tool_registry
+        )
+        tool_registry.register(
+            name=group_name,
+            fn=invoke_fn,
+            description=(
+                f"Group dispatcher for {len(member_tools)} tools across "
+                f"{len(prefix_set)} resources. Use action='help' to discover."
+            ),
+            input_schema=build_group_input_schema(),
+            permission_classes=[],
+            permission_tier="read",
+        )
+        for member_name in member_tools:
+            tool_registry.set_hidden(member_name, True)
+
+        registered_count += 1
+        all_bundled.update(member_tools)
+        logger.info(
+            "friese_mcp: registered group dispatcher %r bundling %d tools",
+            group_name,
+            len(member_tools),
+        )
+
+    return registered_count, len(all_bundled)
+
+
 def _make_invocation_fn(
     tool_def: ToolDefinition,
     invocation: BaseInvocationBackend,
@@ -229,6 +370,12 @@ class FrieseMcpConfig(AppConfig):
                 TRAILING_SLASH_MIDDLEWARE_PATH,
             )
 
+        if _install_mcp_url():
+            logger.debug(
+                "friese_mcp: auto-registered McpView URL at path %r",
+                getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/"),
+            )
+
         if not getattr(settings, "FRIESE_MCP_AUTODISCOVER", True):
             logger.debug("friese_mcp auto-discovery disabled — skipping")
             return
@@ -267,10 +414,36 @@ class FrieseMcpConfig(AppConfig):
 
         load_middleware()
 
+        # Always emit the startup summary via both logger AND print() so that
+        # operators can verify the package loaded regardless of how the host
+        # app has configured the 'friese_mcp' logger.  Most host apps (e.g.
+        # Nautobot) set the root logger to WARNING and never configure a
+        # 'friese_mcp' handler, which silently drops INFO messages.  See PKG-9.
+        mcp_path = getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/")
         if tool_defs:
             logger.info("friese_mcp: auto-discovery registered %d tools", len(tool_defs))
+            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
+                f"[friese-mcp] registered {len(tool_defs)} tools at /{mcp_path}/",
+                flush=True,
+            )
         else:
             logger.warning(
                 "friese_mcp: auto-discovery found 0 tools. "
                 "If your project uses @api_view FBVs, use @mcp_tool for manual registration."
+            )
+            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
+                f"[friese-mcp] registered 0 tools at /{mcp_path}/ "
+                "(use @mcp_tool for manual registration if you rely on @api_view FBVs)",
+                flush=True,
+            )
+
+        # Group dispatchers run last so they can bundle every tool registered
+        # above (auto-discovered + decorator + dispatcher).  Bundled flat tools
+        # are marked hidden and disappear from tools/list.
+        group_count, bundled_count = _install_dispatch_groups()
+        if group_count:
+            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
+                f"[friese-mcp] {group_count} dispatch group(s) bundling "
+                f"{bundled_count} tools",
+                flush=True,
             )

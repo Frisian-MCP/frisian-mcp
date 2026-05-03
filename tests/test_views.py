@@ -13,7 +13,11 @@ from django.http import StreamingHttpResponse
 from django.test import RequestFactory, override_settings
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import BasePermission
+from rest_framework.response import Response
+from rest_framework.viewsets import ViewSet
 
+from friese_mcp.backends.base import ToolDefinition
+from friese_mcp.backends.invocation import SyncInvocation
 from friese_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -764,6 +768,40 @@ class TestSyncInvocationValidationSurfacing:
         content = json.loads(data["result"]["content"][0]["text"])
         assert content["error"] == "Validation failed"
         assert "name" in content["detail"]
+
+
+# ---------------------------------------------------------------------------
+# GAP-B: SyncInvocation sets accepted_renderer / accepted_media_type
+# ---------------------------------------------------------------------------
+
+
+class TestSyncInvocationContentNegotiation:
+    """GAP-B: SyncInvocation populates accepted_renderer and accepted_media_type."""
+
+    def test_accepted_media_type_set_on_invocation(self, anon_request: Any) -> None:
+        """A ViewSet that reads request.accepted_media_type does not raise AttributeError."""
+        captured: dict[str, Any] = {}
+
+        class MediaTypeViewSet(ViewSet):
+            def list(self, request: Any) -> Response:
+                captured["accepted_media_type"] = request.accepted_media_type
+                captured["accepted_renderer"] = request.accepted_renderer
+                return Response([])
+
+        tool = ToolDefinition(
+            name="media.list",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            permission_classes=(),
+            source="auto",
+            view_class=MediaTypeViewSet,
+            action="list",
+        )
+        result = SyncInvocation().invoke(tool, {}, anon_request)
+        assert not result.is_error
+        assert "accepted_media_type" in captured
+        assert captured["accepted_media_type"] is not None
+        assert captured["accepted_renderer"] is not None
 
 
 # ---------------------------------------------------------------------------

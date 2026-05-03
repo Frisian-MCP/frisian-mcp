@@ -21,7 +21,6 @@ from typing import Any
 
 from django.contrib.auth.models import AnonymousUser
 from django.urls import URLPattern, URLResolver, get_resolver
-from rest_framework.permissions import BasePermission
 from rest_framework.viewsets import ViewSetMixin
 
 try:
@@ -284,9 +283,6 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                 continue
 
             seen.add((cls, action_name))
-            perm_classes: tuple[type[BasePermission], ...] = tuple(
-                getattr(cls, "permission_classes", [])
-            )
             _write_http = {"post", "put", "patch", "delete"}
             permission_tier = "read_write" if http_method in _write_http else "read"
 
@@ -295,7 +291,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     name=f"{resource}.{action_name}",
                     description=_action_description(cls, action_name, resource),
                     input_schema=self.get_input_schema(cls, action_name),
-                    permission_classes=perm_classes,
+                    permission_classes=(),
                     source="auto",
                     view_class=cls,
                     action=action_name,
