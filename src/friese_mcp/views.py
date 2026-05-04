@@ -452,6 +452,8 @@ def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse:
     accept: str = request.META.get("HTTP_ACCEPT", "")
     if "text/event-stream" not in accept:
         return response
+    if "application/json" in accept:
+        return response
 
     body: str = response.content.decode("utf-8")
 
