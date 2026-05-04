@@ -97,6 +97,19 @@ class OAuthClient(models.Model):
             "Read Only, Read Write, or Admin."
         ),
     )
+    redirect_uris = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Registered OAuth 2.0 redirect URIs (RFC 6749 §3.1.2).  The "
+            "authorize endpoint requires an exact-match against this list "
+            "before issuing an authorization code (SEC-2).  An empty list "
+            "disables the authorize endpoint for this client; populate it via "
+            "Django admin, RFC 7591 dynamic registration, or set "
+            "``FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER=True`` to permit on-demand "
+            "PKCE clients (HTTPS / loopback validation still applies)."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -144,7 +157,12 @@ class OAuthAccessToken(models.Model):
         max_length=64,
         unique=True,
         editable=False,
-        help_text="Auto-generated Bearer token secret.  Treat as a password.",
+        help_text=(
+            "HMAC-SHA256 of the raw Bearer token keyed by SECRET_KEY.  Never the "
+            "raw value — the raw token is exposed exactly once via "
+            "``plaintext_token`` on the freshly-saved instance and is never "
+            "persisted, so a leaked DB row is not directly exploitable."
+        ),
     )
     client = models.ForeignKey(
         OAuthClient,
@@ -194,7 +212,18 @@ class OAuthAccessToken(models.Model):
         return timezone.now() >= self.expires_at
 
     def save(self, *args: Any, **kwargs: Any) -> None:
-        """Auto-generate ``token`` value on first save."""
+        """
+        Auto-generate ``token`` on first save; expose raw value once via ``plaintext_token``.
+
+        Mirrors the :class:`~friese_mcp.contrib.tokens.models.FrieseMcpToken`
+        and :class:`OAuthClient` HMAC pattern: a leaked ``OAuthAccessToken`` row
+        cannot be replayed against the gateway because only the digest is
+        stored.  Callers must read ``plaintext_token`` immediately after
+        ``create()`` / ``save()`` to obtain the raw Bearer value to return to
+        the client (see ``contrib.oauth.views.TokenView``).
+        """
         if not self.token:
-            self.token = secrets.token_hex(32)  # 64 hex chars
+            raw = secrets.token_hex(32)
+            self.plaintext_token: str = raw  # pylint: disable=attribute-defined-outside-init
+            self.token = _hmac_secret(raw)
         super().save(*args, **kwargs)

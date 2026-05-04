@@ -146,6 +146,12 @@ def _install_trailing_slash_middleware() -> bool:
 #: Prevents double-injection across multiple ready() calls in a single process.
 _MCP_AUTO_URL_ATTR: str = "_friese_mcp_auto_url"
 
+#: Stable ``dispatch_uid`` for the PKG-21 deferred discovery signal handler so
+#: connect / disconnect calls reliably target the same registration even when
+#: the closure object identity differs (e.g. across test cycles that re-run
+#: ``ready()``, or after a re-import in dev autoreload).
+_DEFERRED_DISCOVERY_UID: str = "friese_mcp.apps._on_first_request"
+
 
 def _install_mcp_url() -> bool:
     """
@@ -196,6 +202,51 @@ def _install_mcp_url() -> bool:
     resolver.url_patterns.insert(0, auto_resolver)
     clear_url_caches()
     return True
+
+
+#: Match ``api/`` as a path segment — at the start of the prefix or after a
+#: ``/``.  ``DRFSyncDiscovery`` populates ``url_path`` from the resolver-tree
+#: walk, which produces unanchored strings like ``api/dcim/^devices/$``
+#: (segment at start, no leading slash) or ``some/api/path/^x/$`` (segment in
+#: the middle).  A bare ``"/api/" in url_path`` substring check misses the
+#: leading-segment case and silently picks the wrong winner; the regex form
+#: catches both shapes and still rejects ``notapi/`` / ``myapi/`` as
+#: non-segment substrings.
+_API_PATH_SEGMENT_RE = re.compile(r"(^|/)api/")
+
+
+def _prefer_api_tool(
+    existing: ToolDefinition | None, candidate: ToolDefinition
+) -> ToolDefinition:
+    """
+    Resolve a basename collision between two discovered ToolDefinitions.
+
+    PKG-22: when a host app exposes both UI and API ViewSets that share the
+    same model object name (e.g. ``WidgetUIViewSet`` alongside
+    ``WidgetViewSet`` in an ``api`` submodule), DRF routers register both
+    under the same basename.  Walk-order alone is non-deterministic across
+    plugin loading, so the merge step must pick a winner explicitly.
+
+    Rule: prefer the tool whose ``url_path`` contains an ``api/`` path
+    segment — that is the canonical REST surface.  When neither path has
+    one or both do, fall back to first-seen so the existing-installed-base
+    behaviour for pure-API hosts is unchanged.
+
+    The path-segment regex (``(^|/)api/``) covers both ``api/dcim/...`` (no
+    leading slash, segment at start) and ``some/api/...`` (segment in
+    middle), while still rejecting ``notapi/`` and ``myapi/`` substrings.
+    """
+    if existing is None:
+        return candidate
+    existing_is_api = bool(_API_PATH_SEGMENT_RE.search(existing.url_path))
+    candidate_is_api = bool(_API_PATH_SEGMENT_RE.search(candidate.url_path))
+    if candidate_is_api and not existing_is_api:
+        return candidate
+    if existing_is_api and not candidate_is_api:
+        return existing
+    # Both API or both non-API: keep first-seen (the existing behaviour for
+    # any host without parallel UI/API surfaces).
+    return existing
 
 
 def _install_dispatch_groups() -> tuple[int, int]:
@@ -320,6 +371,10 @@ class FrieseMcpConfig(AppConfig):
     verbose_name = "Friese MCP Gateway"
     default_auto_field = "django.db.models.BigAutoField"
     _mcp_ready: bool = False
+    #: Tracks whether deferred discovery has run.  Distinct from ``_mcp_ready``
+    #: because discovery now happens on the first request (PKG-21), not at
+    #: ``ready()`` time.  Reset by test fixtures that drive multiple cycles.
+    _mcp_discovered: bool = False
 
     def ready(self) -> None:
         """
@@ -355,6 +410,13 @@ class FrieseMcpConfig(AppConfig):
             return
         self._mcp_ready = True
 
+        # SEC-4: import the checks module so its @register decorators fire and
+        # ``manage.py check`` runs them.  Importing here (rather than at module
+        # top) keeps the dependency chain inside ready() — the same point where
+        # Django guarantees the app registry is populated.
+        # pylint: disable-next=import-outside-toplevel,unused-import
+        from friese_mcp import checks  # noqa: F401
+
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             logger.debug("friese_mcp disabled — skipping auto-discovery")
             return
@@ -380,6 +442,53 @@ class FrieseMcpConfig(AppConfig):
             logger.debug("friese_mcp auto-discovery disabled — skipping")
             return
 
+        # PKG-21: defer the URL-tree scan and tool registration to the first
+        # incoming request.  AppConfig.ready() runs in INSTALLED_APPS order, so
+        # any plugin / app appended after friese_mcp (e.g. host plugin loaders
+        # that append to INSTALLED_APPS at config-evaluation time) hasn't run
+        # its own ready() yet — and many register URL patterns there.
+        # Scanning now would silently miss every late-bound tool with no
+        # error or warning.
+        # request_started fires once per request before view dispatch, so the
+        # registry is fully populated by the time tools/list is served.  The
+        # handler disconnects itself + the ``_mcp_discovered`` flag prevents
+        # any race-window double-execution.
+        from django.core.signals import (  # pylint: disable=import-outside-toplevel
+            request_started,
+        )
+
+        def _on_first_request(
+            sender: Any = None,  # pylint: disable=unused-argument
+            **_: Any,
+        ) -> None:
+            try:
+                request_started.disconnect(dispatch_uid=_DEFERRED_DISCOVERY_UID)
+            except Exception:  # noqa: S110, BLE001  # pylint: disable=broad-exception-caught
+                # Disconnect can race with a parallel signal fire under ASGI;
+                # the _mcp_discovered guard inside _run_deferred_discovery is
+                # the authoritative idempotency protection — losing the
+                # disconnect is harmless (the next call short-circuits).
+                pass
+            self._run_deferred_discovery()
+
+        request_started.connect(
+            _on_first_request,
+            weak=False,
+            dispatch_uid=_DEFERRED_DISCOVERY_UID,
+        )
+
+    def _run_deferred_discovery(self) -> None:
+        """
+        Run URL-tree scan + tool registration + dispatch-group install.
+
+        Called once on the first request (PKG-21), or directly by tests that
+        need to drive the full startup pipeline without a real HTTP request.
+        Idempotent via the ``_mcp_discovered`` flag — repeat calls are no-ops.
+        """
+        if self._mcp_discovered:
+            return
+        self._mcp_discovered = True
+
         # Deferred imports: friese_mcp.backends transitively imports
         # django.contrib.auth models, which require the app registry to be ready.
         # AppConfig.ready() is the first safe point after full app loading.
@@ -393,12 +502,20 @@ class FrieseMcpConfig(AppConfig):
         invocation = get_invocation_backend()
         dispatcher_names = tool_registry.list_dispatcher_names()
 
-        # Collect tool definitions from all configured backends; later backends
-        # win on name clashes (dict preserves insertion order, last write wins).
+        # Collect tool definitions from all configured backends.  PKG-22:
+        # on basename collision (e.g. UI + API ViewSets sharing the same
+        # ``model._meta.object_name``) prefer the entry whose ``url_path``
+        # contains ``/api/``.  Without this, URL-tree walk order alone
+        # picks the winner — non-deterministic across plugin loading and
+        # silently mis-routes tools to whichever flavour happened to be
+        # walked last.  Any DRF host with parallel UI + API ViewSets
+        # benefits.
         merged: dict[str, Any] = {}
         for discovery in get_discovery_backends():
             for tool_def in _apply_tool_filters(discovery.discover_tools()):
-                merged[tool_def.name] = tool_def
+                merged[tool_def.name] = _prefer_api_tool(
+                    merged.get(tool_def.name), tool_def
+                )
 
         tool_defs = _suppress_dispatcher_shadowed(list(merged.values()), dispatcher_names)
 
@@ -416,9 +533,9 @@ class FrieseMcpConfig(AppConfig):
 
         # Always emit the startup summary via both logger AND print() so that
         # operators can verify the package loaded regardless of how the host
-        # app has configured the 'friese_mcp' logger.  Most host apps (e.g.
-        # Nautobot) set the root logger to WARNING and never configure a
-        # 'friese_mcp' handler, which silently drops INFO messages.  See PKG-9.
+        # app has configured the 'friese_mcp' logger.  Many host apps set
+        # the root logger to WARNING and never configure a 'friese_mcp'
+        # handler, which silently drops INFO messages.  See PKG-9.
         mcp_path = getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/")
         if tool_defs:
             logger.info("friese_mcp: auto-discovery registered %d tools", len(tool_defs))

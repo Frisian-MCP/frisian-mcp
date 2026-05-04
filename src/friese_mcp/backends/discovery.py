@@ -40,6 +40,13 @@ logger = logging.getLogger(__name__)
 # path-converter (``<pk>`` / ``<int:pk>``) syntax.
 _PARAM_RE = re.compile(r"\(\?P<[^>]+>[^)]+\)|<[^>]+>")
 
+# Regex anchors that appear in raw Django URL pattern strings (``re_path``
+# regexes such as ``^devices/$``).  PKG-23: stripped from ``url_path`` before
+# the value is stored on a :class:`ToolDefinition` so downstream consumers
+# can do prefix / equality / display logic without tripping over regex
+# syntax (``api/dcim/^devices/$`` → ``api/dcim/devices/``).
+_REGEX_ANCHOR_RE = re.compile(r"[\^\$]")
+
 # Map DRF field class names to JSON Schema primitive types.
 _FIELD_TO_JSON_TYPE: dict[str, str] = {
     "CharField": "string",
@@ -67,10 +74,11 @@ _FIELD_TO_JSON_TYPE: dict[str, str] = {
 }
 
 # Object form for FK / related-field references.  Host serializers
-# (Nautobot's NaturalKeyOrPK, DRF's PrimaryKeyRelatedField, SlugRelatedField,
-# etc.) accept several shapes — id, pk, slug, or natural-key-name — depending
-# on the field configuration.  The dispatcher schema accepts any of them as
-# additional properties so the host serializer makes the final decision.
+# (DRF's PrimaryKeyRelatedField, SlugRelatedField, custom natural-key/PK
+# hybrids that accept either form, etc.) accept several shapes — id, pk,
+# slug, or natural-key-name — depending on the field configuration.  The
+# dispatcher schema accepts any of them as additional properties so the
+# host serializer makes the final decision.
 _FK_OBJECT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -271,6 +279,14 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             return
 
         actions: dict[str, str] = getattr(view_func, "actions", {})
+        # The full URL path is needed (a) to derive the resource name when
+        # no basename is set, and (b) for PKG-22 collision-resolution: the
+        # merge step prefers tools whose URL path contains '/api/' so an
+        # API ViewSet wins over a UI ViewSet that happens to share the
+        # same model object name.  PKG-23: regex anchors (``^`` and ``$``)
+        # from ``re_path``-style patterns are stripped so the stored value
+        # is a clean path string suitable for prefix / equality / display.
+        full_path = _REGEX_ANCHOR_RE.sub("", prefix + str(pattern.pattern))
         # Prefer the router-assigned basename (set in initkwargs by DRF's DefaultRouter /
         # SimpleRouter) — it is always the correct resource name regardless of URL shape.
         # Fall back to path-based derivation for hand-written URL confs without a router.
@@ -278,7 +294,6 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         if basename:
             resource = str(basename).replace("-", "_")
         else:
-            full_path = prefix + str(pattern.pattern)
             resource = _resource_from_path(full_path)
             logger.warning(
                 "friese_mcp: basename not set for %s; falling back to path-derived resource %r. "
@@ -324,6 +339,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     view_class=cls,
                     action=action_name,
                     permission_tier=permission_tier,
+                    url_path=full_path,
                 )
             )
             logger.debug("friese_mcp discovered tool %s.%s", resource, action_name)
@@ -543,8 +559,8 @@ def _filterset_properties(view_class: type) -> dict[str, Any]:
     if filterset_class is not None:
         try:
             # base_filters is the standard attribute (declared + auto-generated from Meta.fields).
-            # declared_filters is the fallback for FilterSet subclasses that only populate
-            # explicit declarations without auto-generating from Meta (e.g. Nautobot's FilterSet).
+            # declared_filters is the fallback for custom FilterSet subclasses that only populate
+            # explicit declarations without auto-generating from Meta.
             filters_dict: dict[str, Any] = (
                 getattr(filterset_class, "base_filters", None)
                 or getattr(filterset_class, "declared_filters", None)
@@ -696,9 +712,9 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
         return {"type": "array", "items": {"type": "object"}}
 
     field_class_name = type(field).__name__
-    # django-taggit-serializer's TagListSerializerField (and the common
-    # nautobot.extras.api.fields.TagSerializerField) wrap a list of tag
-    # name strings.  Class-name match keeps taggit an optional dependency.
+    # Tag-style M2M fields (django-taggit-serializer's TagListSerializerField
+    # and similar host-app subclasses) wrap a list of tag-name strings.
+    # Class-name match keeps taggit an optional dependency.
     if "Tag" in field_class_name and field_class_name.endswith(
         ("SerializerField", "ListSerializerField")
     ):

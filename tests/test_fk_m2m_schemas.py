@@ -181,7 +181,7 @@ class TestFKFormsValidate:
         jsonschema.validate("active", fk_schema)
 
     def test_dict_with_pk_passes(self, fk_schema: dict[str, Any]) -> None:
-        """{pk: <uuid>} — Nautobot NaturalKeyOrPK form — passes."""
+        """{pk: <uuid>} — natural-key/PK hybrid form — passes."""
         jsonschema.validate({"pk": "e7dc1234-5678-90ab-cdef-1234567890ab"}, fk_schema)
 
     def test_dict_with_id_passes(self, fk_schema: dict[str, Any]) -> None:

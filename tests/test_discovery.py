@@ -588,7 +588,7 @@ class TestSchemaFromFilterBackends:
             pass
 
         class _SubclassBackend(_FakeBase):
-            """Simulates NautobotFilterBackend(DjangoFilterBackend)."""
+            """Simulates a custom DjangoFilterBackend subclass."""
 
         class _SubclassViewSet(ViewSet):  # pylint: disable=abstract-method
             filter_backends = [_SubclassBackend]
@@ -614,7 +614,7 @@ class TestSchemaFromFilterBackends:
                 self.label = label
 
         class _DeclaredFilterSet:
-            """FilterSet with only declared_filters — no base_filters (Nautobot pattern)."""
+            """FilterSet with only declared_filters — no base_filters (custom-FilterSet pattern)."""
 
             declared_filters = {
                 "site": _Filter("Filter by site"),

@@ -167,7 +167,40 @@ class TestOAuthAccessTokenModel:
         client = OAuthClient.objects.create(name="c")
         token = OAuthAccessToken.objects.create(client=client)
         assert token.token
-        assert len(token.token) == 64  # secrets.token_hex(32) → 64 hex chars
+        assert len(token.token) == 64  # HMAC-SHA256 hex digest
+
+    def test_stored_token_is_hmac_not_plaintext(self) -> None:
+        """SEC-1: token column holds the HMAC digest, not the raw value."""
+        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+            _hmac_secret,
+        )
+
+        client = OAuthClient.objects.create(name="c")
+        token = OAuthAccessToken.objects.create(client=client)
+        # plaintext_token is exposed once on the freshly-saved instance.
+        raw = token.plaintext_token
+        assert raw and len(raw) == 64
+        # token column stores HMAC(raw), not raw.
+        assert token.token == _hmac_secret(raw)
+        assert token.token != raw
+
+    def test_plaintext_token_not_persisted(self) -> None:
+        """SEC-1: plaintext_token is a transient attribute, not in the DB."""
+        client = OAuthClient.objects.create(name="c")
+        created = OAuthAccessToken.objects.create(client=client)
+        raw = created.plaintext_token
+
+        # Re-fetch from the DB — plaintext_token should not be present.
+        refetched = OAuthAccessToken.objects.get(pk=created.pk)
+        assert not hasattr(refetched, "plaintext_token") or getattr(
+            refetched, "plaintext_token", None
+        ) is None
+        # The stored token still matches the original raw value via HMAC.
+        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+            _hmac_secret,
+        )
+
+        assert refetched.token == _hmac_secret(raw)
 
     def test_expires_at_set_on_creation(self) -> None:
         """expires_at is populated with a future timestamp on creation."""
@@ -250,7 +283,8 @@ class TestOAuthTokenAuthentication:
         client = OAuthClient.objects.create(name="agent")
         token = OAuthAccessToken.objects.create(client=client)
 
-        req = self._fake_request(_bearer(token.token))
+        # SEC-1: send the raw token (plaintext_token); the gateway hashes it.
+        req = self._fake_request(_bearer(token.plaintext_token))
         result = self._auth().authenticate(req)
         assert result is not None
         auth_user, auth_token = result
@@ -270,7 +304,7 @@ class TestOAuthTokenAuthentication:
         past = timezone.now() - timedelta(seconds=1)
         token = OAuthAccessToken.objects.create(client=client, expires_at=past)
 
-        req = self._fake_request(_bearer(token.token))
+        req = self._fake_request(_bearer(token.plaintext_token))
         with pytest.raises(AuthenticationFailed):
             self._auth().authenticate(req)
 
@@ -279,7 +313,7 @@ class TestOAuthTokenAuthentication:
         client = OAuthClient.objects.create(name="disabled", is_active=False)
         token = OAuthAccessToken.objects.create(client=client)
 
-        req = self._fake_request(_bearer(token.token))
+        req = self._fake_request(_bearer(token.plaintext_token))
         with pytest.raises(AuthenticationFailed):
             self._auth().authenticate(req)
 
@@ -296,7 +330,7 @@ class TestOAuthTokenAuthentication:
         token = OAuthAccessToken.objects.create(client=client)
         assert token.last_used_at is None
 
-        req = self._fake_request(_bearer(token.token))
+        req = self._fake_request(_bearer(token.plaintext_token))
         self._auth().authenticate(req)
 
         token.refresh_from_db()
@@ -332,7 +366,11 @@ class TestTokenView:
         assert data["scope"] == "mcp:write"
 
     def test_access_token_persisted_in_db(self, rf: RequestFactory) -> None:
-        """Token returned from the endpoint is saved to the database."""
+        """Token returned from the endpoint is saved to the database (as HMAC digest)."""
+        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+            _hmac_secret,
+        )
+
         client = OAuthClient.objects.create(name="agent")
         request = _post_token(
             rf,
@@ -344,7 +382,10 @@ class TestTokenView:
         )
         response = _token_view(request)
         data = json.loads(response.content)
-        assert OAuthAccessToken.objects.filter(token=data["access_token"]).exists()
+        # SEC-1: the response carries the raw token; the DB row stores HMAC(raw).
+        assert OAuthAccessToken.objects.filter(
+            token=_hmac_secret(data["access_token"])
+        ).exists()
 
     def test_wrong_grant_type_returns_400(self, rf: RequestFactory) -> None:
         """Unsupported grant_type returns 400 with error code."""
@@ -654,7 +695,7 @@ class TestMcpEndpointOAuthIntegration:
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         with patch("friese_mcp.views.tool_registry", isolated):
-            request = _post_mcp(rf, payload, _bearer(access_token.token))
+            request = _post_mcp(rf, payload, _bearer(access_token.plaintext_token))
             response = _mcp_view(request)
 
         assert response.status_code == 401
@@ -670,7 +711,7 @@ class TestMcpEndpointOAuthIntegration:
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         with patch("friese_mcp.views.tool_registry", isolated):
-            request = _post_mcp(rf, payload, _bearer(access_token.token))
+            request = _post_mcp(rf, payload, _bearer(access_token.plaintext_token))
             response = _mcp_view(request)
 
         assert response.status_code == 200
@@ -985,24 +1026,43 @@ class TestAuthorizeView:
 
     _view = AuthorizeView.as_view()
 
-    def _valid_params(self) -> dict[str, str]:
+    def _make_client(self, redirect_uri: str = "https://example.com/cb") -> OAuthClient:
+        """
+        Register an OAuthClient with *redirect_uri* allowlisted.
+
+        SEC-2: AuthorizeView now enforces that ``client_id`` refers to a real,
+        active ``OAuthClient`` whose ``redirect_uris`` list exactly contains
+        the request's ``redirect_uri``.  Tests therefore must register a
+        client up front rather than passing arbitrary ``client_id`` strings.
+        """
+        return OAuthClient.objects.create(
+            name="authorize-test", redirect_uris=[redirect_uri]
+        )
+
+    def _valid_params(self, client_id: str = "test-client") -> dict[str, str]:
         return {
             "response_type": "code",
-            "client_id": "test-client",
+            "client_id": client_id,
             "redirect_uri": "https://example.com/cb",
             "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
             "code_challenge_method": "S256",
             "state": "xyz",
         }
 
-    def test_get_auto_approve_redirects_with_code(self, rf: RequestFactory) -> None:
+    def test_get_auto_approve_redirects_with_code(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
         """GET with valid params + FRIESE_MCP_OAUTH_AUTO_APPROVE=True redirects with a code."""
         from friese_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
+        # SEC-2: AUTO_APPROVE now defaults to bool(DEBUG); test_settings has
+        # no DEBUG so the default is False.  Set the flag explicitly.
+        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        client = self._make_client()
         view = AuthorizeView.as_view()
-        request = rf.get("/oauth/authorize/", self._valid_params())
+        request = rf.get("/oauth/authorize/", self._valid_params(client.client_id))
         response = view(request)
         assert response.status_code == 302
         location = response["Location"]
@@ -1019,10 +1079,10 @@ class TestAuthorizeView:
         )
 
         settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = False
-        # Use Django test Client for template rendering
+        client = self._make_client()
 
         view = AuthorizeView.as_view()
-        request = rf.get("/oauth/authorize/", self._valid_params())
+        request = rf.get("/oauth/authorize/", self._valid_params(client.client_id))
         response = view(request)
         # Template rendered → 200 TemplateResponse (not redirect)
         assert response.status_code == 200
@@ -1083,11 +1143,12 @@ class TestAuthorizeView:
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
+        client = self._make_client()
         view = AuthorizeView.as_view()
         request = rf.post(
             "/oauth/authorize/",
             data={
-                "client_id": "test-client",
+                "client_id": client.client_id,
                 "redirect_uri": "https://example.com/cb",
                 "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
                 "state": "xyz",
@@ -1104,11 +1165,12 @@ class TestAuthorizeView:
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
+        client = self._make_client()
         view = AuthorizeView.as_view()
         request = rf.post(
             "/oauth/authorize/",
             data={
-                "client_id": "test-client",
+                "client_id": client.client_id,
                 "redirect_uri": "https://example.com/cb",
                 "code_challenge": "abc",
                 "state": "xyz",
@@ -1118,6 +1180,378 @@ class TestAuthorizeView:
         response = view(request)
         assert response.status_code == 302
         assert "error=access_denied" in response["Location"]
+
+
+# ---------------------------------------------------------------------------
+# SEC-2 — AuthorizeView client + redirect_uri allowlist enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestAuthorizeViewSEC2:
+    """SEC-2: client_id must be registered, redirect_uri must allowlist-match."""
+
+    @staticmethod
+    def _params(client_id: str, redirect_uri: str = "https://example.com/cb") -> dict[str, str]:
+        return {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "code_challenge_method": "S256",
+            "state": "xyz",
+        }
+
+    def test_unknown_client_returns_400_invalid_client(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        An unknown client_id is rejected with a JSON 400, NOT a redirect.
+
+        We MUST NOT redirect because we cannot trust an unverified
+        redirect_uri to be the legitimate target.
+        """
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        view = AuthorizeView.as_view()
+        request = rf.get("/oauth/authorize/", self._params("ghost-id"))
+        response = view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+
+    def test_inactive_client_returns_400_invalid_client(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """An inactive client cannot pass authorize even with a registered URI."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        client = OAuthClient.objects.create(
+            name="disabled",
+            redirect_uris=["https://example.com/cb"],
+            is_active=False,
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get("/oauth/authorize/", self._params(client.client_id))
+        response = view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+
+    def test_redirect_uri_not_in_allowlist_returns_400(
+        self, rf: RequestFactory
+    ) -> None:
+        """An exact-match against client.redirect_uris is required."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        client = OAuthClient.objects.create(
+            name="strict",
+            redirect_uris=["https://example.com/cb"],
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params(client.client_id, redirect_uri="https://evil.example/cb"),
+        )
+        response = view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_redirect_uri"
+
+    def test_http_to_public_host_rejected(self, rf: RequestFactory) -> None:
+        """Plain http:// to a non-loopback host is rejected by the scheme gate."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        client = OAuthClient.objects.create(
+            name="http-public",
+            redirect_uris=["http://example.com/cb"],
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params(client.client_id, redirect_uri="http://example.com/cb"),
+        )
+        response = view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_redirect_uri"
+
+    def test_http_loopback_accepted(self, rf: RequestFactory, settings: Any) -> None:
+        """http://localhost is allowed (RFC 8252 §7.3 native-app loopback)."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        client = OAuthClient.objects.create(
+            name="loopback",
+            redirect_uris=["http://localhost:8080/cb"],
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params(client.client_id, redirect_uri="http://localhost:8080/cb"),
+        )
+        response = view(request)
+        assert response.status_code == 302
+        assert response["Location"].startswith("http://localhost:8080/cb")
+
+    def test_custom_native_scheme_accepted(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """Custom native-app scheme (e.g. ``com.example.app:/cb``) is allowed."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        client = OAuthClient.objects.create(
+            name="native",
+            redirect_uris=["com.example.app:/cb"],
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params(client.client_id, redirect_uri="com.example.app:/cb"),
+        )
+        response = view(request)
+        assert response.status_code == 302
+
+    def test_javascript_scheme_rejected(self, rf: RequestFactory) -> None:
+        """A javascript: URI is rejected by the scheme gate (no dot in scheme)."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        # Register an unrelated allowlist so the client lookup is irrelevant —
+        # the scheme gate runs first.
+        client = OAuthClient.objects.create(
+            name="js-attempt",
+            redirect_uris=["https://example.com/cb"],
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params(client.client_id, redirect_uri="javascript:alert('xss')"),
+        )
+        response = view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_redirect_uri"
+
+    def test_data_scheme_rejected(self, rf: RequestFactory) -> None:
+        """A data: URI is also rejected by the scheme gate."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        client = OAuthClient.objects.create(
+            name="data-attempt",
+            redirect_uris=["https://example.com/cb"],
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params(client.client_id, redirect_uri="data:text/html,<script>"),
+        )
+        response = view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_redirect_uri"
+
+    def test_pkce_auto_register_skips_client_check(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        When PKCE_AUTO_REGISTER is True, an unknown client_id is allowed through.
+
+        The token exchange step still requires PKCE proof, so the actual
+        threat model isn't widened — operators who opt in have already
+        accepted that any caller can hold a client_id.
+        """
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        view = AuthorizeView.as_view()
+        request = rf.get("/oauth/authorize/", self._params("on-the-fly-pkce"))
+        response = view(request)
+        # Bypasses the client lookup but still gets the scheme gate.
+        assert response.status_code == 302
+        assert "code=" in response["Location"]
+
+
+# ---------------------------------------------------------------------------
+# SEC-2 — auto_approve default tracks DEBUG
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestAutoApproveDefault:
+    """SEC-2: FRIESE_MCP_OAUTH_AUTO_APPROVE defaults to bool(DEBUG)."""
+
+    def test_default_is_false_outside_debug(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """With DEBUG False (or absent) and AUTO_APPROVE absent → consent template."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.DEBUG = False
+        if hasattr(settings, "FRIESE_MCP_OAUTH_AUTO_APPROVE"):
+            del settings.FRIESE_MCP_OAUTH_AUTO_APPROVE
+        client = OAuthClient.objects.create(
+            name="prod-mode", redirect_uris=["https://example.com/cb"]
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            {
+                "response_type": "code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                "code_challenge_method": "S256",
+                "state": "xyz",
+            },
+        )
+        response = view(request)
+        # Consent template, not a redirect.
+        assert response.status_code == 200
+
+    def test_default_is_true_when_debug_true(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """With DEBUG=True and AUTO_APPROVE absent → auto-approve redirect."""
+        from friese_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.DEBUG = True
+        if hasattr(settings, "FRIESE_MCP_OAUTH_AUTO_APPROVE"):
+            del settings.FRIESE_MCP_OAUTH_AUTO_APPROVE
+        client = OAuthClient.objects.create(
+            name="dev-mode", redirect_uris=["https://example.com/cb"]
+        )
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            {
+                "response_type": "code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                "code_challenge_method": "S256",
+                "state": "xyz",
+            },
+        )
+        response = view(request)
+        assert response.status_code == 302
+
+
+# ---------------------------------------------------------------------------
+# SEC-2 — metadata response_types_supported only advertises 'code'
+# ---------------------------------------------------------------------------
+
+
+class TestMetadataResponseTypes:
+    """SEC-2: metadata must NOT advertise the unimplemented implicit flow."""
+
+    def test_response_types_supported_is_code_only(self, rf: RequestFactory) -> None:
+        """response_types_supported is the single-element list ['code']."""
+        request = rf.get("/.well-known/oauth-authorization-server")
+        response = _auth_server_view(request)
+        data = json.loads(response.content)
+        assert data["response_types_supported"] == ["code"]
+        assert "token" not in data["response_types_supported"]
+
+
+# ---------------------------------------------------------------------------
+# SEC-2 — RegistrationView accepts redirect_uris and validates them
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestRegistrationViewRedirectUris:
+    """SEC-2: dynamic registration accepts and validates redirect_uris."""
+
+    @staticmethod
+    def _post(rf: RequestFactory, body: dict[str, Any]) -> Any:
+        from friese_mcp.contrib.oauth.views import (
+            RegistrationView,  # pylint: disable=import-outside-toplevel
+        )
+
+        view = RegistrationView.as_view()
+        request = rf.post(
+            "/oauth/register/",
+            data=json.dumps(body),
+            content_type="application/json",
+        )
+        return view(request)
+
+    def test_registration_persists_redirect_uris(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """A registered client persists the supplied redirect_uris list."""
+        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        response = self._post(
+            rf,
+            {
+                "client_name": "agent",
+                "redirect_uris": ["https://example.com/cb", "http://localhost:9000/cb"],
+            },
+        )
+        assert response.status_code == 201
+        data = json.loads(response.content)
+        assert data["redirect_uris"] == [
+            "https://example.com/cb",
+            "http://localhost:9000/cb",
+        ]
+        # And the persisted row matches.
+        client = OAuthClient.objects.get(client_id=data["client_id"])
+        assert client.redirect_uris == [
+            "https://example.com/cb",
+            "http://localhost:9000/cb",
+        ]
+
+    def test_registration_rejects_http_to_public_host(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """Registration refuses http:// URIs to non-loopback hosts."""
+        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        response = self._post(
+            rf,
+            {
+                "client_name": "agent",
+                "redirect_uris": ["http://evil.example/cb"],
+            },
+        )
+        assert response.status_code == 400
+        data = json.loads(response.content)
+        assert data["error"] == "invalid_redirect_uri"
+
+    def test_registration_rejects_non_list_redirect_uris(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """redirect_uris must be a list of strings, not a single string or other shape."""
+        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        response = self._post(
+            rf,
+            {
+                "client_name": "agent",
+                "redirect_uris": "https://example.com/cb",  # wrong type
+            },
+        )
+        assert response.status_code == 400
+        data = json.loads(response.content)
+        assert data["error"] == "invalid_client_metadata"
 
 
 # ---------------------------------------------------------------------------
@@ -1260,7 +1694,13 @@ class TestTokenViewAuthorizationCodeGrant:
         )
         response = _token_view(request)
         data = json.loads(response.content)
-        token = OAuthAccessToken.objects.get(token=data["access_token"])
+        # SEC-1: data["access_token"] is the raw bearer; storage holds the HMAC
+        # digest, so look up by hashing the issued raw token.
+        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+            _hmac_secret,
+        )
+
+        token = OAuthAccessToken.objects.get(token=_hmac_secret(data["access_token"]))
         assert token.permission == "admin"
 
 

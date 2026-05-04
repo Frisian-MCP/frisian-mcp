@@ -37,10 +37,23 @@ def _jsonrpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any
     return msg
 
 
-def _call_tool(rf: RequestFactory, name: str, arguments: dict[str, Any]) -> Any:
+def _build_call_tool_request(
+    rf: RequestFactory, name: str, arguments: dict[str, Any]
+) -> Any:
+    """
+    Build the same request that ``_call_tool`` would dispatch — but without firing the view.
+
+    SEC-3 tests need to compute the owner_key for the call-2 request so the
+    mocked cache can return a payload with a matching binding.  Calling
+    ``_call_tool`` consumes the request; this helper exposes it for inspection.
+    """
     request = _post(rf, _jsonrpc("tools/call", {"name": name, "arguments": arguments}))
     request.user = AnonymousUser()
-    return _view(request)
+    return request
+
+
+def _call_tool(rf: RequestFactory, name: str, arguments: dict[str, Any]) -> Any:
+    return _view(_build_call_tool_request(rf, name, arguments))
 
 
 def _response_data(response: Any) -> dict[str, Any]:
@@ -347,6 +360,10 @@ class TestMcpHeavyIntegration:
 
     def test_call2_full_mode_returns_original(self, rf: RequestFactory) -> None:
         """Call 2 with mode=full returns the complete cached result."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
         stored = {"big": "payload", "items": list(range(20))}
         token = "testtoken123"
 
@@ -364,7 +381,18 @@ class TestMcpHeavyIntegration:
                 return stored
 
             with patch("friese_mcp.views.django_cache") as mock_cache:
-                mock_cache.get.return_value = stored
+                # SEC-3: cache entries are now {result, owner_key, tool_name}.
+                # The test request is anonymous so the owner_key for call 1
+                # and call 2 are identical — derive it from the same request
+                # the view will see.
+                expected_owner = _heavy_owner_key(
+                    _build_call_tool_request(rf, "int.heavy2", {}), "int.heavy2"
+                )
+                mock_cache.get.return_value = {
+                    "result": stored,
+                    "owner_key": expected_owner,
+                    "tool_name": "int.heavy2",
+                }
                 response = _call_tool(
                     rf, "int.heavy2", {"continuation_token": token, "mode": "full"}
                 )
@@ -374,6 +402,10 @@ class TestMcpHeavyIntegration:
 
     def test_call2_summary_mode(self, rf: RequestFactory) -> None:
         """Call 2 with mode=summary returns a condensed result."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
         stored = {f"key{i}": "x" * 200 for i in range(20)}
         token = "sumtoken"
 
@@ -391,7 +423,14 @@ class TestMcpHeavyIntegration:
                 return stored
 
             with patch("friese_mcp.views.django_cache") as mock_cache:
-                mock_cache.get.return_value = stored
+                expected_owner = _heavy_owner_key(
+                    _build_call_tool_request(rf, "int.heavy3", {}), "int.heavy3"
+                )
+                mock_cache.get.return_value = {
+                    "result": stored,
+                    "owner_key": expected_owner,
+                    "tool_name": "int.heavy3",
+                }
                 response = _call_tool(
                     rf, "int.heavy3", {"continuation_token": token, "mode": "summary"}
                 )
@@ -478,3 +517,266 @@ class TestMcpHeavyIntegration:
         result = _tool_result(response)
         assert result == {"ok": True}
         assert "continuation_token" not in result
+
+
+# ---------------------------------------------------------------------------
+# SEC-3 — continuation tokens bound to caller / tool / session
+# ---------------------------------------------------------------------------
+
+
+class TestHeavyContinuationOwnerBinding:
+    """Continuation tokens must not be replayable across callers or tools."""
+
+    @staticmethod
+    def _isolated_registry_with_heavy(name: str, payload: Any) -> ToolRegistry:
+        """Register a single ``@mcp_heavy`` tool that returns *payload*."""
+        isolated = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", isolated):
+
+            @mcp_heavy(
+                name=name,
+                description="SEC-3 binding test",
+                input_schema={"type": "object", "properties": {}},
+            )
+            def _fn(  # pylint: disable=unused-variable
+                _arguments: dict[str, Any], _request: Any
+            ) -> Any:
+                return payload
+
+        return isolated
+
+    def test_call1_writes_owner_bound_cache_entry(self, rf: RequestFactory) -> None:
+        """Call 1 stores ``{result, owner_key, tool_name}`` (not the raw result)."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        payload = {"big": list(range(20))}
+        reg = self._isolated_registry_with_heavy("sec3.heavy1", payload)
+
+        with patch("friese_mcp.views.tool_registry", reg), patch(
+            "friese_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = None
+            _call_tool(rf, "sec3.heavy1", {})
+
+        # The view called cache.set exactly once with the wrapped payload.
+        assert mock_cache.set.call_count == 1
+        _key, written, _ttl = mock_cache.set.call_args.args
+        assert written["result"] == payload
+        assert written["tool_name"] == "sec3.heavy1"
+        # The owner key matches the canonical helper for the same request shape.
+        expected = _heavy_owner_key(
+            _build_call_tool_request(rf, "sec3.heavy1", {}), "sec3.heavy1"
+        )
+        assert written["owner_key"] == expected
+
+    def test_call2_owner_mismatch_returns_is_error(self, rf: RequestFactory) -> None:
+        """
+        A continuation token issued for caller A is refused for caller B.
+
+        Simulated by mocking the cache to return a wrapped entry whose
+        ``owner_key`` does not match what the current request produces.
+        """
+        reg = self._isolated_registry_with_heavy("sec3.heavy2", {"x": 1})
+
+        with patch("friese_mcp.views.tool_registry", reg), patch(
+            "friese_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = {
+                "result": {"x": 1},
+                # Deliberately-foreign owner — different tier.
+                "owner_key": "tool=sec3.heavy2:auth=anon:tier=admin",
+                "tool_name": "sec3.heavy2",
+            }
+            response = _call_tool(
+                rf,
+                "sec3.heavy2",
+                {"continuation_token": "stolen-token", "mode": "full"},
+            )
+
+        result = _tool_result(response)
+        assert "error" in result
+        assert "does not belong to this caller" in result["error"]
+
+    def test_call2_tool_name_mismatch_returns_is_error(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        A token issued for tool A cannot be replayed against tool B.
+
+        Tool name is part of the owner key; computing it for the call-2
+        tool yields a different key than the one stored at issuance, so
+        the gate refuses.
+        """
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        reg = ToolRegistry()
+        with patch("friese_mcp.decorators.tool_registry", reg):
+
+            @mcp_heavy(
+                name="sec3.heavy3",
+                description="x",
+                input_schema={"type": "object", "properties": {}},
+            )
+            def _heavy3(  # pylint: disable=unused-variable
+                _arguments: dict[str, Any], _request: Any
+            ) -> Any:
+                return {}
+
+            @mcp_heavy(
+                name="sec3.evil",
+                description="y",
+                input_schema={"type": "object", "properties": {}},
+            )
+            def _evil(  # pylint: disable=unused-variable
+                _arguments: dict[str, Any], _request: Any
+            ) -> Any:
+                return {}
+
+        # Token was issued under sec3.heavy3 …
+        owner_for_heavy3 = _heavy_owner_key(
+            _build_call_tool_request(rf, "sec3.heavy3", {}), "sec3.heavy3"
+        )
+
+        with patch("friese_mcp.views.tool_registry", reg), patch(
+            "friese_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = {
+                "result": {"sensitive": "data"},
+                "owner_key": owner_for_heavy3,
+                "tool_name": "sec3.heavy3",
+            }
+            # … but the call-2 names sec3.evil.
+            response = _call_tool(
+                rf,
+                "sec3.evil",
+                {"continuation_token": "x", "mode": "full"},
+            )
+
+        result = _tool_result(response)
+        assert "error" in result
+        assert "does not belong to this caller" in result["error"]
+
+    def test_call2_legacy_raw_entry_treated_as_expired(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        A pre-fix raw cache entry (no owner_key) is treated as expired.
+
+        Existing cached entries from before the SEC-3 deploy have the legacy
+        shape — bare result, no binding.  Serving them would defeat the
+        whole fix; rejecting them as expired forces re-issuance under the
+        new owner-bound format.
+        """
+        reg = self._isolated_registry_with_heavy("sec3.heavy4", {"legacy": True})
+
+        with patch("friese_mcp.views.tool_registry", reg), patch(
+            "friese_mcp.views.django_cache"
+        ) as mock_cache:
+            # Legacy shape: raw result, no wrapper.
+            mock_cache.get.return_value = {"legacy": True}
+            response = _call_tool(
+                rf,
+                "sec3.heavy4",
+                {"continuation_token": "x", "mode": "full"},
+            )
+
+        result = _tool_result(response)
+        assert "error" in result
+        assert "expired or not found" in result["error"]
+
+    def test_call2_owner_match_serves_cached_result(
+        self, rf: RequestFactory
+    ) -> None:
+        """The happy path: matching owner_key → cached result is served."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        reg = self._isolated_registry_with_heavy("sec3.heavy5", {"ok": True})
+        owner = _heavy_owner_key(
+            _build_call_tool_request(rf, "sec3.heavy5", {}), "sec3.heavy5"
+        )
+
+        with patch("friese_mcp.views.tool_registry", reg), patch(
+            "friese_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = {
+                "result": {"ok": True},
+                "owner_key": owner,
+                "tool_name": "sec3.heavy5",
+            }
+            response = _call_tool(
+                rf,
+                "sec3.heavy5",
+                {"continuation_token": "x", "mode": "full"},
+            )
+
+        result = _tool_result(response)
+        assert result == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# SEC-3 — _heavy_owner_key composition unit probes
+# ---------------------------------------------------------------------------
+
+
+class TestHeavyOwnerKey:
+    """Unit-level probes for _heavy_owner_key composition."""
+
+    @staticmethod
+    def _request(rf: RequestFactory) -> Any:
+        return _build_call_tool_request(rf, "x.list", {})
+
+    def test_anonymous_request_includes_anon_marker(self, rf: RequestFactory) -> None:
+        """An unauthenticated request renders auth=anon in the owner key."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        key = _heavy_owner_key(self._request(rf), "x.list")
+        assert "auth=anon" in key
+        assert "tool=x.list" in key
+
+    def test_different_tools_produce_different_keys(self, rf: RequestFactory) -> None:
+        """Tool name is part of the key; two tools yield different bindings."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        a = _heavy_owner_key(self._request(rf), "tool.a")
+        b = _heavy_owner_key(self._request(rf), "tool.b")
+        assert a != b
+
+    def test_session_id_header_appears_in_key(self, rf: RequestFactory) -> None:
+        """A request carrying MCP-Session-ID has the session bound into the key."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        request = self._request(rf)
+        request.META["HTTP_MCP_SESSION_ID"] = "session-xyz-123"
+        key = _heavy_owner_key(request, "x.list")
+        assert "session=session-xyz-123" in key
+
+    def test_tier_change_changes_the_key(self, rf: RequestFactory) -> None:
+        """A token whose tier later downgrades produces a different owner key."""
+        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        request = self._request(rf)
+        # First snapshot under tier=read_write.
+        auth = MagicMock()
+        auth.permission = "read_write"
+        request.auth = auth
+        key_rw = _heavy_owner_key(request, "x.list")
+
+        # Then the same auth object, downgraded tier.
+        auth.permission = "read"
+        key_r = _heavy_owner_key(request, "x.list")
+
+        assert key_rw != key_r

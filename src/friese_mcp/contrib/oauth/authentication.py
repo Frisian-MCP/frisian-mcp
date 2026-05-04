@@ -28,7 +28,7 @@ from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
-from .models import OAuthAccessToken
+from .models import OAuthAccessToken, _hmac_secret
 from .views import _get_base_url
 
 
@@ -80,9 +80,11 @@ class OAuthTokenAuthentication(BaseAuthentication):
             return None
 
         token_str = auth_header[len("Bearer ") :]
+        # Tokens are stored as HMAC-SHA256 digests (SEC-1).  Hash the bearer
+        # value before lookup so a leaked DB row cannot be replayed directly.
         try:
             access_token = OAuthAccessToken.objects.select_related("client").get(
-                token=token_str,
+                token=_hmac_secret(token_str),
             )
         except OAuthAccessToken.DoesNotExist:
             raise AuthenticationFailed("Invalid OAuth token.") from None

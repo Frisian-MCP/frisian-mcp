@@ -54,22 +54,35 @@ class _StubInvocation:
 @pytest.fixture()
 def fresh_app_config() -> Generator[FrieseMcpConfig, None, None]:
     """
-    Yield the live FrieseMcpConfig with the idempotency flag reset.
+    Yield the live FrieseMcpConfig with both idempotency flags reset.
 
     AppConfig.ready() is called once at Django startup; the ``_mcp_ready``
-    class attribute prevents subsequent invocations from re-running discovery
-    in the same process.  These tests need to drive ``ready()`` repeatedly,
-    so we toggle the flag back to ``False`` for the duration of each test
-    and restore it afterwards.
+    flag prevents subsequent invocations from re-running its body, and
+    PKG-21's ``_mcp_discovered`` flag guards the deferred discovery path.
+    These tests need to drive both repeatedly so we reset both for the
+    duration of each test and restore them afterwards.
+
+    Also disconnects any deferred-discovery handler the test connects via
+    ``ready()`` so subsequent tests do not see stale signal receivers from
+    earlier ``ready()`` calls.
     """
+    from django.core.signals import request_started
+
+    from friese_mcp.apps import _DEFERRED_DISCOVERY_UID
+
     config = apps.get_app_config("friese_mcp")
     assert isinstance(config, FrieseMcpConfig)
-    original = config._mcp_ready
+    original_ready = config._mcp_ready
+    original_discovered = config._mcp_discovered
     config._mcp_ready = False
+    config._mcp_discovered = False
+    request_started.disconnect(dispatch_uid=_DEFERRED_DISCOVERY_UID)
     try:
         yield config
     finally:
-        config._mcp_ready = original
+        config._mcp_ready = original_ready
+        config._mcp_discovered = original_discovered
+        request_started.disconnect(dispatch_uid=_DEFERRED_DISCOVERY_UID)
 
 
 @pytest.fixture()
@@ -160,6 +173,8 @@ class TestStartupSummaryPrint:
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
+            # PKG-21: discovery is now deferred to the first request.
+            fresh_app_config._run_deferred_discovery()
         captured = capsys.readouterr()
         combined = captured.out + captured.err
         assert "[friese-mcp]" in combined
@@ -200,6 +215,8 @@ class TestStartupSummaryPrint:
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
+            # PKG-21: discovery is now deferred to the first request.
+            fresh_app_config._run_deferred_discovery()
 
         captured = capsys.readouterr()
         combined = captured.out + captured.err
@@ -225,6 +242,8 @@ class TestStartupSummaryPrint:
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
+            # PKG-21: discovery is now deferred to the first request.
+            fresh_app_config._run_deferred_discovery()
         captured = capsys.readouterr()
         combined = captured.out + captured.err
         assert "/api/mcp/" in combined
@@ -268,6 +287,8 @@ class TestStartupSummaryLoggerIndependence:
                 return_value=_StubInvocation(),
             ):
                 fresh_app_config.ready()
+                # PKG-21: discovery is now deferred to the first request.
+                fresh_app_config._run_deferred_discovery()
             captured = capsys.readouterr()
             combined = captured.out + captured.err
             assert "[friese-mcp]" in combined
@@ -337,6 +358,8 @@ class TestDispatchGroupSummary:
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
+            # PKG-21: discovery is now deferred to the first request.
+            fresh_app_config._run_deferred_discovery()
 
         captured = capsys.readouterr()
         combined = captured.out + captured.err
@@ -364,6 +387,8 @@ class TestDispatchGroupSummary:
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
+            # PKG-21: discovery is now deferred to the first request.
+            fresh_app_config._run_deferred_discovery()
         captured = capsys.readouterr()
         combined = captured.out + captured.err
         assert "dispatch group" not in combined

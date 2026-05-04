@@ -3,14 +3,14 @@ Abstract base classes and core dataclasses for the friese-mcp backend layer.
 
 The backend layer decouples *discovery* (finding DRF ViewSets and mapping them
 to MCP tools) from *invocation* (calling a ViewSet action in response to a
-``tools/call`` request).  This split enables mature projects (e.g. Nautobot 3.x
-running Django 5.x under ASGI) to provide custom backends without touching
+``tools/call`` request).  This split enables mature multi-app DRF projects
+running Django 5.x under ASGI to provide custom backends without touching
 friese-mcp's gateway or registry logic.
 
 Two settings control which backends are loaded at startup::
 
     # settings.py
-    FRIESE_MCP_DISCOVERY_BACKEND = "myapp.backends.NautobotDiscovery"
+    FRIESE_MCP_DISCOVERY_BACKEND = "myapp.backends.CustomDiscovery"
     FRIESE_MCP_INVOCATION_BACKEND = "myapp.backends.AsyncInvocation"
 
 When unset, :class:`~friese_mcp.backends.discovery.DRFSyncDiscovery` and
@@ -51,6 +51,11 @@ class ToolDefinition:  # pylint: disable=too-many-instance-attributes
         view_class: The DRF ViewSet class (``None`` for decorator tools).
         action: The ViewSet action name, e.g. ``"list"`` (``None`` for
             decorator tools).
+        url_path: The full URL path (joined prefix + pattern) that the
+            discovery backend matched this tool against.  PKG-22 uses the
+            presence of ``/api/`` in this string to disambiguate basename
+            collisions between UI and API ViewSets that share the same
+            model object name.  Empty string for decorator tools.
 
     """
 
@@ -63,6 +68,7 @@ class ToolDefinition:  # pylint: disable=too-many-instance-attributes
     action: str | None = None
     is_dispatcher: bool = False
     permission_tier: str = "read"
+    url_path: str = ""
 
 
 @dataclasses.dataclass

@@ -177,7 +177,7 @@ MCP Client (Claude, Cursor, GPT, …)
 
 **Key design points:**
 
-- **Separation of discovery and invocation.** Two pluggable backends. Override either independently: use a custom discovery backend for Nautobot's app registry; use a custom invocation backend for Celery-delegated or async execution.
+- **Separation of discovery and invocation.** Two pluggable backends. Override either independently: use a custom discovery backend to integrate with a host app's plugin / app registry; use a custom invocation backend for Celery-delegated or async execution.
 - **Registry is the source of truth.** `@mcp_tool`, `@mcp_dispatcher`, and auto-discovery all write to the same `tool_registry` singleton. `tools/list` reads from it directly.
 - **Tool errors are `isError: true`, not JSON-RPC errors.** Permission denials, validation errors, and handler exceptions return `isError: true` inside a normal HTTP 200 response — the JSON-RPC session stays alive for the agent to inspect and retry.
 - **Two enforcement points.** Gateway-level permissions gate the entire `/mcp/` surface (`FRIESE_MCP_PERMISSION_CLASSES`). Tool-level permissions gate individual `tools/call` invocations via `ToolRegistry.dispatch()`.
@@ -363,12 +363,12 @@ FRIESE_MCP_AUTODISCOVER = False
 
 **Type:** `list[str]` (dotted Python import paths) | **Default:** absent (uses `FRIESE_MCP_DISCOVERY_BACKEND`, then `DRFSyncDiscovery`)
 
-List of discovery backend classes to run at startup. Results are merged in order — later backends win on tool name clashes. Use this when you need to pull tools from multiple sources (e.g. standard DRF ViewSets plus a Nautobot app registry).
+List of discovery backend classes to run at startup. Results are merged in order — later backends win on tool name clashes. Use this when you need to pull tools from multiple sources (e.g. standard DRF ViewSets plus a host-app plugin registry).
 
 ```python
 FRIESE_MCP_DISCOVERY_BACKENDS = [
     "friese_mcp.backends.discovery.DRFSyncDiscovery",
-    "myapp.backends.NautobotDiscovery",
+    "myapp.backends.CustomDiscovery",
 ]
 ```
 
@@ -383,7 +383,7 @@ Each class must subclass `friese_mcp.backends.BaseDiscoveryBackend`.
 Single discovery backend class. Use `FRIESE_MCP_DISCOVERY_BACKENDS` (plural) instead when you need multiple backends. This setting is ignored when `FRIESE_MCP_DISCOVERY_BACKENDS` is present.
 
 ```python
-FRIESE_MCP_DISCOVERY_BACKEND = "myapp.backends.NautobotDiscovery"
+FRIESE_MCP_DISCOVERY_BACKEND = "myapp.backends.CustomDiscovery"
 ```
 
 > **Requires `FRIESE_MCP_AUTODISCOVER = True` (the default).** Setting `FRIESE_MCP_AUTODISCOVER = False` short-circuits startup before backends are consulted — this setting is silently ignored and no tools are auto-discovered.

@@ -119,6 +119,74 @@ def invalidate_tools_list_cache() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _heavy_owner_key(request: Any, tool_name: str) -> str:
+    """
+    Return a stable identifier for the caller of a heavy tool invocation.
+
+    SEC-3: heavy-response continuation tokens cache the result under a
+    server-issued opaque token.  Without binding, anyone who learns the
+    token (a leaked log, a compromised middlebox, a different agent on
+    the same gateway) could replay it and read another caller's data.
+    The owner key composes:
+
+    * the originating tool name — refuses replay against a different tool
+    * the auth backend type + primary key — refuses cross-credential replay
+    * the effective permission tier — refuses replay after a downgrade
+    * the user PK if any — refuses cross-user replay
+    * the agent connection PK if the request is per-agent scoped (PKG-6)
+    * the MCP session ID if the client supplied one
+
+    The shape is intentionally a single string so the comparison is a
+    simple equality check; the exact field set need not be stable across
+    releases because the owner key never leaves the server.
+    """
+    auth_obj = getattr(request, "auth", None)
+    if auth_obj is None:
+        auth_id = "anon"
+    else:
+        pk = getattr(auth_obj, "pk", None)
+        if pk is not None:
+            auth_id = f"{type(auth_obj).__name__}:{pk}"
+        else:
+            # Static API keys (_ApiKeyAuth) have no PK; fall back to the
+            # type + permission tier so two distinct tiers don't collide.
+            auth_id = (
+                f"{type(auth_obj).__name__}:tier="
+                f"{getattr(auth_obj, 'permission', 'unknown')}"
+            )
+
+    user = getattr(request, "user", None)
+    user_pk = getattr(user, "pk", None) if user is not None else None
+    user_part = f":user={user_pk}" if user_pk is not None else ""
+
+    # Tier resolution flows through registry._resolve_request_tier (PKG-15)
+    # so SEC-3 inherits the same hook/role-map chain — no duplicated logic.
+    tier = _get_token_permission(request)
+
+    conn = getattr(request, "_mcp_agent_connection", None)
+    conn_pk = getattr(conn, "pk", None) if conn is not None else None
+    conn_part = f":conn={conn_pk}" if conn_pk is not None else ""
+
+    session_id = (request.META or {}).get("HTTP_MCP_SESSION_ID", "")
+    session_part = f":session={session_id}" if session_id else ""
+
+    return (
+        f"tool={tool_name}:auth={auth_id}:tier={tier}"
+        f"{user_part}{conn_part}{session_part}"
+    )
+
+
+def _build_heavy_cache_entry(
+    result: Any, request: Any, tool_name: str
+) -> dict[str, Any]:
+    """Wrap *result* with the SEC-3 owner-binding metadata for the cache."""
+    return {
+        "result": result,
+        "owner_key": _heavy_owner_key(request, tool_name),
+        "tool_name": tool_name,
+    }
+
+
 def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
     """Build the call-1 probe envelope for the two-call response-negotiation protocol."""
     serialized = json.dumps(result)
@@ -272,35 +340,42 @@ def _resolve_classes(setting_name: str) -> list[Any] | None:
     return [import_string(cls) if isinstance(cls, str) else cls for cls in raw]
 
 
-def _get_agent_connection(request: Any) -> Any | None:
+def _resolve_agent_connection_state(request: Any) -> tuple[Any | None, bool]:
     """
-    Return the active AgentConnection for ``request.auth``, or ``None``.
+    Look up the AgentConnection state for ``request.auth``.
 
-    Looks up :class:`~friese_mcp.contrib.agents.models.AgentConnection`
-    for ``request.auth``.
+    Returns ``(active_connection_or_None, has_inactive_match)``:
+
+    * ``(conn, False)`` — at least one active AgentConnection links the
+      credential; ``conn`` is the most-recent.  Apply per-agent filtering.
+    * ``(None, True)`` — the credential IS linked to at least one
+      AgentConnection but all of them are inactive.  SEC-5: fail closed.
+      Operators who deactivate an agent expect access to stop, not for
+      filtering to silently disappear.
+    * ``(None, False)`` — no AgentConnection links this credential.  Pass
+      through with no filtering (existing default-allow contract).
 
     Resolution order:
 
-    1. If ``friese_mcp.contrib.agents`` is not installed → ``None``.
-    2. If ``request.auth`` is a
-       :class:`~friese_mcp.contrib.tokens.models.FrieseMcpToken` → look up the
-       first active ``AgentConnection`` linked via ``token``.
-    3. If ``request.auth`` is an
-       :class:`~friese_mcp.contrib.oauth.models.OAuthAccessToken` → look up the
-       first active ``AgentConnection`` linked via ``oauth_client``.
-    4. Otherwise → ``None``.
-
-    Returns ``None`` when no matching ``AgentConnection`` exists, allowing all
-    registered tools to be accessible.
+    1. ``friese_mcp.contrib.agents`` not installed → ``(None, False)``.
+    2. ``request.auth`` is a
+       :class:`~friese_mcp.contrib.tokens.models.FrieseMcpToken` → look up
+       AgentConnections linked via ``token``.
+    3. ``request.auth`` is an
+       :class:`~friese_mcp.contrib.oauth.models.OAuthAccessToken` → look up
+       AgentConnections linked via the parent ``OAuthClient``.
+    4. Otherwise → ``(None, False)``.
     """
     from django.apps import apps as django_apps  # pylint: disable=import-outside-toplevel
 
     if not django_apps.is_installed("friese_mcp.contrib.agents"):
-        return None
+        return None, False
 
     auth = getattr(request, "auth", None)
     if auth is None:
-        return None
+        return None, False
+
+    queryset = None
 
     try:
         from friese_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
@@ -308,31 +383,48 @@ def _get_agent_connection(request: Any) -> Any | None:
         )
 
         if isinstance(auth, FrieseMcpToken):
-            return (
-                auth.agent_connections.select_related("token", "oauth_client")
-                .filter(is_active=True)
-                .order_by("-created_at")
-                .first()
-            )
+            queryset = auth.agent_connections.select_related("token", "oauth_client")
     except ImportError:
         pass
 
-    try:
-        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
-            OAuthAccessToken,
-        )
-
-        if isinstance(auth, OAuthAccessToken):
-            return (
-                auth.client.agent_connections.select_related("token", "oauth_client")
-                .filter(is_active=True)
-                .order_by("-created_at")
-                .first()
+    if queryset is None:
+        try:
+            from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+                OAuthAccessToken,
             )
-    except ImportError:
-        pass
 
-    return None
+            if isinstance(auth, OAuthAccessToken):
+                queryset = auth.client.agent_connections.select_related(
+                    "token", "oauth_client"
+                )
+        except ImportError:
+            pass
+
+    if queryset is None:
+        return None, False
+
+    active = queryset.filter(is_active=True).order_by("-created_at").first()
+    if active is not None:
+        return active, False
+
+    # No active match — but maybe the credential is linked to an inactive one.
+    # SEC-5: an admin who deactivated the agent expects the credential to stop
+    # working, not for filtering to silently disappear.
+    has_inactive = queryset.exists()
+    return None, has_inactive
+
+
+def _get_agent_connection(request: Any) -> Any | None:
+    """
+    Return the active AgentConnection for ``request.auth``, or ``None``.
+
+    Backwards-compatible thin wrapper around
+    :func:`_resolve_agent_connection_state` that drops the
+    ``has_inactive_match`` signal.  Callers that need the SEC-5 fail-closed
+    behaviour should use the resolver directly.
+    """
+    conn, _ = _resolve_agent_connection_state(request)
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +576,12 @@ def _handle_tools_list(
     ``FRIESE_MCP_AUTHENTICATION_CLASSES`` / ``FRIESE_MCP_PERMISSION_CLASSES`` or
     upstream infrastructure.
     """
-    conn = _get_agent_connection(request)
+    conn, has_inactive_match = _resolve_agent_connection_state(request)
+    # SEC-5: when the credential is bound to AgentConnection(s) but every
+    # one is inactive, fail closed — the operator deactivated the agent
+    # and expects access to stop, not for filtering to silently disappear.
+    if conn is None and has_inactive_match:
+        return _jsonrpc_success(request_id, {"tools": []})
     max_tier = _get_token_permission(request)
     cache_ttl: int | None = getattr(settings, "FRIESE_MCP_TOOLS_LIST_CACHE_TTL", None)
     # Use a per-tier cache key so authenticated requests benefit from caching too.
@@ -542,7 +639,31 @@ def _handle_tools_call(
     # Per-agent tool allowlist: when an active AgentConnection with a non-null
     # allowed_tools list is linked to the caller's credential, reject any tool
     # name not in that list before reaching the registry.
-    conn = _get_agent_connection(request)
+    conn, has_inactive_match = _resolve_agent_connection_state(request)
+    # SEC-5: fail closed when the credential is bound to AgentConnection(s)
+    # but every one is inactive.  Returning isError=true (not a JSON-RPC
+    # protocol error) so MCP clients render it as a normal tool denial and
+    # the JSON-RPC session stays alive for the caller to inspect.
+    if conn is None and has_inactive_match:
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "error": (
+                                    "Agent connection is inactive; this credential "
+                                    "is not currently authorised to call MCP tools."
+                                )
+                            }
+                        ),
+                    }
+                ],
+                "isError": True,
+            },
+        )
     if conn is not None and conn.allowed_tools is not None:
         if tool_name not in frozenset(conn.allowed_tools):
             return _jsonrpc_success(
@@ -571,7 +692,11 @@ def _handle_tools_call(
     cont_token: str | None = arguments.get("continuation_token")
     if cont_token is not None:
         cached = django_cache.get(f"{_HEAVY_CACHE_PREFIX}{cont_token}")
-        if cached is None:
+        # SEC-3: legacy raw-result entries (pre-fix deploys) lack the owner
+        # binding and are treated as expired — better a brief disruption
+        # during cutover than serving cross-caller data.
+        is_bound = isinstance(cached, dict) and "owner_key" in cached and "result" in cached
+        if cached is None or not is_bound:
             return _jsonrpc_success(
                 request_id,
                 {
@@ -592,8 +717,40 @@ def _handle_tools_call(
                     "isError": True,
                 },
             )
+        # SEC-3: refuse to serve when the current caller does not match the
+        # caller that issued the continuation.  Owner key composes auth
+        # identity, tier, user, agent connection, and tool name; any drift
+        # (different token, different tool, downgraded tier, different
+        # agent connection) terminates the negotiation safely.
+        expected_owner: str = cached.get("owner_key", "")
+        actual_owner = _heavy_owner_key(request, tool_name)
+        if expected_owner != actual_owner:
+            logger.warning(
+                "heavy_continuation_owner_mismatch",
+                extra={"tool": tool_name},
+            )
+            return _jsonrpc_success(
+                request_id,
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "error": (
+                                        "Continuation token does not belong to this"
+                                        " caller / tool / session.  Re-invoke without"
+                                        " continuation_token to start a new negotiation."
+                                    )
+                                }
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
+            )
         _mode: str = arguments.get("mode", "full")
-        served = _serve_heavy_mode(cached, _mode, arguments)
+        served = _serve_heavy_mode(cached["result"], _mode, arguments)
         return _jsonrpc_success(
             request_id,
             {"content": [{"type": "text", "text": json.dumps(served)}], "isError": False},
@@ -704,7 +861,13 @@ def _handle_tools_call(
     _entry = tool_registry.get_entry(tool_name)
     if _entry is not None and _entry.is_heavy:
         _token = secrets.token_urlsafe(16)
-        django_cache.set(f"{_HEAVY_CACHE_PREFIX}{_token}", result, _HEAVY_CACHE_TTL)
+        # SEC-3: bind the cache entry to the current caller so a leaked
+        # continuation_token cannot be replayed by a different agent.
+        django_cache.set(
+            f"{_HEAVY_CACHE_PREFIX}{_token}",
+            _build_heavy_cache_entry(result, request, tool_name),
+            _HEAVY_CACHE_TTL,
+        )
         probe = _build_probe_envelope(result, _token)
         return _jsonrpc_success(
             request_id,
@@ -718,7 +881,11 @@ def _handle_tools_call(
         _serialized = json.dumps(result)
         if len(_serialized.encode()) > _threshold:
             _token = secrets.token_urlsafe(16)
-            django_cache.set(f"{_HEAVY_CACHE_PREFIX}{_token}", result, _HEAVY_CACHE_TTL)
+            django_cache.set(
+                f"{_HEAVY_CACHE_PREFIX}{_token}",
+                _build_heavy_cache_entry(result, request, tool_name),
+                _HEAVY_CACHE_TTL,
+            )
             probe = _build_probe_envelope(result, _token)
             return _jsonrpc_success(
                 request_id,

@@ -1,8 +1,8 @@
 """
 PKG-17 — write-action invocation envelope hygiene.
 
-Reproduces the two PKG-13 findings against in-process DRF ViewSets so the bugs
-are pinned without needing a live Nautobot:
+Reproduces the two write-action findings against in-process DRF ViewSets so
+the bugs are pinned without needing a live host application:
 
 * ``destroy`` returning the HTTP 204 status as a clean ``{"deleted": True}``
   envelope rather than ``None`` (which upstream wraps as ``{"error": ""}``).
@@ -328,18 +328,17 @@ class TestInitialLifecycleHook:
     """
     SyncInvocation must invoke viewset.initial() before the action handler.
 
-    Without this, host-app code that lives in ``initial()`` — Nautobot's
-    ``restrict_queryset`` (per-user ObjectPermission scoping), tenancy
-    filters, RBAC overlays, ``request.version`` setup, throttles — is
-    silently bypassed.  This was a P0 cross-resource data leak in PKG-13's
-    non-superuser probe.
+    Without this, host-app code that lives in ``initial()`` — per-user
+    queryset scoping, tenancy filters, RBAC overlays, ``request.version``
+    setup, throttles — is silently bypassed.  This was a P0 cross-resource
+    data leak surfaced during integration testing.
     """
 
     def test_initial_is_called_before_action(self, rf: RequestFactory) -> None:
         """A viewset whose initial() filters the data sees the filter applied."""
 
         class _ScopedViewSet(ViewSet):
-            """Mirror Nautobot pattern: scope data inside initial()."""
+            """Mirror the canonical pattern: scope data inside initial()."""
 
             calls: dict[str, int] = {"initial": 0, "list": 0}  # noqa: RUF012
 
@@ -524,8 +523,9 @@ class TestErrorEnvelopeHygiene:
         r"""
         A dict-form detail like {'error': '...'} unwraps to the inner string.
 
-        Reproduces the exact PKG-13 follow-up symptom: Nautobot-style
-        wrapped detail produced ``{'error': \"{'error': 'You do not have...'}\"}``.
+        Reproduces the exact PKG-13 follow-up symptom: a host APIException
+        whose ``.detail`` was a dict produced
+        ``{'error': \"{'error': 'You do not have...'}\"}`` envelopes.
         """
         from rest_framework.exceptions import (  # pylint: disable=import-outside-toplevel
             PermissionDenied,
@@ -533,7 +533,7 @@ class TestErrorEnvelopeHygiene:
 
         class _DenyDict(ViewSet):
             def initial(self, request: Any, *args: Any, **kwargs: Any) -> None:
-                """Raise with a dict detail — mirrors Nautobot's pattern."""
+                """Raise with a dict detail — mirrors a wrapped-detail host pattern."""
                 raise PermissionDenied({"error": "You do not have permission"})
 
             def list(self, request: Any) -> Response:

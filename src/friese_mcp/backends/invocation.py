@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 #: Detail dict keys that are wrapper artefacts (not real field names).  When
 #: encountered during flattening, the value is emitted without a ``key:``
 #: prefix — this is what prevents the string-in-string nesting that surfaces
-#: e.g. when Nautobot's ``PermissionDenied`` carries ``{"error": "..."}`` and
-#: the envelope wraps it again as ``{"error": "{'error': '...'}"}``.
+#: when a host APIException carries ``{"error": "..."}`` and the envelope
+#: wraps it again as ``{"error": "{'error': '...'}"}``.
 _WRAPPER_DETAIL_KEYS: frozenset[str] = frozenset({"error", "detail"})
 
 
@@ -199,9 +199,9 @@ class SyncInvocation(BaseInvocationBackend):
         # has no Authorization header (auth happened on the outer MCP gateway
         # request), so a lazy ``drf_request.user`` access would resolve to
         # AnonymousUser — silently breaking any host serializer that calls
-        # ``self.context['request'].user.is_authenticated`` or queryset
-        # ``.restrict(user, 'view')`` (e.g. Nautobot's WritableNestedSerializer
-        # FK lookup).  Setting the private slots directly skips the lazy path.
+        # ``self.context['request'].user.is_authenticated`` or queryset-scoping
+        # helpers like ``.restrict(user, 'view')`` for permission-aware FK
+        # lookups.  Setting the private slots directly skips the lazy path.
         drf_request._user = getattr(  # pylint: disable=protected-access
             request, "user", AnonymousUser()
         )
@@ -235,13 +235,13 @@ class SyncInvocation(BaseInvocationBackend):
         viewset.format_kwarg = None
 
         # Run the standard DRF lifecycle hook so any host-app logic that lives
-        # in initial() — queryset scoping (e.g. Nautobot's restrict_queryset),
-        # tenancy filtering, RBAC overlays, request.version setup, throttles —
-        # fires before the action.  Without this, SyncInvocation silently
-        # bypasses ObjectPermission scoping and leaks rows the caller has no
+        # in initial() — per-user queryset scoping, tenancy filtering, RBAC
+        # overlays, request.version setup, throttles — fires before the
+        # action.  Without this, SyncInvocation silently bypasses
+        # object-level permission scoping and leaks rows the caller has no
         # right to see.  ``check_permissions`` runs against the empty
-        # ``permission_classes=()`` stripped in PKG-1, so it is a no-op for
-        # friese-mcp's tier model.
+        # ``permission_classes=()`` stripped during discovery, so it is a
+        # no-op for friese-mcp's tier model.
         try:
             viewset.initial(drf_request, **view_kwargs)
         except (DRFValidationError, DjangoValidationError):
