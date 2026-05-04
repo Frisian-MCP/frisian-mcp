@@ -22,6 +22,8 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpRequest, QueryDict
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.negotiation import DefaultContentNegotiation
+from rest_framework.renderers import JSONRenderer
 from rest_framework.request import Request
 from rest_framework.settings import api_settings
 
@@ -30,28 +32,64 @@ from friese_mcp.backends.base import BaseInvocationBackend, ToolDefinition, Tool
 logger = logging.getLogger(__name__)
 
 
+#: Detail dict keys that are wrapper artefacts (not real field names).  When
+#: encountered during flattening, the value is emitted without a ``key:``
+#: prefix — this is what prevents the string-in-string nesting that surfaces
+#: when a host APIException carries ``{"error": "..."}`` and the envelope
+#: wraps it again as ``{"error": "{'error': '...'}"}``.
+_WRAPPER_DETAIL_KEYS: frozenset[str] = frozenset({"error", "detail"})
+
+
+def _flatten_error_detail(detail: Any) -> str:
+    """
+    Flatten a DRF ``detail`` tree to a single human-readable string.
+
+    Handles the three shapes DRF emits for ``APIException.detail``:
+
+    * ``str`` / ``ErrorDetail`` — returned as-is via ``str()``.
+    * ``list`` — items joined with ``"; "``.
+    * ``dict`` — entries rendered as ``"field: <flattened>"``, except for keys
+      in :data:`_WRAPPER_DETAIL_KEYS` (``"error"``, ``"detail"``) which emit
+      only the value to avoid ``"error: error: ..."``-style nesting.
+    """
+    if isinstance(detail, list):
+        return "; ".join(_flatten_error_detail(item) for item in detail)
+    if isinstance(detail, dict):
+        parts: list[str] = []
+        for field, errors in detail.items():
+            errs = _flatten_error_detail(errors)
+            if str(field).lower() in _WRAPPER_DETAIL_KEYS:
+                parts.append(errs)
+            else:
+                parts.append(f"{field}: {errs}")
+        return "; ".join(parts)
+    return str(detail)
+
+
 def _format_drf_validation_error(exc: DRFValidationError) -> str:
+    """Flatten a DRF ``ValidationError.detail`` tree into a readable string."""
+    return _flatten_error_detail(exc.detail)
+
+
+def _exception_envelope_message(exc: BaseException) -> str:
     """
-    Flatten a DRF ``ValidationError.detail`` tree into a readable string.
+    Render *exc* for the ``ToolResult.content`` envelope without nested wrapping.
 
-    DRF ``detail`` can be a list of ``ErrorDetail``, a dict of field → errors,
-    or a nested combination.  This function produces a concise human-readable
-    summary suitable for returning to an MCP caller.
+    DRF :class:`~rest_framework.exceptions.APIException` subclasses
+    (``PermissionDenied``, ``NotAuthenticated``, ``Throttled``, ``NotFound``,
+    ``ValidationError``, …) carry structured ``.detail``.  Calling ``str()``
+    on them yields a repr of that structure (e.g.
+    ``"{'error': 'You do not have permission...'}"``), which then gets
+    wrapped a second time when we set ``{"error": str(exc)}`` — producing the
+    string-in-string envelope reported in PKG-13 follow-up.
+
+    Prefer ``.detail`` (flattened) when present; fall back to ``str(exc)`` for
+    plain exceptions that have no DRF detail attribute.
     """
-    detail = exc.detail
-
-    def _flatten(obj: Any) -> list[str]:
-        if isinstance(obj, list):
-            return [str(item) for item in obj]
-        if isinstance(obj, dict):
-            parts = []
-            for field, errors in obj.items():
-                errs = _flatten(errors)
-                parts.append(f"{field}: {', '.join(errs)}")
-            return parts
-        return [str(obj)]
-
-    return "; ".join(_flatten(detail))
+    detail = getattr(exc, "detail", None)
+    if detail is None:
+        return str(exc)
+    return _flatten_error_detail(detail)
 
 
 # ViewSet actions that need a primary-key URL kwarg.
@@ -115,7 +153,7 @@ class SyncInvocation(BaseInvocationBackend):
     by forwarding the already-authenticated user from the original MCP request.
     """
 
-    def invoke(
+    def invoke(  # pylint: disable=too-many-locals
         self,
         tool: ToolDefinition,
         arguments: dict[str, Any],
@@ -155,6 +193,36 @@ class SyncInvocation(BaseInvocationBackend):
         # application/json bodies from write actions.
         parsers = [cls() for cls in api_settings.DEFAULT_PARSER_CLASSES]  # type: ignore[operator]
         drf_request = Request(inner_req, parsers=parsers)
+
+        # Pre-cache user/auth on the DRF Request so it never invokes
+        # _authenticate() on the synthetic inner request.  The synthetic request
+        # has no Authorization header (auth happened on the outer MCP gateway
+        # request), so a lazy ``drf_request.user`` access would resolve to
+        # AnonymousUser — silently breaking any host serializer that calls
+        # ``self.context['request'].user.is_authenticated`` or queryset-scoping
+        # helpers like ``.restrict(user, 'view')`` for permission-aware FK
+        # lookups.  Setting the private slots directly skips the lazy path.
+        drf_request._user = getattr(  # pylint: disable=protected-access
+            request, "user", AnonymousUser()
+        )
+        drf_request._auth = getattr(  # pylint: disable=protected-access
+            request, "auth", None
+        )
+        drf_request._authenticator = None  # pylint: disable=protected-access
+
+        # Populate accepted_renderer / accepted_media_type so ViewSets that access
+        # these attributes (standard since DRF 3.14) do not raise AttributeError.
+        # APIView.dispatch() normally calls perform_content_negotiation() which sets
+        # these; the synthetic path bypasses dispatch, so we do it explicitly here.
+        (
+            drf_request.accepted_renderer,
+            drf_request.accepted_media_type,
+        ) = DefaultContentNegotiation().select_renderer(
+            drf_request,
+            [cls() for cls in api_settings.DEFAULT_RENDERER_CLASSES],  # type: ignore[operator]
+            None,
+        )
+
         viewset = tool.view_class(
             request=drf_request,
             kwargs=view_kwargs,
@@ -165,6 +233,31 @@ class SyncInvocation(BaseInvocationBackend):
         viewset.kwargs = view_kwargs
         viewset.action = tool.action
         viewset.format_kwarg = None
+
+        # Run the standard DRF lifecycle hook so any host-app logic that lives
+        # in initial() — per-user queryset scoping, tenancy filtering, RBAC
+        # overlays, request.version setup, throttles — fires before the
+        # action.  Without this, SyncInvocation silently bypasses
+        # object-level permission scoping and leaks rows the caller has no
+        # right to see.  ``check_permissions`` runs against the empty
+        # ``permission_classes=()`` stripped during discovery, so it is a
+        # no-op for friese-mcp's tier model.
+        try:
+            viewset.initial(drf_request, **view_kwargs)
+        except (DRFValidationError, DjangoValidationError):
+            raise
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # PermissionDenied, NotAuthenticated, Throttled, etc. surface here.
+            # Convert to a structured tool error so MCP clients see a clean
+            # denial rather than a 500.  Use _exception_envelope_message so
+            # DRF APIException.detail is unwrapped instead of str()-ified into
+            # a string-in-string envelope.
+            message = _exception_envelope_message(exc)
+            logger.warning(
+                "SyncInvocation: viewset.initial() denied call",
+                extra={"tool": tool.name, "error": message},
+            )
+            return ToolResult(content={"error": message}, is_error=True)
 
         try:
             response = getattr(viewset, tool.action)(drf_request, **view_kwargs)
@@ -177,13 +270,30 @@ class SyncInvocation(BaseInvocationBackend):
             # "Internal tool error".
             raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
+            message = _exception_envelope_message(exc)
             logger.exception(
                 "SyncInvocation error",
+                extra={"tool": tool.name, "error": message},
+            )
+            return ToolResult(content={"error": message}, is_error=True)
+
+        # Response normalisation lives in its own try/except so that a failure
+        # to render DRF-native types (e.g. an unrenderable custom field) becomes
+        # a structured tool-level error instead of a 500 from the JSON-RPC
+        # envelope encoder upstream.
+        try:
+            content = self._extract_data(response)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.exception(
+                "SyncInvocation response normalisation failed",
                 extra={"tool": tool.name, "error": str(exc)},
             )
-            return ToolResult(content={"error": str(exc)}, is_error=True)
+            return ToolResult(
+                content={"error": f"Failed to serialise response: {exc}"},
+                is_error=True,
+            )
 
-        return ToolResult(content=self._extract_data(response))
+        return ToolResult(content=content)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -280,13 +390,49 @@ class SyncInvocation(BaseInvocationBackend):
     @staticmethod
     def _extract_data(response: Any) -> Any:
         """
-        Extract serialisable data from a DRF or Django response object.
+        Extract JSON-safe data from a DRF or Django response object.
 
-        Returns ``response.data`` for DRF ``Response`` objects, or the string
-        representation for plain ``HttpResponse`` objects.
+        Handles four shapes:
+
+        * **HTTP 204 No Content** (the canonical destroy / DELETE response):
+          returns a structured ``{"deleted": True, "status": 204}`` envelope
+          so MCP clients see a clear success signal instead of ``None`` (which
+          upstream wraps as the misleading ``{"error": ""}`` content seen in
+          PKG-13).
+        * **DRF Response with non-None data**: routes ``response.data``
+          through DRF's :class:`~rest_framework.renderers.JSONRenderer` and
+          parses the result back to JSON-safe primitives.  This converts
+          DRF-native types — ``uuid.UUID``, ``datetime``,
+          :class:`decimal.Decimal`, ``OrderedDict`` subclasses — into the
+          string / number forms that the upstream stdlib ``json.dumps()``
+          can serialise without raising :class:`TypeError`.
+        * **DRF Response with data=None but a non-204 success status**:
+          returns ``{"status": <code>}`` so the envelope stays well-formed.
+        * **Plain Django HttpResponse**: parses ``response.content`` as JSON,
+          falling back to its string repr.
+
+        The JSONRenderer normalisation generalises GAP-NAUTO-G — any DRF host
+        app whose serializers return UUID PKs, datetime fields, or Decimal
+        fields would otherwise crash the JSON-RPC envelope encoder.
         """
+        status_code = getattr(response, "status_code", None)
+
+        # 204 No Content — structured success envelope, never None.
+        if status_code == 204:
+            return {"deleted": True, "status": 204}
+
         if hasattr(response, "data"):
-            return response.data
+            data = response.data
+            if data is None:
+                # Some custom actions return Response(status=2xx) with no body.
+                # Surface a non-empty envelope rather than None so callers and
+                # MCP clients can render the result without a fake error wrap.
+                return {"status": status_code} if status_code is not None else {}
+            rendered = JSONRenderer().render(data)
+            if not rendered or rendered == b"null":
+                return None
+            return json.loads(rendered)
+
         if hasattr(response, "content"):
             try:
                 return json.loads(response.content)

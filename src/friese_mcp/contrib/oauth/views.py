@@ -39,7 +39,7 @@ import json
 import logging
 import secrets
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
@@ -201,7 +201,11 @@ class TokenView(View):
         logger.info("oauth_token_issued", extra={"client_name": client.name})
         return JsonResponse(
             {
-                "access_token": access_token.token,
+                # SEC-1: access_token.token is the HMAC digest; the raw Bearer
+                # value is exposed once via plaintext_token on the freshly-saved
+                # instance.  This is the only place the raw value leaves the
+                # server.
+                "access_token": access_token.plaintext_token,
                 "token_type": "Bearer",
                 "expires_in": expiry,
                 "scope": access_token.scope_string,
@@ -288,7 +292,8 @@ class TokenView(View):
         logger.info("oauth_token_issued_code_flow", extra={"client_name": client.name})
         return JsonResponse(
             {
-                "access_token": access_token.token,
+                # SEC-1: see _handle_client_credentials for the rationale.
+                "access_token": access_token.plaintext_token,
                 "token_type": "Bearer",
                 "expires_in": expiry,
                 "scope": access_token.scope_string,
@@ -359,14 +364,47 @@ class RegistrationView(View):
                 status=400,
             )
 
-        client = OAuthClient.objects.create(name=client_name.strip())
+        # SEC-2: accept and validate the registered redirect_uris list.
+        # RFC 7591 §2.0 lets clients register multiple redirect URIs at
+        # creation time; the authorize endpoint will require an exact
+        # match against this list before issuing codes.
+        raw_uris: Any = body.get("redirect_uris", [])
+        if not isinstance(raw_uris, list) or not all(isinstance(u, str) for u in raw_uris):
+            return JsonResponse(
+                {
+                    "error": "invalid_client_metadata",
+                    "error_description": "redirect_uris must be a list of strings.",
+                },
+                status=400,
+            )
+        for candidate in raw_uris:
+            if not _redirect_uri_is_safe(candidate):
+                return JsonResponse(
+                    {
+                        "error": "invalid_redirect_uri",
+                        "error_description": (
+                            f"redirect_uri {candidate!r} must be HTTPS, a "
+                            "loopback http:// URI, or a custom-scheme native-app URI."
+                        ),
+                    },
+                    status=400,
+                )
 
-        logger.info("oauth_client_registered", extra={"client_name": client.name})
+        client = OAuthClient.objects.create(
+            name=client_name.strip(),
+            redirect_uris=list(raw_uris),
+        )
+
+        logger.info(
+            "oauth_client_registered",
+            extra={"client_name": client.name, "redirect_uri_count": len(raw_uris)},
+        )
         return JsonResponse(
             {
                 "client_id": client.client_id,
                 "client_secret": client.plaintext_client_secret,
                 "client_name": client.name,
+                "redirect_uris": client.redirect_uris,
                 "scope": client.scope_string,
             },
             status=201,
@@ -416,7 +454,9 @@ class OAuthAuthorizationServerView(View):
             "token_endpoint": token_endpoint,
             "grant_types_supported": ["client_credentials", "authorization_code"],
             "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
-            "response_types_supported": ["token", "code"],
+            # SEC-2: only the authorization-code flow is implemented; do not
+            # advertise the implicit-flow ``token`` response type.
+            "response_types_supported": ["code"],
             "code_challenge_methods_supported": ["S256"],
             "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
         }
@@ -459,6 +499,89 @@ class OAuthProtectedResourceView(View):
 # ---------------------------------------------------------------------------
 
 
+#: Loopback hosts that are exempt from the HTTPS redirect-URI requirement
+#: (RFC 8252 §7.3 native-app loopback redirect).
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _redirect_uri_is_safe(redirect_uri: str) -> bool:
+    """
+    Return True when *redirect_uri* is acceptable as an OAuth redirect target.
+
+    Per SEC-2 / RFC 6749 §3.1.2.1 and RFC 8252 §7.1, §7.3:
+
+    * The scheme MUST be ``https`` for any non-loopback host.
+    * Loopback hosts (``localhost``, ``127.0.0.1``, ``::1``) MAY use
+      plain ``http`` because the traffic never leaves the developer's
+      machine.
+    * A reverse-DNS custom scheme (e.g. ``com.example.app:/callback``) is
+      accepted as a native-app redirect — the dot in the scheme keeps
+      ``javascript:``, ``data:``, ``file:``, ``vbscript:``, etc. out.
+
+    Returns ``False`` for any other shape (URIs with no scheme,
+    ``http`` to public hosts, ``javascript:`` and similar single-token
+    schemes).
+    """
+    if not redirect_uri:
+        return False
+    parsed = urlparse(redirect_uri)
+    scheme = parsed.scheme.lower()
+    if not scheme:
+        return False
+    if scheme == "https":
+        return True
+    if scheme == "http":
+        host = (parsed.hostname or "").lower()
+        return host in _LOOPBACK_HOSTS
+    # Reverse-DNS custom scheme convention (RFC 8252 §7.1): native-app
+    # schemes are expected to use the app's domain in reverse-DNS form so
+    # they are unique across the platform.  Requiring a ``.`` in the scheme
+    # filters out single-token URI schemes that browsers historically used
+    # for passive content (``javascript``, ``data``, ``vbscript``, ``file``,
+    # ``mailto``) — none of which should ever appear in an OAuth redirect.
+    return "." in scheme and not scheme.startswith(".")
+
+
+class _AnySchemeAllowed:
+    """
+    Sentinel ``__contains__``-true container for HttpResponseRedirect.
+
+    Django's :class:`~django.http.HttpResponseRedirect` rejects any redirect
+    whose scheme is not in the class-level ``allowed_schemes`` allowlist
+    (``http``, ``https``, ``ftp`` by default).  Native-app PKCE flows
+    redirect to reverse-DNS custom schemes (``com.example.app:/cb``), which
+    that allowlist would otherwise block.
+
+    AuthorizeView already vets the redirect URI through
+    :func:`_redirect_uri_is_safe` and the per-client allowlist before
+    constructing the redirect, so the response itself can safely defer to
+    those checks.  Setting ``allowed_schemes`` to an instance of this class
+    short-circuits the redundant scheme check inside Django.
+    """
+
+    def __contains__(self, scheme: object) -> bool:
+        """Return ``True`` for any scheme (upstream validation is the trust source)."""
+        return True
+
+
+class _OAuthRedirect(HttpResponseRedirect):
+    """``HttpResponseRedirect`` permitting custom schemes for vetted OAuth URIs."""
+
+    allowed_schemes = _AnySchemeAllowed()  # type: ignore[assignment]
+
+
+def _auto_approve_default() -> bool:
+    """
+    Return the default for ``FRIESE_MCP_OAUTH_AUTO_APPROVE``.
+
+    Defaults to ``True`` only when ``settings.DEBUG`` is also ``True``.
+    Production deployments (DEBUG=False) MUST explicitly opt in to
+    auto-approval via the setting — silently issuing codes without consent
+    is unsafe in any non-developer context.
+    """
+    return bool(getattr(settings, "DEBUG", False))
+
+
 class AuthorizeView(View):
     """
     OAuth 2.0 authorization code endpoint with PKCE (RFC 7636).
@@ -467,18 +590,23 @@ class AuthorizeView(View):
 
     Required query parameters:
         * ``response_type`` — must be ``"code"``
-        * ``client_id``
-        * ``redirect_uri``
+        * ``client_id`` — must refer to an active :class:`OAuthClient` (or
+          to be auto-registered via ``FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER``)
+        * ``redirect_uri`` — must HTTPS or loopback (SEC-2) and exact-match
+          one of the client's registered ``redirect_uris``
         * ``code_challenge`` — base64url(sha256(code_verifier))
         * ``code_challenge_method`` — must be ``"S256"``
 
     Optional:
         * ``state`` — opaque value echoed back in the redirect
 
-    Behaviour is controlled by ``FRIESE_MCP_OAUTH_AUTO_APPROVE`` (default ``True``):
+    Behaviour is controlled by ``FRIESE_MCP_OAUTH_AUTO_APPROVE``.  Defaults
+    to ``True`` only when ``settings.DEBUG`` is also ``True``; production
+    deployments default to consent (False) per SEC-2 to prevent silent
+    code issuance.
 
     * ``True``: immediately redirects to *redirect_uri* with an authorization code.
-      Appropriate for public demo deployments and machine-to-machine flows.
+      Appropriate for developer / machine-to-machine flows.
     * ``False``: renders ``friese_mcp/oauth/authorize.html`` with a consent form.
       POST the form with ``allow=true`` or ``allow=false`` to proceed.
       Host apps may override the template via standard Django template discovery.
@@ -497,11 +625,16 @@ class AuthorizeView(View):
             response_type, client_id, redirect_uri, code_challenge, code_challenge_method
         )
         if error:
-            if redirect_uri:
+            # SEC-2: only redirect back to redirect_uri after we have CONFIRMED
+            # it is a registered URI for the named client.  ``error`` is set
+            # to ``"invalid_redirect_uri"`` when validation rejected the URI
+            # itself; in that case we MUST return a JSON 400 so an attacker
+            # cannot be redirected to an arbitrary target with a state echo.
+            if redirect_uri and error not in {"invalid_redirect_uri", "invalid_client"}:
                 return self._error_redirect(redirect_uri, error, state)
             return JsonResponse({"error": error}, status=400)
 
-        if getattr(settings, "FRIESE_MCP_OAUTH_AUTO_APPROVE", True):
+        if getattr(settings, "FRIESE_MCP_OAUTH_AUTO_APPROVE", _auto_approve_default()):
             return self._issue_code_redirect(
                 client_id, redirect_uri, code_challenge, state
             )
@@ -526,6 +659,16 @@ class AuthorizeView(View):
         state = request.POST.get("state", "")
         allow = request.POST.get("allow", "false").lower() == "true"
 
+        # Re-validate on POST: a malicious form submitter cannot bypass the
+        # GET-side allowlist by hand-crafting the consent POST.
+        error = self._validate_authorize_params(
+            "code", client_id, redirect_uri, code_challenge, "S256"
+        )
+        if error:
+            if redirect_uri and error not in {"invalid_redirect_uri", "invalid_client"}:
+                return self._error_redirect(redirect_uri, error, state)
+            return JsonResponse({"error": error}, status=400)
+
         if not allow:
             return self._error_redirect(redirect_uri, "access_denied", state)
 
@@ -543,7 +686,15 @@ class AuthorizeView(View):
         code_challenge: str,
         code_challenge_method: str,
     ) -> str:
-        """Return an error string or empty string if params are valid."""
+        """
+        Return an error string or empty string if params are valid.
+
+        Validation order matters: cheap shape checks first, then the
+        scheme/loopback check, then the per-client allowlist.  We DO NOT
+        emit ``invalid_redirect_uri`` until the URI itself was rejected;
+        that error code signals the caller (``get()``) to refuse the
+        redirect and return JSON 400 instead.
+        """
         if response_type != "code":
             return "unsupported_response_type"
         if not client_id:
@@ -554,6 +705,24 @@ class AuthorizeView(View):
             return "invalid_request"
         if code_challenge_method != "S256":
             return "invalid_request"
+        # SEC-2: scheme/loopback gate runs BEFORE the client lookup so a
+        # javascript: or http://evil.example URI is rejected even when the
+        # client_id is bogus and PKCE auto-register would otherwise accept it.
+        if not _redirect_uri_is_safe(redirect_uri):
+            return "invalid_redirect_uri"
+        # SEC-2: client allowlist.  An OAuthClient row is the registration
+        # source of truth; an empty redirect_uris list means "this client may
+        # not use the authorize endpoint".  PKCE clients without a DB row are
+        # accepted only when FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER is True.
+        try:
+            client = OAuthClient.objects.get(client_id=client_id, is_active=True)
+        except OAuthClient.DoesNotExist:
+            if getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False):
+                return ""
+            return "invalid_client"
+        registered: list[str] = list(client.redirect_uris or [])
+        if redirect_uri not in registered:
+            return "invalid_redirect_uri"
         return ""
 
     def _issue_code_redirect(
@@ -577,7 +746,7 @@ class AuthorizeView(View):
         params: dict[str, str] = {"code": code}
         if state:
             params["state"] = state
-        return HttpResponseRedirect(f"{redirect_uri}?{urlencode(params)}")
+        return _OAuthRedirect(f"{redirect_uri}?{urlencode(params)}")
 
     def _error_redirect(
         self, redirect_uri: str, error: str, state: str
@@ -586,4 +755,4 @@ class AuthorizeView(View):
         params: dict[str, str] = {"error": error}
         if state:
             params["state"] = state
-        return HttpResponseRedirect(f"{redirect_uri}?{urlencode(params)}")
+        return _OAuthRedirect(f"{redirect_uri}?{urlencode(params)}")

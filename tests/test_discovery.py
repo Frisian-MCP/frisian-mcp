@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 from rest_framework import serializers
-from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from friese_mcp.apps import _apply_tool_filters, _suppress_dispatcher_shadowed
 from friese_mcp.backends.base import ToolDefinition
@@ -238,22 +237,19 @@ class TestDRFSyncDiscovery:
         tools = discovery.discover_tools()
         assert all(t.source == "auto" for t in tools)
 
-    def test_secure_viewset_inherits_permission_classes(self) -> None:
-        """Tools from a ViewSet with permission_classes inherit them."""
+    def test_permission_classes_stripped_from_secure_viewset(self) -> None:
+        """GAP-A: DRFSyncDiscovery always strips ViewSet permission_classes."""
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         secure = next((t for t in tools if t.name == "secure.list"), None)
         assert secure is not None
-        assert IsAuthenticated in secure.permission_classes
+        assert secure.permission_classes == ()
 
-    def test_user_viewset_inherits_drf_default_permissions(self) -> None:
-        """UserViewSet uses DRF's default AllowAny permission class."""
+    def test_permission_classes_stripped_from_all_discovered_tools(self) -> None:
+        """Every auto-discovered tool has empty permission_classes regardless of ViewSet."""
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
-        user_list = next((t for t in tools if t.name == "users.list"), None)
-        assert user_list is not None
-        # DRF ViewSet defaults: permission_classes = [AllowAny]
-        assert AllowAny in user_list.permission_classes
+        assert all(t.permission_classes == () for t in tools)
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +588,7 @@ class TestSchemaFromFilterBackends:
             pass
 
         class _SubclassBackend(_FakeBase):
-            """Simulates NautobotFilterBackend(DjangoFilterBackend)."""
+            """Simulates a custom DjangoFilterBackend subclass."""
 
         class _SubclassViewSet(ViewSet):  # pylint: disable=abstract-method
             filter_backends = [_SubclassBackend]
@@ -618,7 +614,7 @@ class TestSchemaFromFilterBackends:
                 self.label = label
 
         class _DeclaredFilterSet:
-            """FilterSet with only declared_filters — no base_filters (Nautobot pattern)."""
+            """FilterSet with only declared_filters — no base_filters (custom-FilterSet pattern)."""
 
             declared_filters = {
                 "site": _Filter("Filter by site"),

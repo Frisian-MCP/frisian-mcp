@@ -371,10 +371,18 @@ class TestPerAgentToolsList:
         names = {t["name"] for t in tools}
         assert names == {"users.list"}
 
-    def test_inactive_connection_returns_all_tools(
+    def test_inactive_only_connection_fails_closed(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """Inactive AgentConnection is ignored → all tools returned."""
+        """
+        SEC-5: when every linked AgentConnection is inactive, tools/list is empty.
+
+        Pre-fix, an inactive AgentConnection silently dropped filtering and
+        the credential continued to see every registered tool.  Operators
+        who deactivate an agent expect access to stop, so the gateway now
+        fails closed: the credential is treated as not currently authorised
+        and tools/list returns no tools.
+        """
         _use_token_auth(settings)
         token = FrieseMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
@@ -385,8 +393,39 @@ class TestPerAgentToolsList:
         )
         reg = _isolated_registry("users.list", "users.create")
         tools = self._call_tools_list(rf, reg, bearer=token.plaintext_token)
+        # Fail-closed: the credential sees nothing because the only
+        # AgentConnection bound to it is inactive.
+        assert tools == []
+
+    def test_active_connection_still_filters_when_inactive_sibling_exists(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        An active AgentConnection wins over an inactive sibling on the same credential.
+
+        Confirms the SEC-5 fail-closed gate ONLY fires when every linked
+        connection is inactive — an active sibling re-opens the credential
+        with its own allowed_tools applied.
+        """
+        _use_token_auth(settings)
+        token = FrieseMcpToken.objects.create(name="agent-token")
+        AgentConnection.objects.create(
+            name="legacy-disabled",
+            token=token,
+            is_active=False,
+            allowed_tools=["users.create"],
+        )
+        AgentConnection.objects.create(
+            name="current-active",
+            token=token,
+            is_active=True,
+            allowed_tools=["users.list"],
+        )
+        reg = _isolated_registry("users.list", "users.create")
+        tools = self._call_tools_list(rf, reg, bearer=token.plaintext_token)
         names = {t["name"] for t in tools}
-        assert names == {"users.list", "users.create"}
+        # The active connection's allowed_tools applies; inactive sibling ignored.
+        assert names == {"users.list"}
 
     def test_oauth_auth_filters_list(
         self, rf: RequestFactory, settings: Any
@@ -405,7 +444,8 @@ class TestPerAgentToolsList:
             allowed_tools=["workouts.list"],
         )
         reg = _isolated_registry("users.list", "workouts.list")
-        tools = self._call_tools_list(rf, reg, bearer=access_token.token)
+        # SEC-1: send the raw plaintext_token; storage now holds the HMAC digest.
+        tools = self._call_tools_list(rf, reg, bearer=access_token.plaintext_token)
         names = {t["name"] for t in tools}
         assert names == {"workouts.list"}
 
@@ -484,6 +524,32 @@ class TestPerAgentToolsCall:
         reg = _isolated_registry("users.list", "users.create")
         data = self._call_tool(rf, reg, "users.create", bearer=token.plaintext_token)
         assert data["result"]["isError"] is False
+
+    def test_inactive_only_connection_fails_closed_on_call(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        SEC-5: tools/call returns isError=True when every linked AgentConnection is inactive.
+
+        Mirrors the tools/list fail-closed behaviour at the call layer:
+        deactivating the agent must stop the credential from invoking
+        tools, not just hide them in the listing.
+        """
+        _use_token_auth(settings)
+        token = FrieseMcpToken.objects.create(name="agent-token")
+        AgentConnection.objects.create(
+            name="disabled",
+            token=token,
+            is_active=False,
+            allowed_tools=["users.list"],
+        )
+        reg = _isolated_registry("users.list", "users.create")
+        # Even calling a tool the inactive connection would have allowed
+        # must fail closed.
+        data = self._call_tool(rf, reg, "users.list", bearer=token.plaintext_token)
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert "inactive" in content["error"].lower()
 
 
 # ---------------------------------------------------------------------------

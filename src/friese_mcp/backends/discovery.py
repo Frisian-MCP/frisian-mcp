@@ -21,7 +21,8 @@ from typing import Any
 
 from django.contrib.auth.models import AnonymousUser
 from django.urls import URLPattern, URLResolver, get_resolver
-from rest_framework.permissions import BasePermission
+from rest_framework.relations import ManyRelatedField, RelatedField
+from rest_framework.serializers import ListSerializer
 from rest_framework.viewsets import ViewSetMixin
 
 try:
@@ -38,6 +39,13 @@ logger = logging.getLogger(__name__)
 # Matches URL path parameters in both regex (``(?P<pk>[^/.]+)``) and
 # path-converter (``<pk>`` / ``<int:pk>``) syntax.
 _PARAM_RE = re.compile(r"\(\?P<[^>]+>[^)]+\)|<[^>]+>")
+
+# Regex anchors that appear in raw Django URL pattern strings (``re_path``
+# regexes such as ``^devices/$``).  PKG-23: stripped from ``url_path`` before
+# the value is stored on a :class:`ToolDefinition` so downstream consumers
+# can do prefix / equality / display logic without tripping over regex
+# syntax (``api/dcim/^devices/$`` → ``api/dcim/devices/``).
+_REGEX_ANCHOR_RE = re.compile(r"[\^\$]")
 
 # Map DRF field class names to JSON Schema primitive types.
 _FIELD_TO_JSON_TYPE: dict[str, str] = {
@@ -63,6 +71,33 @@ _FIELD_TO_JSON_TYPE: dict[str, str] = {
     "ListField": "array",
     "DictField": "object",
     "JSONField": "object",
+}
+
+# Object form for FK / related-field references.  Host serializers
+# (DRF's PrimaryKeyRelatedField, SlugRelatedField, custom natural-key/PK
+# hybrids that accept either form, etc.) accept several shapes — id, pk,
+# slug, or natural-key-name — depending on the field configuration.  The
+# dispatcher schema accepts any of them as additional properties so the
+# host serializer makes the final decision.
+_FK_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "pk": {"type": "string"},
+        "slug": {"type": "string"},
+        "name": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+# A single FK reference accepts either a bare string (UUID, slug, or natural
+# key) OR an object form (see above).  Used as the schema for single
+# RelatedField writes and as the items schema for ManyRelatedField arrays.
+_FK_ITEM_SCHEMA: dict[str, Any] = {
+    "oneOf": [
+        {"type": "string"},
+        _FK_OBJECT_SCHEMA,
+    ]
 }
 
 # Actions that accept a detail identifier (pk / id) as the primary argument.
@@ -244,6 +279,14 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             return
 
         actions: dict[str, str] = getattr(view_func, "actions", {})
+        # The full URL path is needed (a) to derive the resource name when
+        # no basename is set, and (b) for PKG-22 collision-resolution: the
+        # merge step prefers tools whose URL path contains '/api/' so an
+        # API ViewSet wins over a UI ViewSet that happens to share the
+        # same model object name.  PKG-23: regex anchors (``^`` and ``$``)
+        # from ``re_path``-style patterns are stripped so the stored value
+        # is a clean path string suitable for prefix / equality / display.
+        full_path = _REGEX_ANCHOR_RE.sub("", prefix + str(pattern.pattern))
         # Prefer the router-assigned basename (set in initkwargs by DRF's DefaultRouter /
         # SimpleRouter) — it is always the correct resource name regardless of URL shape.
         # Fall back to path-based derivation for hand-written URL confs without a router.
@@ -251,7 +294,6 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         if basename:
             resource = str(basename).replace("-", "_")
         else:
-            full_path = prefix + str(pattern.pattern)
             resource = _resource_from_path(full_path)
             logger.warning(
                 "friese_mcp: basename not set for %s; falling back to path-derived resource %r. "
@@ -284,9 +326,6 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                 continue
 
             seen.add((cls, action_name))
-            perm_classes: tuple[type[BasePermission], ...] = tuple(
-                getattr(cls, "permission_classes", [])
-            )
             _write_http = {"post", "put", "patch", "delete"}
             permission_tier = "read_write" if http_method in _write_http else "read"
 
@@ -295,11 +334,12 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     name=f"{resource}.{action_name}",
                     description=_action_description(cls, action_name, resource),
                     input_schema=self.get_input_schema(cls, action_name),
-                    permission_classes=perm_classes,
+                    permission_classes=(),
                     source="auto",
                     view_class=cls,
                     action=action_name,
                     permission_tier=permission_tier,
+                    url_path=full_path,
                 )
             )
             logger.debug("friese_mcp discovered tool %s.%s", resource, action_name)
@@ -519,8 +559,8 @@ def _filterset_properties(view_class: type) -> dict[str, Any]:
     if filterset_class is not None:
         try:
             # base_filters is the standard attribute (declared + auto-generated from Meta.fields).
-            # declared_filters is the fallback for FilterSet subclasses that only populate
-            # explicit declarations without auto-generating from Meta (e.g. Nautobot's FilterSet).
+            # declared_filters is the fallback for custom FilterSet subclasses that only populate
+            # explicit declarations without auto-generating from Meta.
             filters_dict: dict[str, Any] = (
                 getattr(filterset_class, "base_filters", None)
                 or getattr(filterset_class, "declared_filters", None)
@@ -641,6 +681,48 @@ def _action_description(view_class: type, action: str, resource: str | None = No
     return action_labels.get(action, f"Invoke {view_class.__name__}.{action}")
 
 
+def _field_to_schema(field: Any) -> dict[str, Any]:
+    """
+    Map a DRF :class:`~rest_framework.fields.Field` to a JSON Schema fragment.
+
+    Handles four cases that the simple class-name table cannot:
+
+    * :class:`~rest_framework.relations.ManyRelatedField` (M2M) — emits
+      ``{"type": "array", "items": _FK_ITEM_SCHEMA}`` so callers can submit
+      arrays of bare keys or dict references.
+    * :class:`~rest_framework.relations.RelatedField` (FK, including
+      ``PrimaryKeyRelatedField``, ``SlugRelatedField``, ``HyperlinkedRelatedField``)
+      — emits :data:`_FK_ITEM_SCHEMA` so either bare-string or dict form
+      passes the dispatcher.
+    * :class:`~rest_framework.serializers.ListSerializer` (write-many nested
+      serializers) — emits ``{"type": "array"}`` with a permissive object
+      item schema.
+    * Tag-style M2M fields (``django-taggit-serializer``'s
+      ``TagListSerializerField`` / ``TagSerializerField`` and similar custom
+      fields) detected by class-name to avoid an optional dependency import.
+
+    Falls back to :data:`_FIELD_TO_JSON_TYPE` lookup keyed on the class name
+    for plain scalar fields.
+    """
+    if isinstance(field, ManyRelatedField):
+        return {"type": "array", "items": dict(_FK_ITEM_SCHEMA)}
+    if isinstance(field, RelatedField):
+        return dict(_FK_ITEM_SCHEMA)
+    if isinstance(field, ListSerializer):
+        return {"type": "array", "items": {"type": "object"}}
+
+    field_class_name = type(field).__name__
+    # Tag-style M2M fields (django-taggit-serializer's TagListSerializerField
+    # and similar host-app subclasses) wrap a list of tag-name strings.
+    # Class-name match keeps taggit an optional dependency.
+    if "Tag" in field_class_name and field_class_name.endswith(
+        ("SerializerField", "ListSerializerField")
+    ):
+        return {"type": "array", "items": {"type": "string"}}
+
+    return {"type": _FIELD_TO_JSON_TYPE.get(field_class_name, "string")}
+
+
 def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
     """Convert a DRF serializer class to a JSON Schema properties dict."""
     try:
@@ -654,9 +736,7 @@ def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
     for field_name, field in serializer.fields.items():
         if getattr(field, "read_only", False):
             continue
-        field_type_name = type(field).__name__
-        json_type = _FIELD_TO_JSON_TYPE.get(field_type_name, "string")
-        prop: dict[str, Any] = {"type": json_type}
+        prop: dict[str, Any] = _field_to_schema(field)
         help_text = getattr(field, "help_text", None)
         if help_text:
             prop["description"] = str(help_text)
