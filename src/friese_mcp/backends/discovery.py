@@ -21,6 +21,8 @@ from typing import Any
 
 from django.contrib.auth.models import AnonymousUser
 from django.urls import URLPattern, URLResolver, get_resolver
+from rest_framework.relations import ManyRelatedField, RelatedField
+from rest_framework.serializers import ListSerializer
 from rest_framework.viewsets import ViewSetMixin
 
 try:
@@ -62,6 +64,32 @@ _FIELD_TO_JSON_TYPE: dict[str, str] = {
     "ListField": "array",
     "DictField": "object",
     "JSONField": "object",
+}
+
+# Object form for FK / related-field references.  Host serializers
+# (Nautobot's NaturalKeyOrPK, DRF's PrimaryKeyRelatedField, SlugRelatedField,
+# etc.) accept several shapes — id, pk, slug, or natural-key-name — depending
+# on the field configuration.  The dispatcher schema accepts any of them as
+# additional properties so the host serializer makes the final decision.
+_FK_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "pk": {"type": "string"},
+        "slug": {"type": "string"},
+        "name": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+# A single FK reference accepts either a bare string (UUID, slug, or natural
+# key) OR an object form (see above).  Used as the schema for single
+# RelatedField writes and as the items schema for ManyRelatedField arrays.
+_FK_ITEM_SCHEMA: dict[str, Any] = {
+    "oneOf": [
+        {"type": "string"},
+        _FK_OBJECT_SCHEMA,
+    ]
 }
 
 # Actions that accept a detail identifier (pk / id) as the primary argument.
@@ -637,6 +665,48 @@ def _action_description(view_class: type, action: str, resource: str | None = No
     return action_labels.get(action, f"Invoke {view_class.__name__}.{action}")
 
 
+def _field_to_schema(field: Any) -> dict[str, Any]:
+    """
+    Map a DRF :class:`~rest_framework.fields.Field` to a JSON Schema fragment.
+
+    Handles four cases that the simple class-name table cannot:
+
+    * :class:`~rest_framework.relations.ManyRelatedField` (M2M) — emits
+      ``{"type": "array", "items": _FK_ITEM_SCHEMA}`` so callers can submit
+      arrays of bare keys or dict references.
+    * :class:`~rest_framework.relations.RelatedField` (FK, including
+      ``PrimaryKeyRelatedField``, ``SlugRelatedField``, ``HyperlinkedRelatedField``)
+      — emits :data:`_FK_ITEM_SCHEMA` so either bare-string or dict form
+      passes the dispatcher.
+    * :class:`~rest_framework.serializers.ListSerializer` (write-many nested
+      serializers) — emits ``{"type": "array"}`` with a permissive object
+      item schema.
+    * Tag-style M2M fields (``django-taggit-serializer``'s
+      ``TagListSerializerField`` / ``TagSerializerField`` and similar custom
+      fields) detected by class-name to avoid an optional dependency import.
+
+    Falls back to :data:`_FIELD_TO_JSON_TYPE` lookup keyed on the class name
+    for plain scalar fields.
+    """
+    if isinstance(field, ManyRelatedField):
+        return {"type": "array", "items": dict(_FK_ITEM_SCHEMA)}
+    if isinstance(field, RelatedField):
+        return dict(_FK_ITEM_SCHEMA)
+    if isinstance(field, ListSerializer):
+        return {"type": "array", "items": {"type": "object"}}
+
+    field_class_name = type(field).__name__
+    # django-taggit-serializer's TagListSerializerField (and the common
+    # nautobot.extras.api.fields.TagSerializerField) wrap a list of tag
+    # name strings.  Class-name match keeps taggit an optional dependency.
+    if "Tag" in field_class_name and field_class_name.endswith(
+        ("SerializerField", "ListSerializerField")
+    ):
+        return {"type": "array", "items": {"type": "string"}}
+
+    return {"type": _FIELD_TO_JSON_TYPE.get(field_class_name, "string")}
+
+
 def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
     """Convert a DRF serializer class to a JSON Schema properties dict."""
     try:
@@ -650,9 +720,7 @@ def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
     for field_name, field in serializer.fields.items():
         if getattr(field, "read_only", False):
             continue
-        field_type_name = type(field).__name__
-        json_type = _FIELD_TO_JSON_TYPE.get(field_type_name, "string")
-        prop: dict[str, Any] = {"type": json_type}
+        prop: dict[str, Any] = _field_to_schema(field)
         help_text = getattr(field, "help_text", None)
         if help_text:
             prop["description"] = str(help_text)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 from collections.abc import Callable
@@ -13,32 +14,124 @@ import jsonschema.exceptions
 from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.http import HttpRequest
+from django.utils.module_loading import import_string
 from rest_framework.permissions import BasePermission
 
+logger = logging.getLogger(__name__)
+
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
+
+#: Recognised role-keys for ``FRIESE_MCP_TOKEN_TIER_MAP`` lookup.  Probed in
+#: this order against ``request.user`` attributes — the first match wins.
+_TOKEN_TIER_MAP_ROLE_PROBES: tuple[tuple[str, str], ...] = (
+    ("superuser", "is_superuser"),
+    ("staff", "is_staff"),
+)
+
+
+def _resolve_tier_hook() -> Callable[[Any], str | None] | None:
+    """
+    Resolve ``settings.FRIESE_MCP_RESOLVE_TIER`` to a callable.
+
+    Accepts either an already-callable object or a dotted import path.  Returns
+    ``None`` when the setting is absent or the path cannot be imported (the
+    failure is logged at ERROR level so misconfigured deployments are visible
+    without raising at request time).
+    """
+    raw = getattr(settings, "FRIESE_MCP_RESOLVE_TIER", None)
+    if raw is None:
+        return None
+    if callable(raw):
+        return raw  # type: ignore[no-any-return]
+    if isinstance(raw, str):
+        try:
+            return import_string(raw)  # type: ignore[no-any-return]
+        except (ImportError, AttributeError):
+            logger.exception(
+                "FRIESE_MCP_RESOLVE_TIER %r could not be imported; ignoring", raw
+            )
+            return None
+    logger.error(
+        "FRIESE_MCP_RESOLVE_TIER must be a callable or dotted-path string, got %r", type(raw)
+    )
+    return None
+
+
+def _resolve_tier_from_role_map(request: Any) -> str | None:
+    """
+    Map a request's user role to a tier via ``FRIESE_MCP_TOKEN_TIER_MAP``.
+
+    The static map keys ``superuser``, ``staff``, and ``default`` are matched
+    against ``request.user`` attributes (``is_superuser``, ``is_staff``).  The
+    ``default`` entry applies to any authenticated user that did not match a
+    higher-privilege role.  Unauthenticated callers do NOT receive ``default``
+    — they continue to ``FRIESE_MCP_UNAUTHENTICATED_TIER`` so the existing
+    anonymous-rejection contract is preserved.
+
+    Returns ``None`` when the setting is absent or no entry matches.
+    """
+    role_map: dict[str, str] | None = getattr(settings, "FRIESE_MCP_TOKEN_TIER_MAP", None)
+    if not role_map:
+        return None
+    user = getattr(request, "user", None)
+    if user is None:
+        return None
+    for role_key, user_attr in _TOKEN_TIER_MAP_ROLE_PROBES:
+        if getattr(user, user_attr, False) and role_key in role_map:
+            return str(role_map[role_key])
+    if "default" in role_map and getattr(user, "is_authenticated", False):
+        return str(role_map["default"])
+    return None
 
 
 def _resolve_request_tier(request: Any) -> str:
     """
-    Return the effective permission tier for *request*.
+    Return the effective MCP permission tier for *request*.
 
-    Mirrors :func:`friese_mcp.views._get_token_permission` and
-    :func:`friese_mcp.backends.dispatcher._resolve_request_tier`:
+    Resolution order — first non-``None`` result wins:
 
-    * ``request.auth is None``                          → ``FRIESE_MCP_UNAUTHENTICATED_TIER``
-      (default ``"read"``)
-    * ``request.auth`` without a ``.permission`` attr   → ``"read"`` (most conservative;
-      unknown auth backends never silently expose higher tiers)
-    * ``request.auth.permission`` set                   → that value
+    1. ``settings.FRIESE_MCP_RESOLVE_TIER`` (callable or dotted path).  Called
+       with *request*.  Returning ``None`` falls through.  Exceptions are
+       logged and treated as a fall-through so a broken hook cannot break the
+       gateway.
+    2. ``request.auth.permission`` (the historical convention; populated by
+       :class:`~friese_mcp.contrib.tokens.authentication.FrieseMcpApiKeyAuthentication`
+       and OAuth tokens).
+    3. ``settings.FRIESE_MCP_TOKEN_TIER_MAP`` static role map keyed by
+       ``superuser`` / ``staff`` / ``default`` — see
+       :func:`_resolve_tier_from_role_map`.
+    4. ``settings.FRIESE_MCP_UNAUTHENTICATED_TIER`` (default ``"read"``) when
+       ``request.auth is None``; otherwise ``"read"`` (most conservative — an
+       authenticated request with an unknown auth backend never silently
+       receives a higher tier).
 
     Defined at module level so :class:`ToolRegistry` can enforce tier at
     dispatch time without importing :mod:`friese_mcp.views` (avoiding a
     circular import).
     """
+    hook = _resolve_tier_hook()
+    if hook is not None:
+        try:
+            tier = hook(request)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("FRIESE_MCP_RESOLVE_TIER hook raised; falling through")
+            tier = None
+        if tier is not None:
+            return str(tier)
+
     auth_obj = getattr(request, "auth", None)
+    if auth_obj is not None:
+        explicit = getattr(auth_obj, "permission", None)
+        if explicit is not None:
+            return str(explicit)
+
+    role_tier = _resolve_tier_from_role_map(request)
+    if role_tier is not None:
+        return role_tier
+
     if auth_obj is None:
         return str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
-    return str(getattr(auth_obj, "permission", "read"))
+    return "read"
 
 
 def _camel_to_snake(name: str) -> str:

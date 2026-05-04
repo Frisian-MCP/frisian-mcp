@@ -82,16 +82,18 @@ def _get_token_permission(request: Any) -> str:
     """
     Return the effective permission tier for this request.
 
-    - Unauthenticated (request.auth is None): returns FRIESE_MCP_UNAUTHENTICATED_TIER
-      setting (default ``'read'``).
-    - Authenticated without a .permission attr: returns ``'read'`` (most
-      conservative) so that unknown auth backends don't silently expose all tiers.
-    - Authenticated with .permission: returns that value.
+    Delegates to :func:`friese_mcp.registry._resolve_request_tier` so that the
+    full resolution chain (``FRIESE_MCP_RESOLVE_TIER`` callable hook,
+    ``request.auth.permission``, ``FRIESE_MCP_TOKEN_TIER_MAP`` role map, and
+    fallback) is applied in one canonical place.  Retained as a thin shim for
+    backwards compatibility with code (and tests) that imports
+    ``views._get_token_permission`` directly.
     """
-    auth_obj = getattr(request, "auth", None)
-    if auth_obj is None:
-        return str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
-    return str(getattr(auth_obj, "permission", "read"))
+    from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
+        _resolve_request_tier,
+    )
+
+    return _resolve_request_tier(request)
 
 
 def invalidate_tools_list_cache() -> None:

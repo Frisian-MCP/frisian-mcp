@@ -9,7 +9,6 @@ from typing import Any
 
 import jsonschema
 import jsonschema.exceptions
-from django.conf import settings
 from django.http import HttpRequest
 
 from friese_mcp.registry import ToolInputError
@@ -132,19 +131,21 @@ def _resolve_request_tier(request: HttpRequest) -> str:
     """
     Return the effective permission tier for *request*.
 
-    Mirrors :func:`friese_mcp.views._get_token_permission`:
-
-    * ``request.auth is None`` → ``FRIESE_MCP_UNAUTHENTICATED_TIER``
-      (default ``"read"``).
-    * ``request.auth`` without a ``.permission`` attribute → ``"read"``
-      (most conservative; unknown auth backends never silently expose
-      higher tiers).
-    * ``request.auth.permission`` set → that value.
+    Delegates to :func:`friese_mcp.registry._resolve_request_tier` so the full
+    resolution chain (``FRIESE_MCP_RESOLVE_TIER`` callable, token attribute,
+    ``FRIESE_MCP_TOKEN_TIER_MAP`` role map, fallback) is applied in one place.
+    Retained as a thin module-local shim so callers in this module need not
+    take a cross-module dependency.
     """
-    auth_obj = getattr(request, "auth", None)
-    if auth_obj is None:
-        return str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
-    return str(getattr(auth_obj, "permission", "read"))
+    # Local import: registry imports backends.dispatcher lazily inside
+    # ToolRegistry.list_tools() to avoid a hard cycle, so reaching the other
+    # direction at module load would create one.  Resolving here at call time
+    # is cheap and keeps both modules importable in any order.
+    from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
+        _resolve_request_tier as _registry_resolve,
+    )
+
+    return _registry_resolve(request)
 
 
 def _make_dispatcher_invoke(

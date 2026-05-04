@@ -27,7 +27,6 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from django.conf import settings
 from django.http import HttpRequest
 
 if TYPE_CHECKING:
@@ -42,13 +41,18 @@ def _resolve_request_tier(request: HttpRequest) -> str:
     """
     Return the effective permission tier for *request*.
 
-    Mirrors :func:`friese_mcp.backends.dispatcher._resolve_request_tier` so
-    group dispatchers apply the same caller-tier rules as ``@mcp_dispatcher``.
+    Delegates to :func:`friese_mcp.registry._resolve_request_tier` so group
+    dispatchers apply the same caller-tier rules — including the
+    ``FRIESE_MCP_RESOLVE_TIER`` callable hook and ``FRIESE_MCP_TOKEN_TIER_MAP``
+    role map — as ``@mcp_dispatcher`` and the registry itself.
     """
-    auth_obj = getattr(request, "auth", None)
-    if auth_obj is None:
-        return str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
-    return str(getattr(auth_obj, "permission", "read"))
+    # Local import: avoids a hard module-load cycle with registry, which
+    # imports backends.* lazily.  Cheap at call time.
+    from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
+        _resolve_request_tier as _registry_resolve,
+    )
+
+    return _registry_resolve(request)
 
 
 def build_group_input_schema() -> dict[str, Any]:
