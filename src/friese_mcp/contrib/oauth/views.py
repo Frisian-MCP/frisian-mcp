@@ -281,6 +281,7 @@ class TokenView(View):
                 client_id=client_id,
                 name=f"pkce-{client_id[:8]}",
                 permission=default_permission,
+                redirect_uris=[redirect_uri],
             )
             logger.info("oauth_pkce_client_auto_registered", extra={"client_id": client_id})
 
@@ -722,6 +723,15 @@ class AuthorizeView(View):
             return "invalid_client"
         registered: list[str] = list(client.redirect_uris or [])
         if redirect_uri not in registered:
+            # Heal clients auto-registered before the redirect_uris fix (empty list).
+            if getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False) and not registered:
+                client.redirect_uris = [redirect_uri]
+                client.save(update_fields=["redirect_uris"])
+                logger.info(
+                    "oauth_pkce_client_redirect_uri_healed",
+                    extra={"client_id": client_id, "redirect_uri": redirect_uri},
+                )
+                return ""
             return "invalid_redirect_uri"
         return ""
 
