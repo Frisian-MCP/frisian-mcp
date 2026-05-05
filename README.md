@@ -62,9 +62,16 @@ This is the pattern for agent-facing APIs where tool count matters and progressi
 | **`@mcp_resource`** | Expose server-side content via `resources/list` / `resources/read` |
 | **Filter introspection** | `SearchFilter`, `OrderingFilter`, `DjangoFilterBackend` → schema properties on `list` |
 | **Allowlist / denylist** | `FRIESE_MCP_TOOL_ALLOWLIST` / `FRIESE_MCP_TOOL_DENYLIST` for surgical surface control |
-| **OAuth 2.0** | `contrib.oauth` — authorization code (PKCE) + client credentials; permission-tier tool filtering |
+| **Dispatch groups** | `FRIESE_MCP_DISPATCH_GROUPS` — bundle N tools into 1 dispatcher; `action="help"` for discovery |
+| **Tool name separator** | `FRIESE_MCP_TOOL_NAME_SEPARATOR` (default `"_"`) — configures `resource_action` naming |
+| **Tool hints** | `FRIESE_MCP_TOOL_HINTS` — inject prerequisite/setup hints into dispatcher help responses |
+| **Deferred discovery** | URL scan fires on first request, not at startup — captures late-loading plugin ViewSets |
+| **OAuth 2.0** | `contrib.oauth` — authorization code (PKCE) + client credentials; HMAC-hashed tokens; redirect URI allowlist |
 | **Static tokens** | `contrib.tokens` — HMAC-hashed Bearer tokens for internal agents |
-| **Per-agent scoping** | `contrib.agents` — per-credential tool allowlists for multi-agent deployments |
+| **Per-agent scoping** | `contrib.agents` — per-credential tool allowlists; fail-closed on inactive connections |
+| **Token tier map** | `FRIESE_MCP_TOKEN_TIER_MAP` / `FRIESE_MCP_RESOLVE_TIER` — map host-user roles to permission tiers |
+| **Host-app scoping** | `SyncInvocation` calls `viewset.initial()` — host RBAC, queryset filtering, and throttles enforced automatically |
+| **Security checks** | `friese_mcp.W001` system check warns on unauthenticated production gateway |
 | **Tool middleware** | `FRIESE_MCP_TOOL_MIDDLEWARE` — audit logging, rate limiting, heartbeats |
 | **Rate limiting** | `RateLimitMiddleware` — built-in sliding-window, no Redis required |
 | **Pluggable backends** | Custom discovery and invocation backends via dotted-path settings |
@@ -198,6 +205,11 @@ MCP Client (Claude, Cursor, GPT, …)
   - [contrib.oauth — OAuth 2.0](#contriboauth--oauth-20)
   - [contrib.agents — per-agent tool allowlists](#contribagents--per-agent-tool-allowlists)
 - [Auto-discovery](#auto-discovery)
+  - [Deferred discovery](#deferred-discovery)
+  - [API/UI ViewSet collision resolution](#apiui-viewset-collision-resolution)
+  - [FK argument normalization](#fk-argument-normalization)
+- [Group dispatchers](#group-dispatchers)
+  - [Single-entry-point dispatcher pattern](#single-entry-point-dispatcher-pattern)
 - [Decorators](#decorators)
   - [@mcp_tool](#mcp_tool)
   - [@mcp_ignore](#mcp_ignore)
@@ -211,8 +223,17 @@ MCP Client (Claude, Cursor, GPT, …)
   - [Session ID header](#session-id-header)
   - [tools/list cursor pagination](#toolslist-cursor-pagination)
 - [Pluggable backend architecture](#pluggable-backend-architecture)
+- [Security](#security)
+  - [System check friese_mcp.W001](#system-check-friese_mcpw001)
+  - [AgentConnection fail-closed](#agentconnection-fail-closed)
+  - [OAuth OAuthAccessToken storage](#oauth-oauthaccesstoken-storage)
+  - [OAuth redirect URI allowlist](#oauth-redirect-uri-allowlist)
+  - [Continuation token binding](#continuation-token-binding)
 - [Known limitations and design decisions](#known-limitations-and-design-decisions)
+- [Diagnostics](#diagnostics)
+  - [mcp_doctor management command](#mcp_doctor-management-command)
 - [Troubleshooting](#troubleshooting)
+- [Upgrading](#upgrading)
 
 ---
 
@@ -447,13 +468,13 @@ FRIESE_MCP_SERVER_NAME = "my-product-mcp"
 
 **Type:** `list[str]` | **Default:** absent (all tools visible)
 
-When present, only the tool names in this list are registered at startup. All other auto-discovered tools are dropped before reaching the registry. Names are exact matches (e.g. `"users.destroy"`).
+When present, only the tool names in this list are registered at startup. All other auto-discovered tools are dropped before reaching the registry. Names are exact matches (e.g. `"users_destroy"`).
 
 ```python
 FRIESE_MCP_TOOL_ALLOWLIST = [
-    "users.list",
-    "users.retrieve",
-    "workouts.create",
+    "users_list",
+    "users_retrieve",
+    "orders_create",
 ]
 ```
 
@@ -467,10 +488,62 @@ Tool names in this list are dropped at startup. Applied after the allowlist, so 
 
 ```python
 FRIESE_MCP_TOOL_DENYLIST = [
-    "users.destroy",
-    "admin.delete_all",
+    "users_destroy",
+    "admin_delete_all",
 ]
 ```
+
+### `FRIESE_MCP_DISPATCH_GROUPS`
+
+**Type:** `dict[str, list[str]]` | **Default:** absent (no grouping)
+
+Bundles groups of auto-discovered tools under a single dispatcher tool to reduce context-window consumption for AI agents.
+
+Each key becomes the name of one MCP tool in `tools/list`. Each value is a list of resource name prefixes to bundle. All flat tools whose names start with `{prefix}{separator}` are hidden from `tools/list` and routed through the group dispatcher instead.
+
+```python
+FRIESE_MCP_DISPATCH_GROUPS = {
+    "devices":  ["device", "rack", "interface", "cable"],
+    "network":  ["ipaddress", "prefix", "vlan", "vrf"],
+    "identity": ["user", "group", "token"],
+}
+```
+
+Callers use `action="help"` on a group tool to discover its bundled resources, then call `{resource, action, params}` to invoke any of them. See [Group dispatchers](#group-dispatchers) for full details.
+
+**Startup log:** `[friese-mcp] N dispatch group(s) bundling M tools`
+
+### `FRIESE_MCP_TOOL_NAME_SEPARATOR`
+
+**Type:** `str` | **Default:** `"_"` (underscore)
+
+The separator character inserted between the resource name and action name when constructing tool names during auto-discovery.
+
+```python
+# Default — produces names like users_list, orders_retrieve
+FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
+```
+
+The default underscore produces tool names that are valid identifiers in all MCP clients. Change this only if you have a specific client requirement or are migrating from an earlier configuration that used a different separator.
+
+> **DISPATCH_GROUPS interaction:** the same separator is used when matching resource prefixes in `FRIESE_MCP_DISPATCH_GROUPS`. Both settings must agree on the separator for group matching to work correctly.
+
+### `FRIESE_MCP_TOOL_HINTS`
+
+**Type:** `dict[str, str]` | **Default:** absent
+
+Adds operator-defined hint strings to group dispatcher `action="help"` responses. Keys are tool names (e.g. `"device_create"`); values are plain-text strings shown to callers alongside the action listing.
+
+```python
+FRIESE_MCP_TOOL_HINTS = {
+    "device_create": "Requires a role and a device type to exist first.",
+    "prefix_create": "Requires a namespace. Create one with network_create first.",
+}
+```
+
+Use this to document prerequisite objects, field constraints, or setup ordering that the auto-generated schema cannot express.
+
+**Startup log:** `[friese-mcp] N tool hint(s) configured (surfaced via action='help')`
 
 ### `FRIESE_MCP_NORMALIZE_INPUT_CASE`
 
@@ -585,6 +658,47 @@ Set to `None` to disable tier filtering for unauthenticated requests entirely (e
 
 > **Security note:** The default `"read"` prevents unauthenticated callers from enumerating admin-tagged tool names. Even with `FRIESE_MCP_UNAUTHENTICATED_TIER = "admin"`, unauthenticated callers can only *see* tools in `tools/list` — `tools/call` still enforces `permission_classes` on each tool. Tier filtering is a visibility control, not an execution guard.
 
+### `FRIESE_MCP_TOKEN_TIER_MAP`
+
+**Type:** `dict[str, str]` | **Default:** absent
+
+Maps host-user role attributes to tier strings. Useful when your auth backend authenticates against the host application's user model (setting `request.user.is_superuser` / `request.user.is_staff`) but does not populate `request.auth.permission` (i.e. not using `contrib.tokens` or `contrib.oauth`).
+
+Recognised keys, checked in priority order: `"superuser"`, `"staff"`, `"default"`. `"default"` matches any authenticated user that did not match a higher-privilege key. Unauthenticated callers do **not** receive `"default"` — they always fall through to `FRIESE_MCP_UNAUTHENTICATED_TIER`.
+
+```python
+FRIESE_MCP_TOKEN_TIER_MAP = {
+    "superuser": "admin",      # superusers see all tools
+    "staff":     "read_write", # staff see read + write tools
+    "default":   "read",       # regular authenticated users see read tools only
+}
+```
+
+This setting is step 3 in the tier resolution chain. See [Permission tiers — tools/list filtering](#permission-tiers--toolslist-filtering) for the full resolution order.
+
+### `FRIESE_MCP_RESOLVE_TIER`
+
+**Type:** `callable | str` (callable or dotted import path) | **Default:** absent
+
+A callable with signature `(request) -> str | None` that returns the effective tier for a request. Returning `None` falls through to the next resolution step. Exceptions are logged at ERROR level and treated as `None` — a broken hook cannot crash the gateway.
+
+Accepts either a direct callable or a dotted import path:
+
+```python
+# Direct callable
+def my_tier_resolver(request):
+    if hasattr(request.auth, "custom_tier"):
+        return request.auth.custom_tier
+    return None
+
+FRIESE_MCP_RESOLVE_TIER = my_tier_resolver
+
+# Dotted import path (evaluated lazily at request time)
+FRIESE_MCP_RESOLVE_TIER = "myapp.mcp.resolve_tier"
+```
+
+This setting is step 1 in the tier resolution chain — it takes precedence over `request.auth.permission`, `FRIESE_MCP_TOKEN_TIER_MAP`, and `FRIESE_MCP_UNAUTHENTICATED_TIER`. Use it when the built-in resolution steps don't fit your auth model.
+
 ---
 
 ## Reverse proxy configuration
@@ -670,11 +784,12 @@ friese-mcp supports a three-tier permission model that controls which tools appe
 - `@mcp_action(write=True)` and `@mcp_heavy(write=True)` follow the same pattern
 - ViewSet auto-discovery: GET actions → `"read"`, POST/PUT/PATCH/DELETE → `"read_write"`
 
-**How tier is determined at request time:**
+**How tier is determined at request time** (resolution order — first non-`None` result wins):
 
-- Authenticated with `FrieseMcpToken` or `OAuthAccessToken`: tier is `token.permission`
-- Authenticated but token lacks a `.permission` attribute: conservative fallback to `"read"`
-- Unauthenticated (`request.auth is None`): `FRIESE_MCP_UNAUTHENTICATED_TIER` (default `"read"`)
+1. **`FRIESE_MCP_RESOLVE_TIER` hook** — a callable `(request) -> str | None`. `None` falls through. Exceptions are logged and fall through.
+2. **`request.auth.permission`** — populated automatically by `FrieseMcpToken`, `OAuthAccessToken`, and `FrieseMcpApiKeyAuthentication`. Wins here if present.
+3. **`FRIESE_MCP_TOKEN_TIER_MAP`** — static dict mapping `"superuser"` / `"staff"` / `"default"` to tier strings. Useful when `request.user.is_superuser` is set but `request.auth.permission` is not.
+4. **`FRIESE_MCP_UNAUTHENTICATED_TIER`** (default `"read"`) for unauthenticated requests; `"read"` (most conservative) for authenticated requests that matched nothing above.
 
 **Dispatcher tools are always visible:** `@mcp_dispatcher` tools always appear in `tools/list` regardless of their action tiers — they are navigation entry points. Permission enforcement for write/admin actions within a dispatcher happens at `tools/call` time (the dispatcher returns a permission error, not a `tools/list` absence).
 
@@ -1218,12 +1333,13 @@ class AuditLogViewSet(ReadOnlyModelViewSet):
 
 ### Tool naming
 
-Tool names follow the pattern `{resource}.{action}`, where:
+Tool names follow the pattern `{resource}{separator}{action}`, where:
 
 - **resource** — the last non-empty literal segment of the URL path, with hyphens converted to underscores and URL parameter placeholders (`<pk>`, `(?P<pk>...)`) stripped. Examples: `/api/v1/users/` → `users`, `/api/orders/<pk>/` → `orders`.
 - **action** — the DRF ViewSet action name: `list`, `retrieve`, `create`, `update`, `partial_update`, `destroy`, or any custom action name.
+- **separator** — controlled by `FRIESE_MCP_TOOL_NAME_SEPARATOR` (default `"_"`). The default produces names like `users_list`, `orders_retrieve`. MCP clients that enforce alphanumeric-plus-underscore naming work out of the box with this default.
 
-> **Note:** The resource name is derived from the URL path, not the ViewSet class name. A custom action at `/api/users/export/` produces the tool name `export.export` (last path segment), not `users.export`. Register such tools explicitly with `@mcp_tool` if you need a cleaner name.
+> **Note:** The resource name is derived from the URL path, not the ViewSet class name. A custom action at `/api/users/export/` produces the tool name `export_export` (last path segment), not `users_export`. Register such tools explicitly with `@mcp_tool` if you need a cleaner name.
 
 ### Input schema derivation
 
@@ -1296,6 +1412,169 @@ class ReportViewSet(ModelViewSet):
 This produces a `reports.summary` tool with optional `format` (string) and `limit` (integer) properties. Parameters without annotations fall back to type `string`.
 
 > **Tip:** For complex custom actions, use `@mcp_tool` to declare an explicit schema. Auto-derived schemas from signatures are a convenience for simple read-only actions.
+
+### Deferred discovery
+
+When `FRIESE_MCP_AUTODISCOVER = True`, the URL tree scan does **not** run at `AppConfig.ready()` time. Instead, friese-mcp installs a one-shot `request_started` signal handler. Discovery runs on the **first HTTP request** and never again.
+
+This matters for host applications that load plugins or extension apps after `friese_mcp` in `INSTALLED_APPS`. Those apps register their URL patterns inside their own `AppConfig.ready()` hooks, which run **after** friese-mcp's `ready()`. Scanning at `ready()` time would miss all late-registered ViewSets.
+
+No operator configuration is required. The deferred scan fires automatically before the first request is processed.
+
+### API/UI ViewSet collision resolution
+
+Large host applications often register both an API ViewSet (under `/api/`) and a UI ViewSet (form-based) for the same resource. Both share the same DRF resource basename and produce the same tool name.
+
+When two discovered `ToolDefinition` objects share a name, friese-mcp keeps the one whose URL path matches `(^|/)api/` — the canonical REST signal. If both or neither match the pattern, the first-seen entry is kept.
+
+This means load order does not affect which ViewSet is called for a given tool name. Operators do not need to configure anything.
+
+### FK argument normalization
+
+When calling `create`, `update`, or `partial_update` actions, friese-mcp normalizes FK field arguments before passing them to the host serializer:
+
+- **Bare non-UUID strings** for `PrimaryKeyRelatedField` (FK `oneOf` schema fields) are wrapped as `{"name": value}`. This lets callers pass human-readable names (e.g. `device_type="CSR1000v"`) for FK fields that the host serializer can resolve via a `NaturalKeyOrPK` or `WritableNestedSerializer` lookup.
+- **UUID strings** pass through unchanged.
+- **Dicts** pass through unchanged.
+- **`SlugRelatedField` values** (bare slugs) pass through unchanged — those fields expect the raw slug.
+- **M2M array fields**: the same normalization is applied element-by-element.
+
+This normalization is transparent — callers that already pass UUIDs or dicts are unaffected.
+
+---
+
+## Group dispatchers
+
+For host applications with a large number of ViewSets, auto-discovery can register hundreds or thousands of flat tools. Many MCP clients have context-window limits that make large tool lists impractical.
+
+`FRIESE_MCP_DISPATCH_GROUPS` bundles related flat tools under a single dispatcher tool. Instead of advertising every ViewSet action individually, the gateway advertises one tool per group. Callers interact with the group dispatcher using a `{resource, action, params}` argument structure and call `action="help"` to discover the bundled resources.
+
+### Setting up groups
+
+```python
+# settings.py
+FRIESE_MCP_DISPATCH_GROUPS = {
+    "devices":  ["device", "rack", "interface", "cable"],
+    "network":  ["ipaddress", "prefix", "vlan", "vrf"],
+    "identity": ["user", "group", "token"],
+}
+```
+
+Each key is the MCP tool name that will appear in `tools/list`. Each value is a list of resource name prefixes to bundle. A resource prefix matches any tool whose name starts with `{prefix}{separator}` (e.g. `device_list`, `device_create`).
+
+At startup:
+- Each group is registered as a single `@mcp_dispatcher` tool.
+- All matching flat tools are marked hidden and removed from `tools/list` (they remain callable by name for advanced clients and for the dispatcher's own routing).
+- Startup logs: `[friese-mcp] N dispatch group(s) bundling M tools`.
+
+### Calling a group dispatcher
+
+```json
+// Discover available resources in the group
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+  "name": "devices",
+  "arguments": {"resource": null, "action": "help"}
+}}
+
+// Response
+{
+  "result": {
+    "help": true,
+    "group": "devices",
+    "resources": {
+      "device":    ["list", "retrieve", "create", "update", "destroy"],
+      "rack":      ["list", "retrieve", "create"],
+      "interface": ["list", "retrieve", "create", "update", "partial_update", "destroy"]
+    }
+  }
+}
+```
+
+```json
+// List devices with a filter
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+  "name": "devices",
+  "arguments": {
+    "resource": "device",
+    "action":   "list",
+    "params":   {"status": "active", "limit": 10}
+  }
+}}
+```
+
+```json
+// Create a device
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+  "name": "devices",
+  "arguments": {
+    "resource": "device",
+    "action":   "create",
+    "params":   {"name": "router-01", "device_type": "ISR4321", "status": "planned"}
+  }
+}}
+```
+
+### `FRIESE_MCP_TOOL_HINTS`
+
+Adds hint strings to dispatcher help responses for specific tools. Useful for documenting prerequisite objects that must exist before a create operation can succeed.
+
+```python
+FRIESE_MCP_TOOL_HINTS = {
+    "device_create": "Requires a role (from the identity group) and a device type to exist first.",
+    "prefix_create": "Requires a namespace to exist. Create one with network.namespace_create.",
+}
+```
+
+Hints appear in the `action="help"` response under a top-level `"hints"` key, keyed by tool name. They are also shown in resource-scoped help (`action="help"`, `resource="device"`).
+
+### Single-entry-point dispatcher pattern
+
+For production deployments where context-window budget is the primary constraint, consider routing all operations through a **single dispatcher tool**. Instead of listing hundreds of resource-specific tools, the agent sees one entry point and uses `action="help"` for progressive disclosure.
+
+**Without the pattern** — a large DRF application with 200+ ViewSets fills most of the agent's context just with the tool manifest:
+
+```
+tools/list → 1,967 tools
+Token budget consumed by tool manifest: ~490,000 tokens
+Context window remaining for actual work: minimal
+```
+
+**With the pattern** — a single `api` dispatcher bundles everything:
+
+```python
+FRIESE_MCP_DISPATCH_GROUPS = {
+    "api": [
+        "device", "rack", "interface", "cable", "location",
+        "ipaddress", "prefix", "vlan", "vrf", "namespace",
+        "circuit", "tenant", "user", "tag", "role",
+        # ... all other resource prefixes
+    ],
+}
+```
+
+```
+tools/list → 1 tool ("api")
+Token budget consumed by tool manifest: ~3,250 tokens
+Context window available for reasoning and data: ~487,000 tokens more
+```
+
+The agent's discovery workflow becomes:
+
+```
+1. tools/list                          → see "api"
+2. api(action="help")                  → full resource/action catalogue
+3. api(resource="device", action="help") → device-specific actions + hints
+4. api(resource="device", action="list", params={status:"active"})
+5. api(resource="device", action="create", params={name:"router-01", ...})
+```
+
+**When to use this pattern:**
+- The host application has 50+ distinct resources
+- Agent clients have limited context windows
+- Write operations are common (not just browsing)
+- Operators want progressive disclosure — agents learn the surface area at request time rather than consuming it all upfront
+
+**Tradeoff:** the agent must make one extra round trip (the `help` call) before it knows which resources exist. For well-structured agents that call `help` once and cache the result, this is negligible. For one-shot queries against known resource names, flat tool access via `@mcp_dispatcher` or `@mcp_tool` may be faster.
 
 ---
 
@@ -1622,6 +1901,46 @@ from friese_mcp import mcp_resource
 
 The URI in the `resources/read` request is matched by exact lookup against registered `uri_template` values. If no handler matches, the gateway returns `-32601 METHOD_NOT_FOUND`.
 
+#### `ResourceRegistry.register_provider()` — dynamic resources
+
+For resources that change per-request (e.g. tenant-scoped document libraries, per-user data), use `register_provider()` instead of `@mcp_resource`. Providers are called on every `resources/list` and `resources/read` request, enabling live DB queries.
+
+```python
+from django.apps import AppConfig
+from friese_mcp import resource_registry
+
+class MyAppConfig(AppConfig):
+    name = "myapp"
+
+    def ready(self):
+        def list_documents(request):
+            # Called on every resources/list — result is merged with static registrations
+            docs = Document.objects.filter(tenant=request.user.tenant_id)
+            return [
+                {"uri": f"docs://{doc.pk}", "name": doc.title, "mimeType": "text/plain"}
+                for doc in docs
+            ]
+
+        def read_document(uri, request):
+            # Called on every resources/read — return None to pass to the next provider
+            pk = uri.split("://")[1]
+            try:
+                return Document.objects.get(pk=pk, tenant=request.user.tenant_id).body
+            except Document.DoesNotExist:
+                return None
+
+        resource_registry.register_provider(list_fn=list_documents, read_fn=read_document)
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `list_fn` | `Callable[[HttpRequest], list[dict]]` | Yes | Returns entries for `resources/list`. Each dict must contain at least `uri` and `name` keys. |
+| `read_fn` | `Callable[[str, HttpRequest], str \| None]` | No | Attempts to read a resource by URI. Return `None` to pass to the next registered provider. Providers are tried in registration order. |
+
+Multiple providers can be registered; their `list_fn` results are merged. `read_fn` calls are tried in registration order and the first non-`None` return wins.
+
 ---
 
 ## Tool call middleware
@@ -1702,6 +2021,49 @@ When the limit is exceeded, `RateLimitMiddleware` raises `PermissionError("Rate 
 }
 ```
 
+#### Pluggable rate-limit backend
+
+The default in-process counter is not shared across worker processes. For shared limits in multi-worker deployments, implement `AbstractRateLimitBackend` and point `FRIESE_MCP_RATE_LIMIT["backend"]` at it:
+
+```python
+from friese_mcp.contrib.middleware import AbstractRateLimitBackend
+import redis
+
+class RedisRateLimitBackend(AbstractRateLimitBackend):
+    def __init__(self):
+        self._redis = redis.Redis.from_url("redis://localhost:6379/0")
+
+    def allow_request(self, key: str, limit: int, window: int) -> bool:
+        pipe = self._redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window)
+        count, _ = pipe.execute()
+        return int(count) <= limit
+```
+
+```python
+FRIESE_MCP_RATE_LIMIT = {
+    "rate": "100/m",
+    "key": "user_id",
+    "backend": "myapp.mcp.RedisRateLimitBackend",
+}
+```
+
+**`AbstractRateLimitBackend` interface:**
+
+```python
+class AbstractRateLimitBackend(abc.ABC):
+    @abc.abstractmethod
+    def allow_request(self, key: str, limit: int, window: int) -> bool:
+        """
+        Increment the counter for key and return True if within limit.
+
+        key:    rate-limit bucket identifier
+        limit:  max requests per window
+        window: sliding window size in seconds
+        """
+```
+
 ---
 
 ## ToolRegistry API
@@ -1713,6 +2075,49 @@ from friese_mcp import tool_registry
 ```
 
 Instantiate `ToolRegistry()` directly only when an isolated registry is needed (e.g. in tests).
+
+### `friese_mcp.register()` — imperative registration
+
+The module-level `register()` function is the imperative counterpart to `@mcp_tool`. Use it when you need to register tools at a point where decorator-at-import-time isn't practical — for example, inside `AppConfig.ready()` or from a plugin discovery hook.
+
+```python
+from django.apps import AppConfig
+from django.http import HttpRequest
+import friese_mcp
+
+class MyAppConfig(AppConfig):
+    name = "myapp"
+
+    def ready(self):
+        def search_records(arguments: dict, request: HttpRequest) -> dict:
+            qs = Record.objects.filter(name__icontains=arguments["query"])
+            return {"results": list(qs.values("id", "name"))}
+
+        friese_mcp.register(
+            name="records_search",
+            description="Full-text search across records.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search term"}
+                },
+                "required": ["query"],
+            },
+            handler=search_records,
+        )
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | `str` | Yes | Unique MCP tool name. Overwrites any existing registration with the same name. |
+| `description` | `str` | Yes | Human-readable description shown in `tools/list`. |
+| `input_schema` | `dict` | Yes | JSON Schema (draft-07) for argument validation. |
+| `handler` | `Callable` | Yes | Invoked as `handler(arguments, request)`. |
+| `permission_classes` | `list[type[BasePermission]] \| None` | No | DRF permission classes. `None` or `[]` for unrestricted access. |
+
+The handler signature is the same as for `@mcp_tool`: `(arguments: dict, request: HttpRequest) -> Any`.
 
 ### `ToolRegistry.register(name, fn, description, input_schema, permission_classes=None)`
 
@@ -1764,9 +2169,19 @@ Validate, authorise, and invoke a registered tool. Thread-safe. Steps:
 **URL:** configured by the host app — default `POST /mcp/`
 **Protocol:** JSON-RPC 2.0 / MCP `2025-03-26` (Streamable HTTP) over HTTP POST
 **Content-Type:** `application/json`
-**CSRF:** exempt — `McpEndpointView` extends DRF `APIView`, which bypasses Django's CSRF middleware
+**CSRF:** exempt — `McpView` extends DRF `APIView`, which bypasses Django's CSRF middleware
 
 All requests and responses follow [JSON-RPC 2.0](https://www.jsonrpc.org/specification). The endpoint handles all MCP traffic through a single URL.
+
+> **View class rename:** The gateway view is now `friese_mcp.views.McpView`. `McpEndpointView` is retained as a backward-compatible alias and will continue to work — existing URL configurations that import `McpEndpointView` require no changes. New code should use `McpView`.
+>
+> ```python
+> # Preferred (new code)
+> from friese_mcp.views import McpView
+>
+> # Backward-compatible alias (existing code — no changes required)
+> from friese_mcp.views import McpEndpointView
+> ```
 
 ### Supported methods
 
@@ -1969,7 +2384,11 @@ Unknown tool names return a JSON-RPC `-32601 METHOD_NOT_FOUND` error with close-
 
 ### SSE support
 
-friese-mcp supports Server-Sent Events on the same `/mcp/` endpoint. Send `Accept: text/event-stream` and every JSON-RPC response is wrapped in a single SSE event:
+friese-mcp supports Server-Sent Events in two distinct modes, covering both the Streamable HTTP and legacy SSE transport profiles.
+
+#### POST + `Accept: text/event-stream` (response wrapping)
+
+Send `Accept: text/event-stream` on a POST request and every JSON-RPC response is wrapped in a single SSE event:
 
 ```
 POST /mcp/
@@ -1988,6 +2407,35 @@ Content-Type: application/json
 ```
 
 The stream is stateless — it closes after delivering the single response. Clients that do not send `Accept: text/event-stream` receive a normal `application/json` response and are unaffected by this change. HTTP 202 notifications are not wrapped in SSE (they return an empty body as before).
+
+#### GET — SSE keepalive channel
+
+`GET /mcp/` opens a persistent SSE channel that sends a keepalive comment every 15 seconds:
+
+```
+GET /mcp/
+
+→ HTTP/1.1 200 OK
+   Content-Type: text/event-stream
+   Cache-Control: no-cache
+   X-Accel-Buffering: no
+
+   : keepalive
+
+   : keepalive
+
+   (stream stays open)
+```
+
+This implements the server-initiated message channel from the MCP Streamable HTTP spec (`2025-03-26`). SSE-based MCP clients that require a long-lived GET channel for push notifications use this endpoint.
+
+**To disable the GET channel** (e.g. stateless multi-pod deployments where routing a long-lived SSE stream per client is impractical):
+
+```python
+FRIESE_MCP_SSE_CHANNEL = False
+```
+
+When disabled, `GET /mcp/` returns HTTP 405. Clients fall back to receiving all responses in the POST response body.
 
 ### Session ID header
 
@@ -2144,8 +2592,71 @@ Builds a synthetic DRF `Request` from the tool arguments, instantiates the ViewS
 
 - Works with any standard DRF ViewSet under a synchronous WSGI server (gunicorn, uWSGI).
 - The original request's `user` is forwarded to the synthetic inner request so host-app middleware state (JWT payload, tenant scope) remains accessible.
+- **Calls `viewset.initial(request, **view_kwargs)` before dispatching the action.** This runs the host application's full DRF lifecycle — `get_queryset()` filtering, authentication, permission checks, throttles, and any RBAC the host registers in `initial()`. Host-app data scoping is enforced automatically with no extra configuration.
 - Constructs the inner `HttpRequest` directly using `django.http.HttpRequest` and `io.BytesIO` — no `django.test` dependency in production code.
 - **Not suitable for async ViewSets.** Use a custom `BaseInvocationBackend` pointed at `FRIESE_MCP_INVOCATION_BACKEND` for async or Celery-delegated invocation.
+
+---
+
+## Security
+
+### System check `friese_mcp.W001`
+
+When `DEBUG = False` and `FRIESE_MCP_PERMISSION_CLASSES` is empty (or absent), friese-mcp emits a Django system check warning at startup:
+
+```
+WARNINGS:
+?: (friese_mcp.W001) FRIESE_MCP_PERMISSION_CLASSES is empty in a non-DEBUG environment.
+   HINT: Set FRIESE_MCP_PERMISSION_CLASSES to a list of DRF permission classes...
+```
+
+This fires under `manage.py check` and in CI, surfacing the misconfiguration before it ships to production.
+
+**To silence it**, either configure gateway-level permissions or explicitly acknowledge the open gateway:
+
+```python
+# Option A — configure gateway auth (recommended)
+FRIESE_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+
+# Option B — acknowledge intentionally open gateway (e.g. behind reverse-proxy auth)
+FRIESE_MCP_ALLOW_UNAUTHENTICATED = True
+```
+
+The check is registered under `Tags.security` so it appears in `manage.py check --tag security` output.
+
+### AgentConnection fail-closed
+
+When a credential is linked to one or more `AgentConnection` rows and **all** of them have `is_active = False`, the gateway now returns a 403 on `tools/list` and `isError: true` on `tools/call`. This is a hard block — the credential is treated as revoked.
+
+Three possible states for a credential's `AgentConnection` binding:
+
+| State | Behaviour |
+|---|---|
+| Active connection exists | Normal per-agent tool filtering |
+| All connections inactive | Hard block — 403 / `isError: true` |
+| No connection at all | Falls through to token tier (default behaviour, no filtering) |
+
+Operators who previously set `is_active = False` as a soft metadata flag without expecting filtering behaviour should be aware of this change before upgrading. See [Upgrading](#upgrading) for migration guidance.
+
+### OAuth `OAuthAccessToken` storage
+
+OAuth access tokens are stored as HMAC-SHA256 hashes of the raw Bearer value. The raw secret is exposed **once** as `instance.plaintext_token` immediately after creation and is never stored. A compromised database row cannot be replayed without the raw value.
+
+HMAC keying uses `FRIESE_MCP_HMAC_KEY` when set, or `SECRET_KEY` as a fallback. See [`FRIESE_MCP_HMAC_KEY`](#friese_mcp_hmac_key) for key rotation considerations.
+
+### OAuth redirect URI allowlist
+
+`OAuthClient` rows now carry a `redirect_uris` JSON field. The authorize endpoint validates every `redirect_uri` against this list before issuing an authorization code. Mismatches return HTTP 400 — the gateway does **not** redirect to an unverified target (which would allow open-redirect attacks).
+
+Accepted URI schemes: `https://`, `http://localhost`, `http://127.0.0.1`, `http://[::1]`, and reverse-DNS custom schemes (e.g. `com.example.app:/callback`). JavaScript URIs, data URIs, and `file://` are rejected.
+
+The auto-approve behaviour defaults to `bool(DEBUG)` — production deployments present a consent screen unless `FRIESE_MCP_OAUTH_AUTO_APPROVE = True` is set explicitly.
+
+### Continuation token binding
+
+Heavy-response continuation tokens (the second call in the two-call response-negotiation protocol) are bound to the originating caller. The binding key composes: tool name, auth credential type and primary key, effective permission tier, user PK, agent connection PK, and MCP session ID. A token obtained by one caller cannot be replayed by a different credential, a different tool, a downgraded tier, or a different session.
+
+Attempting replay returns `isError: true` with a `heavy_continuation_owner_mismatch` warning in the server log.
 
 ---
 
@@ -2180,6 +2691,46 @@ When a tool raises an unhandled exception, `tools/call` returns `{"isError": tru
 ### Rate limiting
 
 `RateLimitMiddleware` uses an in-process sliding-window counter. In multi-process deployments, each worker maintains its own counter — limits are not shared across workers. For shared rate limiting, use a custom middleware class backed by Redis or a database counter.
+
+---
+
+## Diagnostics
+
+### `mcp_doctor` management command
+
+Run `mcp_doctor` to audit the friese-mcp configuration and surface integration issues before they become runtime errors:
+
+```bash
+python manage.py mcp_doctor
+```
+
+The command checks:
+
+| Check | What it validates |
+|---|---|
+| `INSTALLED_APPS` | `friese_mcp` and any contrib apps are consistently declared |
+| URL mounting | The gateway URL resolves (i.e. `include("friese_mcp.urls")` is in your URLconf) |
+| Auth wiring | contrib auth classes are in `FRIESE_MCP_AUTHENTICATION_CLASSES` when the contrib apps are installed |
+| Security settings | `FRIESE_MCP_PERMISSION_CLASSES` is non-empty in production (or `FRIESE_MCP_ALLOW_UNAUTHENTICATED = True` is set) |
+| Cache backend | `FRIESE_MCP_TOOLS_LIST_CACHE_TTL` is set with a working cache backend |
+| Performance hints | Flags large tool counts that would benefit from `FRIESE_MCP_DISPATCH_GROUPS` |
+| OAuth registration | Warns if dynamic client registration is open with no redirect URI validation |
+
+Sample output (all checks pass):
+
+```
+✓ friese_mcp in INSTALLED_APPS
+✓ contrib.tokens in INSTALLED_APPS
+⚠ contrib.oauth not installed — optional; add if you need its features
+⚠ contrib.agents not installed — optional; add if you need its features
+✓ MCP gateway mounted at /mcp/
+⚠ FRIESE_MCP_AUTHENTICATION_CLASSES is empty — the gateway accepts any request
+⚠ FRIESE_MCP_PERMISSION_CLASSES is empty — the gateway has no permission enforcement
+
+No errors. 2 warning(s) to review.
+```
+
+The command exits non-zero if any errors are found, making it suitable for CI pre-deploy checks.
 
 ---
 
@@ -2275,3 +2826,45 @@ Common causes:
 - All ViewSets are decorated with `@mcp_ignore`.
 - `FRIESE_MCP_AUTODISCOVER = False` — auto-discovery is disabled. Register tools manually with `@mcp_tool`.
 - Your app uses function-based views (`@api_view`) rather than ViewSets — use `@mcp_tool` for those.
+
+---
+
+## Upgrading
+
+### Breaking changes in this release
+
+#### 1. `AgentConnection.is_active = False` now hard-blocks the credential
+
+**Previous behaviour:** An `AgentConnection` with `is_active = False` was treated as non-existent. The credential fell through to the token-tier path and retained access.
+
+**New behaviour:** If a credential is bound to one or more `AgentConnection` rows and **all** of them are inactive, `tools/list` returns an empty tool list and `tools/call` returns `isError: true`. This is a hard block.
+
+**Migration:** Before upgrading, audit your `AgentConnection` table for rows where `is_active = False`. If those rows were used as soft metadata (e.g. archived connections you still want to fall through), either delete them or set the linked credential to use a different connection. If you want the fail-closed behaviour but need a grace period, temporarily set `is_active = True` while you migrate.
+
+#### 2. `OAuthClient.redirect_uris` required for the authorize endpoint
+
+**Previous behaviour:** Any `redirect_uri` in the authorize request was accepted.
+
+**New behaviour:** The authorize endpoint validates `redirect_uri` against `OAuthClient.redirect_uris` (a JSONField added by migration `0007`). Existing `OAuthClient` rows receive `redirect_uris = []` after running the migration, which means the authorize endpoint will reject all redirect URIs for those clients until the field is populated.
+
+**Migration:** After running `manage.py migrate`, update existing `OAuthClient` rows with their permitted redirect URIs:
+
+```python
+from friese_mcp.contrib.oauth.models import OAuthClient
+
+client = OAuthClient.objects.get(name="my-agent")
+client.redirect_uris = ["https://my-agent.example.com/callback"]
+client.save()
+```
+
+The token endpoint (client credentials flow) is unaffected — existing service-to-service integrations keep working without any changes.
+
+#### 3. `OAuthAccessToken` tokens re-hashed by migration `0006`
+
+**Previous behaviour:** OAuth access tokens were stored as plaintext in the database.
+
+**New behaviour:** Tokens are stored as HMAC-SHA256 hashes. The raw Bearer value is exposed once at creation and never stored.
+
+**Migration:** Migration `0006` hashes existing plaintext rows in-place. Clients keep their raw tokens; authentication still succeeds after the migration because the gateway now hashes the incoming Bearer value before the database lookup. No token re-issue is required. The migration is idempotent — it can be re-run safely.
+
+> **Note:** The migration is one-way. Reversing it is a no-op by design (HMAC is one-way). Do not rely on being able to reverse migration `0006` to recover plaintext values.

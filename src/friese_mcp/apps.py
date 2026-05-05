@@ -40,12 +40,15 @@ def _suppress_dispatcher_shadowed(
     if not dispatcher_names:
         return tool_defs
 
+    sep: str = getattr(settings, "FRIESE_MCP_TOOL_NAME_SEPARATOR", "_")
     result: list[ToolDefinition] = []
     for tool_def in tool_defs:
-        prefix = tool_def.name.split(".")[0] if "." in tool_def.name else tool_def.name
         matched: str | None = None
         for dname in dispatcher_names:
-            if prefix == dname or (dname.endswith("s") and prefix == dname[:-1]):
+            if tool_def.name == dname or tool_def.name.startswith(f"{dname}{sep}") or (
+                dname.endswith("s")
+                and tool_def.name.startswith(f"{dname[:-1]}{sep}")
+            ):
                 matched = dname
                 break
         if matched is not None:
@@ -249,6 +252,19 @@ def _prefer_api_tool(
     return existing
 
 
+def _find_group_members(
+    all_names: list[str], prefix_set: frozenset[str], sep: str
+) -> set[str]:
+    """Return the subset of *all_names* whose resource prefix is in *prefix_set*."""
+    members: set[str] = set()
+    for tool_name in all_names:
+        for prefix in prefix_set:
+            if tool_name == prefix or tool_name.startswith(f"{prefix}{sep}"):
+                members.add(tool_name)
+                break
+    return members
+
+
 def _install_dispatch_groups() -> tuple[int, int]:
     """
     Build group dispatcher tools from ``settings.FRIESE_MCP_DISPATCH_GROUPS``.
@@ -287,14 +303,11 @@ def _install_dispatch_groups() -> tuple[int, int]:
     registered_count = 0
     all_bundled: set[str] = set()
     all_names = tool_registry.list_names()
+    sep: str = getattr(settings, "FRIESE_MCP_TOOL_NAME_SEPARATOR", "_")
 
     for group_name, resource_prefixes in groups.items():
         prefix_set = frozenset(resource_prefixes)
-        member_tools: set[str] = set()
-        for tool_name in all_names:
-            prefix = tool_name.split(".", 1)[0] if "." in tool_name else tool_name
-            if prefix in prefix_set:
-                member_tools.add(tool_name)
+        member_tools = _find_group_members(all_names, prefix_set, sep)
 
         if not member_tools:
             logger.warning(
@@ -306,7 +319,7 @@ def _install_dispatch_groups() -> tuple[int, int]:
             continue
 
         invoke_fn = make_group_invoke(
-            group_name, frozenset(member_tools), tool_registry
+            group_name, frozenset(member_tools), tool_registry, prefix_set
         )
         tool_registry.register(
             name=group_name,
@@ -562,5 +575,13 @@ class FrieseMcpConfig(AppConfig):
             print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
                 f"[friese-mcp] {group_count} dispatch group(s) bundling "
                 f"{bundled_count} tools",
+                flush=True,
+            )
+
+        tool_hints: dict | None = getattr(settings, "FRIESE_MCP_TOOL_HINTS", None)
+        if tool_hints:
+            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
+                f"[friese-mcp] {len(tool_hints)} tool hint(s) configured "
+                "(surfaced via action='help')",
                 flush=True,
             )

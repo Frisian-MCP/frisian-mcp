@@ -327,7 +327,7 @@ class TestDispatchGroupSummary:
         # bundled into the single 'widgets' group dispatcher.
         defs = [
             ToolDefinition(
-                name="widget.list",
+                name="widget_list",
                 description="stub",
                 input_schema={"type": "object", "properties": {}},
                 permission_classes=(),
@@ -335,7 +335,7 @@ class TestDispatchGroupSummary:
                 permission_tier="read",
             ),
             ToolDefinition(
-                name="widget.retrieve",
+                name="widget_retrieve",
                 description="stub",
                 input_schema={"type": "object", "properties": {}},
                 permission_classes=(),

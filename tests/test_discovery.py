@@ -184,12 +184,12 @@ class TestDRFSyncDiscovery:
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
-        assert "users.list" in names
-        assert "users.create" in names
-        assert "users.retrieve" in names
-        assert "users.update" in names
-        assert "users.partial_update" in names
-        assert "users.destroy" in names
+        assert "users_list" in names
+        assert "users_create" in names
+        assert "users_retrieve" in names
+        assert "users_update" in names
+        assert "users_partial_update" in names
+        assert "users_destroy" in names
 
     def test_discovers_custom_action(self) -> None:
         """
@@ -201,22 +201,22 @@ class TestDRFSyncDiscovery:
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
-        # _resource_from_path("api/users/export/") → "export"; action → "export.export"
-        assert "export.export" in names
+        # _resource_from_path("api/users/export/") → "export"; action → "export_export"
+        assert "export_export" in names
 
     def test_skips_class_level_mcp_ignore(self) -> None:
         """discover_tools() skips an entire ViewSet decorated with @mcp_ignore."""
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
-        assert not any(n.startswith("ignored.") for n in names)
+        assert not any(n.startswith("ignored_") for n in names)
 
     def test_skips_method_level_mcp_ignore(self) -> None:
         """discover_tools() skips individual actions decorated with @mcp_ignore."""
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
-        assert "users.private_action" not in names
+        assert "users_private_action" not in names
 
     def test_no_duplicate_tools(self) -> None:
         """Each (ViewSet, action) pair appears at most once even across multiple URL patterns."""
@@ -241,7 +241,7 @@ class TestDRFSyncDiscovery:
         """GAP-A: DRFSyncDiscovery always strips ViewSet permission_classes."""
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
-        secure = next((t for t in tools if t.name == "secure.list"), None)
+        secure = next((t for t in tools if t.name == "secure_list"), None)
         assert secure is not None
         assert secure.permission_classes == ()
 
@@ -430,16 +430,16 @@ class TestActionFiltering:
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
-        assert "limited.list" in names
-        assert "limited.create" not in names
+        assert "limited_list" in names
+        assert "limited_create" not in names
 
     def test_mcp_exclude_actions_drops_listed_action(self) -> None:
         """ExcludeDestroyViewSet.mcp_exclude_actions=['destroy'] hides destroy."""
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
-        assert "excludedestroy.list" in names
-        assert "excludedestroy.destroy" not in names
+        assert "excludedestroy_list" in names
+        assert "excludedestroy_destroy" not in names
 
     def test_mcp_include_actions_none_exposes_all_actions(self) -> None:
         """When mcp_include_actions is absent, all discovered actions are exposed."""
@@ -447,8 +447,8 @@ class TestActionFiltering:
         discovery = DRFSyncDiscovery()
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
-        assert "users.list" in names
-        assert "users.create" in names
+        assert "users_list" in names
+        assert "users_create" in names
 
     def test_mcp_exclude_actions_empty_exposes_all_actions(self) -> None:
         """When mcp_exclude_actions is absent or empty, no actions are suppressed."""
@@ -457,7 +457,7 @@ class TestActionFiltering:
         tools = discovery.discover_tools()
         names = {t.name for t in tools}
         # UserViewSet has no mcp_exclude_actions — destroy is present.
-        assert "users.destroy" in names
+        assert "users_destroy" in names
 
 
 # ---------------------------------------------------------------------------
@@ -737,49 +737,49 @@ class TestSuppressDispatcherShadowed:
 
     def test_no_dispatchers_returns_all(self) -> None:
         """With no dispatchers, all tools are returned unchanged."""
-        tools = [_tool_def("exercises.list"), _tool_def("exercises.create")]
+        tools = [_tool_def("exercises_list"), _tool_def("exercises_create")]
         result = _suppress_dispatcher_shadowed(tools, frozenset())
-        assert [t.name for t in result] == ["exercises.list", "exercises.create"]
+        assert [t.name for t in result] == ["exercises_list", "exercises_create"]
 
     def test_exact_match_suppresses_tool(self) -> None:
         """Discovered tool with same resource prefix as dispatcher is suppressed."""
-        tools = [_tool_def("exercises.list"), _tool_def("exercises.create")]
+        tools = [_tool_def("exercises_list"), _tool_def("exercises_create")]
         result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
         assert result == []
 
     def test_singular_match_suppresses_tool(self) -> None:
-        """Dispatcher 'exercises' suppresses discovered 'exercise.list'."""
-        tools = [_tool_def("exercise.list"), _tool_def("exercise.retrieve")]
+        """Dispatcher 'exercises' suppresses discovered 'exercise_list'."""
+        tools = [_tool_def("exercise_list"), _tool_def("exercise_retrieve")]
         result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
         assert result == []
 
     def test_unrelated_tools_not_suppressed(self) -> None:
-        """Dispatcher 'exercises' does not affect 'orders.list'."""
-        tools = [_tool_def("orders.list"), _tool_def("orders.create")]
+        """Dispatcher 'exercises' does not affect 'orders_list'."""
+        tools = [_tool_def("orders_list"), _tool_def("orders_create")]
         result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
-        assert [t.name for t in result] == ["orders.list", "orders.create"]
+        assert [t.name for t in result] == ["orders_list", "orders_create"]
 
     def test_mixed_resources_suppresses_only_matching(self) -> None:
         """Only tools whose resource matches the dispatcher are removed."""
         tools = [
-            _tool_def("exercises.list"),
-            _tool_def("exercises.create"),
-            _tool_def("orders.list"),
+            _tool_def("exercises_list"),
+            _tool_def("exercises_create"),
+            _tool_def("orders_list"),
         ]
         result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
-        assert [t.name for t in result] == ["orders.list"]
+        assert [t.name for t in result] == ["orders_list"]
 
     def test_multiple_dispatchers_suppress_respective_tools(self) -> None:
         """Two dispatchers each suppress their own resource tools."""
         tools = [
-            _tool_def("exercises.list"),
-            _tool_def("programs.list"),
-            _tool_def("orders.list"),
+            _tool_def("exercises_list"),
+            _tool_def("programs_list"),
+            _tool_def("orders_list"),
         ]
         result = _suppress_dispatcher_shadowed(
             tools, frozenset({"exercises", "programs"})
         )
-        assert [t.name for t in result] == ["orders.list"]
+        assert [t.name for t in result] == ["orders_list"]
 
     def test_non_dotted_tool_exact_match(self) -> None:
         """A tool without a dot is matched by its full name."""
@@ -802,10 +802,10 @@ class TestSuppressDispatcherShadowed:
         """Suppressed tools are logged at INFO level."""
         import logging
 
-        tools = [_tool_def("exercises.list")]
+        tools = [_tool_def("exercises_list")]
         with caplog.at_level(logging.INFO, logger="friese_mcp.apps"):
             _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
-        assert any("exercises.list" in r.message for r in caplog.records)
+        assert any("exercises_list" in r.message for r in caplog.records)
         assert any("exercises" in r.message for r in caplog.records)
 
 
@@ -822,41 +822,41 @@ class TestDRFSyncDiscoveryPermissionTier:
         """GET-based 'list' action gets permission_tier='read'."""
         discovery = DRFSyncDiscovery()
         tools = {t.name: t for t in discovery.discover_tools()}
-        assert tools["users.list"].permission_tier == "read"
+        assert tools["users_list"].permission_tier == "read"
 
     def test_retrieve_action_is_read_tier(self) -> None:
         """GET-based 'retrieve' action gets permission_tier='read'."""
         discovery = DRFSyncDiscovery()
         tools = {t.name: t for t in discovery.discover_tools()}
-        assert tools["users.retrieve"].permission_tier == "read"
+        assert tools["users_retrieve"].permission_tier == "read"
 
     def test_create_action_is_read_write_tier(self) -> None:
         """POST-based 'create' action gets permission_tier='read_write'."""
         discovery = DRFSyncDiscovery()
         tools = {t.name: t for t in discovery.discover_tools()}
-        assert tools["users.create"].permission_tier == "read_write"
+        assert tools["users_create"].permission_tier == "read_write"
 
     def test_update_action_is_read_write_tier(self) -> None:
         """PUT-based 'update' action gets permission_tier='read_write'."""
         discovery = DRFSyncDiscovery()
         tools = {t.name: t for t in discovery.discover_tools()}
-        assert tools["users.update"].permission_tier == "read_write"
+        assert tools["users_update"].permission_tier == "read_write"
 
     def test_partial_update_action_is_read_write_tier(self) -> None:
         """PATCH-based 'partial_update' action gets permission_tier='read_write'."""
         discovery = DRFSyncDiscovery()
         tools = {t.name: t for t in discovery.discover_tools()}
-        assert tools["users.partial_update"].permission_tier == "read_write"
+        assert tools["users_partial_update"].permission_tier == "read_write"
 
     def test_destroy_action_is_read_write_tier(self) -> None:
         """DELETE-based 'destroy' action gets permission_tier='read_write'."""
         discovery = DRFSyncDiscovery()
         tools = {t.name: t for t in discovery.discover_tools()}
-        assert tools["users.destroy"].permission_tier == "read_write"
+        assert tools["users_destroy"].permission_tier == "read_write"
 
     def test_custom_get_action_is_read_tier(self) -> None:
         """Custom @action with methods=['get'] gets permission_tier='read'."""
         discovery = DRFSyncDiscovery()
         tools = {t.name: t for t in discovery.discover_tools()}
         # export action is GET-only
-        assert tools["export.export"].permission_tier == "read"
+        assert tools["export_export"].permission_tier == "read"

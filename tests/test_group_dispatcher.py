@@ -36,20 +36,20 @@ def populated_registry() -> ToolRegistry:
     """Return a registry pre-populated with DCIM and IPAM flat tools."""
     reg = ToolRegistry()
     flat = {
-        "device.list": _stub_tool("device.list"),
-        "device.retrieve": _stub_tool("device.retrieve"),
-        "device.create": _stub_tool("device.create"),
-        "rack.list": _stub_tool("rack.list"),
-        "interface.list": _stub_tool("interface.list"),
-        "ipaddress.list": _stub_tool("ipaddress.list"),
-        "prefix.list": _stub_tool("prefix.list"),
-        "user.list": _stub_tool("user.list"),  # ungrouped
+        "device_list": _stub_tool("device.list"),
+        "device_retrieve": _stub_tool("device.retrieve"),
+        "device_create": _stub_tool("device.create"),
+        "rack_list": _stub_tool("rack.list"),
+        "interface_list": _stub_tool("interface.list"),
+        "ipaddress_list": _stub_tool("ipaddress.list"),
+        "prefix_list": _stub_tool("prefix.list"),
+        "user_list": _stub_tool("user.list"),  # ungrouped
     }
     schema = {"type": "object", "properties": {}}
     for name, fn in flat.items():
         # Write actions need read_write tier so we can exercise tier filtering
         # in the help response.
-        tier = "read_write" if name.endswith((".create", ".update", ".destroy")) else "read"
+        tier = "read_write" if name.endswith(("_create", "_update", "_destroy")) else "read"
         reg.register(name, fn, "stub", schema, permission_tier=tier)
     return reg
 
@@ -106,7 +106,7 @@ class TestBuildGroupHelp:
         """Help groups actions by resource and sorts them."""
         help_payload = build_group_help(
             "dcim",
-            ["device.list", "device.retrieve", "rack.list"],
+            ["device_list", "device_retrieve", "rack_list"],
             populated_registry,
         )
         assert help_payload["help"] is True
@@ -115,10 +115,10 @@ class TestBuildGroupHelp:
         assert help_payload["resources"]["rack"] == ["list"]
 
     def test_help_filters_actions_by_tier(self, populated_registry: ToolRegistry) -> None:
-        """A 'read' caller does not see write actions like device.create."""
+        """A 'read' caller does not see write actions like device_create."""
         help_payload = build_group_help(
             "dcim",
-            ["device.list", "device.retrieve", "device.create"],
+            ["device_list", "device_retrieve", "device_create"],
             populated_registry,
             max_tier="read",
         )
@@ -131,7 +131,7 @@ class TestBuildGroupHelp:
         """Without a max_tier, every action is listed."""
         help_payload = build_group_help(
             "dcim",
-            ["device.list", "device.create"],
+            ["device_list", "device_create"],
             populated_registry,
         )
         assert "create" in help_payload["resources"]["device"]
@@ -140,7 +140,7 @@ class TestBuildGroupHelp:
         """Tool names not in the registry are silently dropped."""
         help_payload = build_group_help(
             "dcim",
-            ["device.list", "ghost.list"],
+            ["device_list", "ghost_list"],
             populated_registry,
         )
         assert "ghost" not in help_payload["resources"]
@@ -160,7 +160,7 @@ class TestMakeGroupInvoke:
         """A valid resource/action pair dispatches through the registry."""
         invoke = make_group_invoke(
             "dcim",
-            frozenset({"device.list", "rack.list"}),
+            frozenset({"device_list", "rack_list"}),
             populated_registry,
         )
         result = invoke(
@@ -175,7 +175,7 @@ class TestMakeGroupInvoke:
         """Omitting action returns the help tree."""
         invoke = make_group_invoke(
             "dcim",
-            frozenset({"device.list", "rack.list"}),
+            frozenset({"device_list", "rack_list"}),
             populated_registry,
         )
         result = invoke({}, _request(rf, permission="read"))
@@ -188,7 +188,7 @@ class TestMakeGroupInvoke:
         """action='help' returns the help tree even when resource is set."""
         invoke = make_group_invoke(
             "dcim",
-            frozenset({"device.list"}),
+            frozenset({"device_list"}),
             populated_registry,
         )
         result = invoke(
@@ -203,7 +203,7 @@ class TestMakeGroupInvoke:
         """Unknown resource yields LookupError with a 'did you mean' hint."""
         invoke = make_group_invoke(
             "dcim",
-            frozenset({"device.list", "rack.list"}),
+            frozenset({"device_list", "rack_list"}),
             populated_registry,
         )
         with pytest.raises(LookupError) as exc:
@@ -219,7 +219,7 @@ class TestMakeGroupInvoke:
         """Non-help action without resource raises ValueError."""
         invoke = make_group_invoke(
             "dcim",
-            frozenset({"device.list"}),
+            frozenset({"device_list"}),
             populated_registry,
         )
         with pytest.raises(ValueError, match="resource is required"):
@@ -234,7 +234,7 @@ class TestMakeGroupInvoke:
         """Flat {action, resource, key: val} form (no params wrapper) works."""
         invoke = make_group_invoke(
             "dcim",
-            frozenset({"device.list"}),
+            frozenset({"device_list"}),
             populated_registry,
         )
         result = invoke(
@@ -296,8 +296,8 @@ class TestInstallDispatchGroups:
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         names = {t["name"] for t in populated_registry.list_tools()}
-        assert "device.list" not in names
-        assert "rack.list" not in names
+        assert "device_list" not in names
+        assert "rack_list" not in names
         assert "dcim" in names
 
     def test_ungrouped_tools_remain_visible(
@@ -310,9 +310,9 @@ class TestInstallDispatchGroups:
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         names = {t["name"] for t in populated_registry.list_tools()}
-        assert "user.list" in names  # user is ungrouped
+        assert "user_list" in names  # user is ungrouped
         # ipam tools also remain visible (no group claimed them)
-        assert "ipaddress.list" in names
+        assert "ipaddress_list" in names
 
     def test_grouped_tools_still_dispatchable_by_name(
         self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
@@ -322,7 +322,7 @@ class TestInstallDispatchGroups:
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         result = populated_registry.dispatch(
-            _request(rf, permission="read"), "device.list", {}
+            _request(rf, permission="read"), "device_list", {}
         )
         assert result["called"] == "device.list"
 
