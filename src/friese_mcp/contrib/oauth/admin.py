@@ -46,6 +46,18 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             },
         ),
         (
+            "Allowed redirect URIs",
+            {
+                "fields": ("redirect_uris",),
+                "description": (
+                    "JSON list of permitted callback URLs, e.g. "
+                    '<code>["https://claude.ai/api/mcp/auth_callback"]</code>. '
+                    "Leave empty only when PKCE auto-register is enabled and the "
+                    "client has not yet completed its first authorization."
+                ),
+            },
+        ),
+        (
             "Metadata",
             {
                 "fields": ("created_at",),
