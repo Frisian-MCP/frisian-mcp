@@ -343,9 +343,19 @@ class SyncInvocation(BaseInvocationBackend):
         # overlays, request.version setup, throttles — fires before the
         # action.  Without this, SyncInvocation silently bypasses
         # object-level permission scoping and leaks rows the caller has no
-        # right to see.  ``check_permissions`` runs against the empty
-        # ``permission_classes=()`` stripped during discovery, so it is a
-        # no-op for friese-mcp's tier model.
+        # right to see.
+        #
+        # _ignore_model_permissions bypasses DjangoObjectPermissions (and all
+        # subclasses, e.g. Nautobot's TokenPermissions) has_permission() check.
+        # Without it, every non-superuser token needs a host-app ObjectPermission
+        # configured per model — impractical for large surfaces (1500+ Nautobot
+        # models).  Our MCP tier system is the primary access gate; the host
+        # app's queryset restriction (restrict_queryset / .restrict()) still
+        # fires, so callers without ObjectPermissions see an empty result set
+        # rather than a 403.  Write operations remain protected by Nautobot's
+        # post-save _validate_objects() which rolls back creates that fall
+        # outside the restricted queryset.
+        viewset._ignore_model_permissions = True  # pylint: disable=protected-access
         try:
             viewset.initial(drf_request, **view_kwargs)
         except (DRFValidationError, DjangoValidationError):
