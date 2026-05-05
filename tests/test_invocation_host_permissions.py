@@ -70,7 +70,8 @@ def _tool(view_cls: type, action: str = "list") -> ToolDefinition:
 
 
 class _DjangoObjectPermissionsViewSet(ViewSet):
-    """ViewSet that uses DjangoObjectPermissions.
+    """
+    ViewSet that uses DjangoObjectPermissions.
 
     DjangoObjectPermissions is the base class that Nautobot's TokenPermissions
     extends.  Without the fix, any authenticated user without has_perms()
@@ -94,7 +95,8 @@ class _DjangoObjectPermissionsViewSet(ViewSet):
 
 
 class _IsAuthenticatedViewSet(ViewSet):
-    """ViewSet that uses IsAuthenticated (NOT DjangoObjectPermissions).
+    """
+    ViewSet that uses IsAuthenticated (NOT DjangoObjectPermissions).
 
     _ignore_model_permissions must NOT bypass this check — unauthenticated
     callers must still be denied.
@@ -141,7 +143,8 @@ class TestIgnoreModelPermissions:
     """SyncInvocation sets _ignore_model_permissions=True before initial()."""
 
     def test_flag_set_on_viewset_before_initial(self, rf: RequestFactory) -> None:
-        """_ignore_model_permissions=True is set before initial() runs.
+        """
+        _ignore_model_permissions=True is set before initial() runs.
 
         DjangoObjectPermissions.has_permission() returns True regardless of
         user.has_perms().
@@ -159,7 +162,8 @@ class TestIgnoreModelPermissions:
     def test_non_superuser_no_object_permission_gets_200_not_403(
         self, rf: RequestFactory
     ) -> None:
-        """Non-superuser with has_perms()=False gets 200, not 403.
+        """
+        Non-superuser with has_perms()=False gets 200, not 403.
 
         No ObjectPermission configured — previously would return 403.
         """
@@ -183,7 +187,8 @@ class TestIgnoreModelPermissions:
         )
         content = result.content
         if isinstance(content, dict):
-            assert "error" not in content or "permission" not in str(content.get("error", "")).lower()
+            error_str = str(content.get("error", "")).lower()
+            assert "error" not in content or "permission" not in error_str
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +203,10 @@ class TestNonDjangoPermissionsStillEnforced:
         self, rf: RequestFactory
     ) -> None:
         """
-        AnonymousUser is denied by IsAuthenticated even with
-        _ignore_model_permissions=True, because IsAuthenticated does not
-        extend DjangoObjectPermissions and does not check the flag.
+        AnonymousUser is still denied by IsAuthenticated.
+
+        _ignore_model_permissions=True does not affect IsAuthenticated because
+        it does not extend DjangoObjectPermissions.
         """
         req = _make_request(rf, authenticated=False)
         invocation = SyncInvocation()
@@ -220,9 +226,10 @@ class TestNonDjangoPermissionsStillEnforced:
         self, rf: RequestFactory
     ) -> None:
         """
-        A custom permission class that doesn't extend DjangoObjectPermissions
-        still runs and can deny the request — _ignore_model_permissions only
-        affects DjangoObjectPermissions and its subclasses.
+        Custom non-DjangoObjectPermissions permission classes still run.
+
+        _ignore_model_permissions only affects DjangoObjectPermissions and its
+        subclasses; other permission classes can still deny the request.
         """
         req = _make_request(rf, authenticated=True)
         invocation = SyncInvocation()
