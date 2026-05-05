@@ -19,6 +19,7 @@ import types
 import typing
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.urls import URLPattern, URLResolver, get_resolver
 from rest_framework.relations import ManyRelatedField, RelatedField, SlugRelatedField
@@ -102,6 +103,11 @@ _FK_ITEM_SCHEMA: dict[str, Any] = {
 
 # Actions that accept a detail identifier (pk / id) as the primary argument.
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
+
+
+def _tool_name_separator() -> str:
+    """Return the configured tool name separator (default ``'_'``)."""
+    return getattr(settings, "FRIESE_MCP_TOOL_NAME_SEPARATOR", "_")
 
 # URL path segments that represent API versioning or routing prefixes rather than resource names.
 # _resource_from_path skips these when searching for the resource name from the right.
@@ -329,11 +335,15 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             _write_http = {"post", "put", "patch", "delete"}
             permission_tier = "read_write" if http_method in _write_http else "read"
 
+            tool_name = f"{resource}{_tool_name_separator()}{action_name}"
+            input_schema = self.get_input_schema(cls, action_name)
+            _apply_required_overrides(input_schema, tool_name)
+
             tools.append(
                 ToolDefinition(
-                    name=f"{resource}.{action_name}",
+                    name=tool_name,
                     description=_action_description(cls, action_name, resource),
-                    input_schema=self.get_input_schema(cls, action_name),
+                    input_schema=input_schema,
                     permission_classes=(),
                     source="auto",
                     view_class=cls,
@@ -735,6 +745,99 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
     return {"type": _FIELD_TO_JSON_TYPE.get(field_class_name, "string")}
 
 
+def _infer_required(field: Any, field_name: str) -> bool:
+    """
+    Infer whether a ``RelatedField`` that declares ``required=False`` is effectively required.
+
+    Inspects the underlying Django model field to detect the create/partial_update
+    mismatch — serializers often set ``required=False`` so one serializer works for
+    both verbs, but the model field may be ``NOT NULL`` / no default.
+
+    Many DRF host apps (including Nautobot) set ``required=False`` on FK
+    serializer fields so the same serializer works for both ``create`` and
+    ``partial_update`` (PATCH).  The model field, however, may be ``NOT NULL``
+    with no default, meaning any ``create`` that omits the field will fail at
+    the DB layer with a cryptic constraint error.  This function catches that
+    mismatch so the dispatcher schema marks the field as required.
+
+    Returns ``True`` when **all** of the following hold:
+
+    * *field* is a :class:`~rest_framework.relations.RelatedField` but NOT a
+      :class:`~rest_framework.relations.SlugRelatedField` (slug fields work
+      with bare strings and are handled separately).
+    * The field has a Django QuerySet with an accessible ``.model`` attribute.
+    * The corresponding model field is ``NOT NULL`` (``null=False``) and has
+      no Django-level default (``has_default()`` returns ``False``).
+
+    Falls back to ``False`` on any introspection failure so that a non-standard
+    queryset or computed field never raises during discovery.
+
+    Many DRF host apps (including Nautobot) set ``required=False`` on FK
+    serializer fields so the same serializer works for both ``create`` and
+    ``partial_update`` (PATCH).  The model field, however, may be ``NOT NULL``
+    with no default, meaning any ``create`` that omits the field will fail at
+    the DB layer with a cryptic constraint error.  This function catches that
+    mismatch so the dispatcher schema marks the field as required.
+
+    Returns ``True`` when **all** of the following hold:
+
+    * *field* is a :class:`~rest_framework.relations.RelatedField` but NOT a
+      :class:`~rest_framework.relations.SlugRelatedField` (slug fields work
+      with bare strings and are handled separately).
+    * The field has a Django QuerySet with an accessible ``.model`` attribute.
+    * The corresponding model field is ``NOT NULL`` (``null=False``) and has
+      no Django-level default (``has_default()`` returns ``False``).
+
+    Falls back to ``False`` on any introspection failure so that a non-standard
+    queryset or computed field never raises during discovery.
+    """
+    if not isinstance(field, RelatedField) or isinstance(field, SlugRelatedField):
+        return False
+    queryset = getattr(field, "queryset", None)
+    if queryset is None or not hasattr(queryset, "model"):
+        return False
+    model = queryset.model
+    # Use field.source when set (e.g. source="device_role"); fall back to the
+    # serializer field name which matches the model attribute in the common case.
+    source = getattr(field, "source", None) or field_name
+    try:
+        model_field = model._meta.get_field(source)  # pylint: disable=protected-access
+        return (
+            not getattr(model_field, "null", True)
+            and not model_field.has_default()
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+
+
+def _apply_required_overrides(schema: dict[str, Any], tool_name: str) -> None:
+    """
+    Apply ``FRIESE_MCP_REQUIRED_FIELD_OVERRIDES`` to *schema* in place.
+
+    Reads the operator-supplied override dict from Django settings and merges
+    any extra required field names into ``schema["required"]``.  Fields already
+    present in ``required`` are silently deduplicated.  No-ops when the setting
+    is absent, empty, or has no entry for *tool_name*.
+
+    This is an escape hatch for FK fields that introspection cannot detect as
+    required (e.g. computed properties, GenericForeignKeys, or fields whose
+    queryset is resolved at runtime rather than declared on the serializer).
+
+    Args:
+        schema: The JSON Schema dict produced by :func:`get_input_schema`.
+            Modified in place.
+        tool_name: The fully-qualified tool name (``"resource.action"``).
+
+    """
+    overrides: dict[str, list[str]] = (
+        getattr(settings, "FRIESE_MCP_REQUIRED_FIELD_OVERRIDES", None) or {}
+    )
+    extra = [f for f in overrides.get(tool_name, []) if f not in schema.get("required", [])]
+    if extra:
+        current = list(schema.get("required", []))
+        schema["required"] = sorted(set(current) | set(extra))
+
+
 def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
     """Convert a DRF serializer class to a JSON Schema properties dict."""
     try:
@@ -753,7 +856,10 @@ def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
         if help_text:
             prop["description"] = str(help_text)
         properties[field_name] = prop
-        if getattr(field, "required", False):
+        # PKG-25: also mark a field required when the serializer says required=False
+        # but the underlying model field is NOT NULL with no default — a common
+        # pattern in host apps that share one serializer for create and partial_update.
+        if getattr(field, "required", False) or _infer_required(field, field_name):
             required.append(field_name)
 
     schema: dict[str, Any] = {"type": "object", "properties": properties}
