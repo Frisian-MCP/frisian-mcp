@@ -38,8 +38,8 @@ _PERMISSION_CHOICES = [
 
 _SCOPE_MAP: dict[str, str] = {
     "read": "mcp:read",
-    "read_write": "mcp:write",
-    "admin": "mcp:admin",
+    "read_write": "mcp:read mcp:write",
+    "admin": "mcp:read mcp:write mcp:admin",
 }
 
 

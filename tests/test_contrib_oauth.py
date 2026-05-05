@@ -121,11 +121,13 @@ class TestOAuthClientModel:
         assert client.permission == "read_write"
 
     def test_scope_string_maps_permission(self) -> None:
-        """scope_string property maps permission choices to RFC scope strings."""
+        """scope_string property returns cumulative scopes for each permission level."""
         client = OAuthClient.objects.create(name="read-client", permission="read")
         assert client.scope_string == "mcp:read"
+        client.permission = "read_write"
+        assert client.scope_string == "mcp:read mcp:write"
         client.permission = "admin"
-        assert client.scope_string == "mcp:admin"
+        assert client.scope_string == "mcp:read mcp:write mcp:admin"
 
     def test_stored_secret_is_hmac_not_plaintext(self) -> None:
         """The stored client_secret is the HMAC, not the raw value."""
@@ -363,7 +365,7 @@ class TestTokenView:
         assert data["token_type"] == "Bearer"
         assert "access_token" in data
         assert data["expires_in"] == 3600
-        assert data["scope"] == "mcp:write"
+        assert data["scope"] == "mcp:read mcp:write"
 
     def test_access_token_persisted_in_db(self, rf: RequestFactory) -> None:
         """Token returned from the endpoint is saved to the database (as HMAC digest)."""
@@ -551,7 +553,7 @@ class TestRegistrationView:
         response = _register_view(request)
         assert response.status_code == 201
         data = json.loads(response.content)
-        assert data["scope"] == "mcp:write"  # default permission=read_write → mcp:write
+        assert data["scope"] == "mcp:read mcp:write"  # default permission=read_write
 
     def test_missing_client_name_returns_400(self, rf: RequestFactory, settings: Any) -> None:
         """Missing client_name returns 400 with invalid_client_metadata error."""
