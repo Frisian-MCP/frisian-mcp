@@ -15,7 +15,8 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_filter = ("is_active", "permission")
     search_fields = ("name", "client_id")
     readonly_fields = (
-        "client_id", "client_secret", "created_at", "connector_mcp_url",
+        "client_id", "client_secret", "created_at",
+        "connector_auth_url", "connector_mcp_url",
     )
     fieldsets = (
         (
@@ -29,18 +30,18 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             {
                 "fields": ("client_id", "client_secret"),
                 "description": (
-                    "The client_id and client_secret are auto-generated and shown "
-                    "after creation.  Distribute them to your MCP agent client."
+                    "The client_id is the public identifier. "
+                    "The client_secret is shown once at creation — only the HMAC digest is stored."
                 ),
             },
         ),
         (
             "Connector config",
             {
-                "fields": ("connector_mcp_url",),
+                "fields": ("connector_auth_url", "connector_mcp_url"),
                 "description": (
-                    "Copy this URL into your MCP client's connector settings. "
-                    "Use client_id and client_secret from the Credentials section above."
+                    "Distribute the MCP server URL to agent clients. "
+                    "Use the authorization endpoint for the OAuth handshake only."
                 ),
             },
         ),
@@ -53,9 +54,16 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         ),
     )
 
-    @admin.display(description="MCP Server URL")
+    @admin.display(description="Authorization endpoint")
+    def connector_auth_url(self, obj: OAuthClient) -> str:  # pylint: disable=unused-argument
+        """OAuth 2.0 authorize URL — for the initial handshake only, not the MCP server URL."""
+        issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "").rstrip("/")
+        url = f"{issuer}/oauth/authorize/"
+        return format_html("<code>{}</code>", url)
+
+    @admin.display(description="MCP server URL")
     def connector_mcp_url(self, obj: OAuthClient) -> str:  # pylint: disable=unused-argument
-        """Return the auth-required MCP endpoint URL for copy-paste into connector config."""
+        """MCP endpoint — this is the URL to enter in Claude.ai / agent connector settings."""
         issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "").rstrip("/")
         mcp_path: str = getattr(settings, "FRIESE_MCP_PATH", "/mcp/")
         url = f"{issuer}{mcp_path}"
