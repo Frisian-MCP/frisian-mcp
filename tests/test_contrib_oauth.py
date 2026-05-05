@@ -606,9 +606,11 @@ class TestWellKnownEndpoints:
         assert "client_secret_post" in data["token_endpoint_auth_methods_supported"]
 
     def test_authorization_server_no_registration_endpoint_when_closed(
-        self, rf: RequestFactory
+        self, rf: RequestFactory, settings: Any
     ) -> None:
-        """registration_endpoint is absent when FRIESE_MCP_OAUTH_REGISTRATION_OPEN is False."""
+        """registration_endpoint is absent when both DCR and REGISTRATION_OPEN are disabled."""
+        settings.FRIESE_MCP_OAUTH_DCR = False
+        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = False
         request = rf.get("/.well-known/oauth-authorization-server")
         response = _auth_server_view(request)
         data = json.loads(response.content)

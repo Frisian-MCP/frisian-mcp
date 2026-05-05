@@ -103,8 +103,4 @@ class OAuthTokenAuthentication(BaseAuthentication):
         """Return the WWW-Authenticate header value for 401 responses."""
         base = _get_base_url(request)
         resource_metadata = f"{base}/.well-known/oauth-protected-resource"
-        return (
-            f'Bearer realm="friese-mcp",'
-            f' resource_metadata="{resource_metadata}",'
-            f' error="invalid_token"'
-        )
+        return f'Bearer realm="friese-mcp", resource_metadata="{resource_metadata}"'

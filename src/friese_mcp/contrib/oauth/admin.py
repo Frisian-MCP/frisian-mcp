@@ -66,7 +66,7 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         """MCP endpoint — this is the URL to enter in Claude.ai / agent connector settings."""
         issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "").rstrip("/")
         mcp_path: str = getattr(settings, "FRIESE_MCP_PATH", "/mcp/")
-        url = f"{issuer}{mcp_path}"
+        url = f"{issuer}/{mcp_path.lstrip('/')}"
         return format_html("<code>{}</code>", url)
 
 

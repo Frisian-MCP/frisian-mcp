@@ -462,7 +462,12 @@ class OAuthAuthorizationServerView(View):
             "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
         }
 
-        if getattr(settings, "FRIESE_MCP_OAUTH_REGISTRATION_OPEN", False):
+        # Advertise registration_endpoint when DCR is enabled (default True).
+        # FRIESE_MCP_OAUTH_DCR controls advertisement independently of
+        # FRIESE_MCP_OAUTH_REGISTRATION_OPEN — DCR clients need to see the
+        # endpoint to auto-register before the authorize step.
+        dcr_enabled: bool = getattr(settings, "FRIESE_MCP_OAUTH_DCR", True)
+        if dcr_enabled or getattr(settings, "FRIESE_MCP_OAUTH_REGISTRATION_OPEN", False):
             reg_path: str = getattr(settings, "FRIESE_MCP_OAUTH_REGISTER_PATH", "/oauth/register/")
             metadata["registration_endpoint"] = f"{base}{reg_path}"
 
@@ -483,7 +488,7 @@ class OAuthProtectedResourceView(View):
         """Return MCP OAuth Protected Resource Metadata."""
         base = _get_base_url(request)
         mcp_path: str = getattr(settings, "FRIESE_MCP_PATH", "/mcp/")
-        resource_url = f"{base}{mcp_path}"
+        resource_url = f"{base}/{mcp_path.lstrip('/')}"
 
         return JsonResponse(
             {

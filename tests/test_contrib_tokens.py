@@ -409,9 +409,9 @@ class TestFrieseMcpApiKeyAuthentication:
         assert result is not None
         assert result[1].permission == "read_write"
 
-    def test_authenticate_header_returns_bearer(self) -> None:
+    def test_authenticate_header_returns_bearer(self, rf: "RequestFactory") -> None:
         """authenticate_header() returns a Bearer realm string."""
-        req = self._fake_request({})
+        req = rf.get("/")
         header = self._auth().authenticate_header(req)
         assert header.startswith("Bearer")
         assert "friese-mcp" in header

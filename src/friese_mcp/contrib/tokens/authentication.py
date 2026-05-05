@@ -162,4 +162,16 @@ class FrieseMcpApiKeyAuthentication(BaseAuthentication):
 
     def authenticate_header(self, request: Any) -> str:
         """Return the WWW-Authenticate header value for 401 responses."""
+        from django.apps import apps  # pylint: disable=import-outside-toplevel
+
+        if apps.is_installed("friese_mcp.contrib.oauth"):
+            try:
+                from friese_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+                    _get_base_url,
+                )
+            except ImportError:
+                return 'Bearer realm="friese-mcp"'
+            base = _get_base_url(request)
+            resource_metadata = f"{base}/.well-known/oauth-protected-resource"
+            return f'Bearer realm="friese-mcp", resource_metadata="{resource_metadata}"'
         return 'Bearer realm="friese-mcp"'

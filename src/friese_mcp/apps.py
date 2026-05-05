@@ -148,6 +148,8 @@ def _install_trailing_slash_middleware() -> bool:
 #: Attribute name used as a sentinel to identify auto-registered URL patterns.
 #: Prevents double-injection across multiple ready() calls in a single process.
 _MCP_AUTO_URL_ATTR: str = "_friese_mcp_auto_url"
+_OAUTH_AUTO_URL_ATTR: str = "_friese_mcp_oauth_auto_url"
+_WELLKNOWN_AUTO_URL_ATTR: str = "_friese_mcp_wellknown_auto_url"
 
 #: Stable ``dispatch_uid`` for the PKG-21 deferred discovery signal handler so
 #: connect / disconnect calls reliably target the same registration even when
@@ -202,6 +204,79 @@ def _install_mcp_url() -> bool:
     mcp_path = re.escape(getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/"))
     auto_resolver = re_path(rf"^{mcp_path}/?", include("friese_mcp.urls"))
     setattr(auto_resolver, _MCP_AUTO_URL_ATTR, True)
+    resolver.url_patterns.insert(0, auto_resolver)
+    clear_url_caches()
+    return True
+
+
+def _install_oauth_urls() -> bool:
+    """
+    Auto-register OAuth endpoint URLs when ``friese_mcp.contrib.oauth`` is installed.
+
+    Mounts ``friese_mcp.contrib.oauth.urls`` at ``/oauth/`` in the live URL
+    resolver so that ``/oauth/authorize/``, ``/oauth/token/``, and
+    ``/oauth/register/`` are available without any ``urls.py`` changes by the
+    host application.  Idempotent — no-op if the patterns are already present.
+    """
+    from django.apps import apps  # pylint: disable=import-outside-toplevel
+
+    if not apps.is_installed("friese_mcp.contrib.oauth"):
+        return False
+    if not getattr(settings, "ROOT_URLCONF", None):
+        return False
+
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        include,
+        path,
+    )
+
+    resolver = get_resolver()
+    if any(getattr(p, _OAUTH_AUTO_URL_ATTR, False) for p in resolver.url_patterns):
+        return False
+    for pattern in resolver.url_patterns:
+        if getattr(pattern, "app_name", None) == "friese_mcp_oauth":
+            return False
+
+    auto_resolver = path("oauth/", include("friese_mcp.contrib.oauth.urls"))
+    setattr(auto_resolver, _OAUTH_AUTO_URL_ATTR, True)
+    resolver.url_patterns.insert(0, auto_resolver)
+    clear_url_caches()
+    return True
+
+
+def _install_wellknown_urls() -> bool:
+    """
+    Auto-register well-known discovery URLs when ``friese_mcp.contrib.oauth`` is installed.
+
+    Mounts ``friese_mcp.contrib.oauth.wellknown_urls`` at ``/.well-known/`` so
+    that RFC 8414 and RFC 9728 discovery endpoints are reachable without any
+    ``urls.py`` changes by the host application.  Idempotent.
+    """
+    from django.apps import apps  # pylint: disable=import-outside-toplevel
+
+    if not apps.is_installed("friese_mcp.contrib.oauth"):
+        return False
+    if not getattr(settings, "ROOT_URLCONF", None):
+        return False
+
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        include,
+        path,
+    )
+
+    resolver = get_resolver()
+    if any(getattr(p, _WELLKNOWN_AUTO_URL_ATTR, False) for p in resolver.url_patterns):
+        return False
+    for pattern in resolver.url_patterns:
+        if getattr(pattern, "app_name", None) == "friese_mcp_oauth_wellknown":
+            return False
+
+    auto_resolver = path(".well-known/", include("friese_mcp.contrib.oauth.wellknown_urls"))
+    setattr(auto_resolver, _WELLKNOWN_AUTO_URL_ATTR, True)
     resolver.url_patterns.insert(0, auto_resolver)
     clear_url_caches()
     return True
@@ -450,6 +525,12 @@ class FrieseMcpConfig(AppConfig):
                 "friese_mcp: auto-registered McpView URL at path %r",
                 getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/"),
             )
+
+        if _install_oauth_urls():
+            logger.debug("friese_mcp: auto-registered OAuth URLs at /oauth/")
+
+        if _install_wellknown_urls():
+            logger.debug("friese_mcp: auto-registered well-known URLs at /.well-known/")
 
         if not getattr(settings, "FRIESE_MCP_AUTODISCOVER", True):
             logger.debug("friese_mcp auto-discovery disabled — skipping")
