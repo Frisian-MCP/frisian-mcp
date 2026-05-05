@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from io import BytesIO
 from typing import Any
 from urllib.parse import urlencode
@@ -38,6 +39,102 @@ logger = logging.getLogger(__name__)
 #: when a host APIException carries ``{"error": "..."}`` and the envelope
 #: wraps it again as ``{"error": "{'error': '...'}"}``.
 _WRAPPER_DETAIL_KEYS: frozenset[str] = frozenset({"error", "detail"})
+
+# Canonical UUID pattern (RFC 4122, case-insensitive).  Used to distinguish
+# bare UUID strings — valid as-is for PrimaryKeyRelatedField — from human-
+# readable name/slug strings that need to be wrapped as {"name": value} before
+# reaching a host serializer that only accepts UUID or dict form.
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
+    re.IGNORECASE,
+)
+
+
+def _is_fk_property(prop_schema: dict[str, Any]) -> bool:
+    """
+    Return ``True`` when *prop_schema* matches the FK ``oneOf`` pattern.
+
+    The dispatcher emits ``{"oneOf": [{"type": "string"}, {"type": "object",
+    ...}]}`` for ``PrimaryKeyRelatedField`` and custom natural-key/PK hybrid
+    fields (see :data:`~friese_mcp.backends.discovery._FK_ITEM_SCHEMA`).
+    ``SlugRelatedField`` deliberately emits ``{"type": "string"}`` (no
+    ``oneOf``) so this predicate returns ``False`` for slug fields — their
+    bare-string values must not be wrapped.
+    """
+    one_of = prop_schema.get("oneOf", [])
+    if len(one_of) < 2:
+        return False
+    has_string = any(isinstance(s, dict) and s.get("type") == "string" for s in one_of)
+    has_object = any(isinstance(s, dict) and s.get("type") == "object" for s in one_of)
+    return has_string and has_object
+
+
+def _normalize_fk_value(value: Any) -> Any:
+    """
+    Wrap a bare non-UUID string as ``{"name": value}``; leave everything else unchanged.
+
+    Host serializers that support natural-key lookup (e.g. Nautobot's
+    ``WritableNestedSerializer``) accept both bare UUID strings and dict forms
+    ``{id, pk, name, slug}`` but reject bare name/slug strings.  Wrapping the
+    value as ``{"name": ...}`` lets the host serializer resolve it without
+    requiring the caller to know the object's UUID.
+
+    UUID strings are left unchanged — they are already valid as bare FK values
+    for ``PrimaryKeyRelatedField`` and natural-key hybrids alike.
+    """
+    if isinstance(value, str) and not _UUID_RE.match(value):
+        return {"name": value}
+    return value
+
+
+def _normalize_fk_arguments(
+    arguments: dict[str, Any], schema: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Normalize bare non-UUID string values for FK and M2M fields in *arguments*.
+
+    Walks the body payload before it is forwarded to the host ViewSet.  For
+    each argument whose JSON Schema property matches the FK ``oneOf`` pattern
+    (see :func:`_is_fk_property`):
+
+    * If the value is a plain string and **not** a UUID → wrap as
+      ``{"name": value}`` so host serializers with natural-key support can
+      resolve it.
+    * UUID strings, dicts, and non-string values pass through unchanged.
+
+    For array (M2M) fields whose ``items`` match the FK pattern, the same
+    normalization is applied element-wise to each list item.
+
+    Fields with ``{"type": "string"}`` schemas (e.g. ``SlugRelatedField``,
+    plain ``CharField``) are intentionally skipped — bare strings are the
+    expected form for those fields.
+
+    Args:
+        arguments: Caller-supplied body arguments (before request construction).
+        schema: The ``ToolDefinition.input_schema`` for the tool being invoked.
+
+    Returns:
+        A shallow copy of *arguments* with FK fields normalized; the original
+        is not mutated.
+
+    """
+    props = schema.get("properties", {})
+    if not props:
+        return arguments
+
+    result = dict(arguments)
+    for field_name, value in arguments.items():
+        prop_schema = props.get(field_name)
+        if prop_schema is None:
+            continue
+        if _is_fk_property(prop_schema):
+            result[field_name] = _normalize_fk_value(value)
+        elif prop_schema.get("type") == "array" and _is_fk_property(
+            prop_schema.get("items", {})
+        ):
+            if isinstance(value, list):
+                result[field_name] = [_normalize_fk_value(item) for item in value]
+    return result
 
 
 def _flatten_error_detail(detail: Any) -> str:
@@ -187,6 +284,13 @@ class SyncInvocation(BaseInvocationBackend):
         view_kwargs, body_args, query_args = self._split_arguments(
             tool.action, http_method, arguments
         )
+        # PKG-24: pre-flight FK normalization.  Bare non-UUID strings for
+        # PrimaryKeyRelatedField / natural-key hybrid fields (e.g. Nautobot's
+        # WritableNestedSerializer) are wrapped as {"name": value} so the host
+        # serializer can resolve them.  SlugRelatedField and plain CharField
+        # fields are identified by their {"type": "string"} schema and skipped.
+        if body_args:
+            body_args = _normalize_fk_arguments(body_args, tool.input_schema)
         inner_req = self._build_request(http_method, body_args, query_args, request)
 
         # Pass DRF's default parsers so the synthetic Request can deserialise
