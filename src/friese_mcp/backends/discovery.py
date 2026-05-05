@@ -21,7 +21,7 @@ from typing import Any
 
 from django.contrib.auth.models import AnonymousUser
 from django.urls import URLPattern, URLResolver, get_resolver
-from rest_framework.relations import ManyRelatedField, RelatedField
+from rest_framework.relations import ManyRelatedField, RelatedField, SlugRelatedField
 from rest_framework.serializers import ListSerializer
 from rest_framework.viewsets import ViewSetMixin
 
@@ -705,7 +705,19 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
     for plain scalar fields.
     """
     if isinstance(field, ManyRelatedField):
+        # When the child relation is a SlugRelatedField, each item is a bare
+        # slug string — not a UUID or dict form.  Emit an array-of-strings
+        # schema so the normalization layer does not incorrectly wrap items.
+        child = getattr(field, "child_relation", None)
+        if isinstance(child, SlugRelatedField):
+            return {"type": "array", "items": {"type": "string"}}
         return {"type": "array", "items": dict(_FK_ITEM_SCHEMA)}
+    if isinstance(field, SlugRelatedField):
+        # SlugRelatedField accepts a bare slug string — the host serializer
+        # handles the slug→object lookup internally.  Emitting the full
+        # oneOf FK schema would cause the pre-flight normalization in
+        # SyncInvocation to incorrectly wrap "my-slug" as {"name": "my-slug"}.
+        return {"type": "string"}
     if isinstance(field, RelatedField):
         return dict(_FK_ITEM_SCHEMA)
     if isinstance(field, ListSerializer):

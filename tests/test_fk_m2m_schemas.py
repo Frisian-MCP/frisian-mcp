@@ -21,6 +21,11 @@ from friese_mcp.backends.discovery import (
     _field_to_schema,
     _schema_from_serializer,
 )
+from friese_mcp.backends.invocation import (
+    _is_fk_property,
+    _normalize_fk_arguments,
+    _normalize_fk_value,
+)
 
 # ---------------------------------------------------------------------------
 # Stub serializers covering each field shape
@@ -38,6 +43,13 @@ class _SlugFKSerializer(serializers.Serializer):  # type: ignore[type-arg]
     """Single FK field via SlugRelatedField."""
 
     owner = serializers.SlugRelatedField(queryset=[], slug_field="username", required=False)
+
+
+class _M2MSlugSerializer(serializers.Serializer):  # type: ignore[type-arg]
+    """M2M field backed by SlugRelatedField (many=True)."""
+
+    name = serializers.CharField()
+    groups = serializers.SlugRelatedField(queryset=[], slug_field="name", many=True, required=False)
 
 
 class _M2MSerializer(serializers.Serializer):  # type: ignore[type-arg]
@@ -95,12 +107,15 @@ class TestFieldToSchema:
         schema = _field_to_schema(_FKSerializer().fields["parent"])
         assert schema == _FK_ITEM_SCHEMA
 
-    def test_slug_related_field_emits_oneof(self) -> None:
-        """SlugRelatedField is also a RelatedField → same FK shape."""
+    def test_slug_related_field_emits_plain_string(self) -> None:
+        """SlugRelatedField → plain {"type": "string"} — bare slug is the expected form."""
         schema = _field_to_schema(_SlugFKSerializer().fields["owner"])
-        assert "oneOf" in schema
-        assert any(branch.get("type") == "string" for branch in schema["oneOf"])
-        assert any(branch.get("type") == "object" for branch in schema["oneOf"])
+        assert schema == {"type": "string"}
+
+    def test_m2m_slug_child_emits_array_of_strings(self) -> None:
+        """ManyRelatedField wrapping a SlugRelatedField → array of bare strings."""
+        schema = _field_to_schema(_M2MSlugSerializer().fields["groups"])
+        assert schema == {"type": "array", "items": {"type": "string"}}
 
     def test_many_related_field_emits_array(self) -> None:
         """ManyRelatedField → array of FK items."""
@@ -254,3 +269,139 @@ class TestTagFieldFormsValidate:
         schema = _schema_from_serializer(_TagSerializer)["properties"]["tags"]
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate([{"name": "alpha"}], schema)
+
+
+# ---------------------------------------------------------------------------
+# PKG-24 — pre-flight FK normalization helpers
+# ---------------------------------------------------------------------------
+
+# Minimal FK schema matching the dispatcher's _FK_ITEM_SCHEMA pattern.
+_FK_PROP: dict[str, Any] = {
+    "oneOf": [
+        {"type": "string"},
+        {"type": "object", "properties": {"id": {"type": "string"}}, "additionalProperties": True},
+    ]
+}
+
+_M2M_PROP: dict[str, Any] = {"type": "array", "items": _FK_PROP}
+
+_NORMALIZATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "parent": _FK_PROP,
+        "tags": _M2M_PROP,
+        "name": {"type": "string"},
+        "owner": {"type": "string"},  # SlugRelatedField — plain string, not FK oneOf
+    },
+}
+
+
+class TestIsFkProperty:
+    """Unit tests for _is_fk_property predicate."""
+
+    def test_fk_oneof_schema_detected(self) -> None:
+        """The oneOf [string, object] pattern is recognized as a FK schema."""
+        assert _is_fk_property(_FK_PROP) is True
+
+    def test_plain_string_schema_not_detected(self) -> None:
+        """A plain {"type": "string"} schema (SlugRelatedField etc.) is not FK."""
+        assert _is_fk_property({"type": "string"}) is False
+
+    def test_array_schema_not_detected(self) -> None:
+        """An array schema is not itself a FK schema."""
+        assert _is_fk_property(_M2M_PROP) is False
+
+    def test_empty_schema_not_detected(self) -> None:
+        """An empty schema returns False without error."""
+        assert _is_fk_property({}) is False
+
+
+class TestNormalizeFkValue:
+    """Unit tests for _normalize_fk_value."""
+
+    def test_bare_slug_wrapped_as_name(self) -> None:
+        """A human-readable name string becomes {"name": value}."""
+        assert _normalize_fk_value("active") == {"name": "active"}
+
+    def test_uuid_passes_through(self) -> None:
+        """A UUID string is valid as-is and must not be wrapped."""
+        uid = "12345678-1234-5678-1234-567812345678"
+        assert _normalize_fk_value(uid) == uid
+
+    def test_uuid_uppercase_passes_through(self) -> None:
+        """UUID strings are case-insensitive; uppercase passes through unchanged."""
+        uid = "12345678-1234-5678-1234-567812345678".upper()
+        assert _normalize_fk_value(uid) == uid
+
+    def test_dict_passes_through(self) -> None:
+        """An already-dict value is returned unchanged."""
+        val = {"id": "some-uuid"}
+        assert _normalize_fk_value(val) is val
+
+    def test_none_passes_through(self) -> None:
+        """None is not a string; it passes through without wrapping."""
+        assert _normalize_fk_value(None) is None
+
+    def test_integer_passes_through(self) -> None:
+        """Non-string values are never wrapped."""
+        assert _normalize_fk_value(42) == 42
+
+
+class TestNormalizeFkArguments:
+    """Unit tests for _normalize_fk_arguments."""
+
+    def test_bare_slug_for_fk_field_wrapped(self) -> None:
+        """A bare name string for a FK field is wrapped as {"name": value}."""
+        args = {"parent": "region", "name": "test"}
+        result = _normalize_fk_arguments(args, _NORMALIZATION_SCHEMA)
+        assert result["parent"] == {"name": "region"}
+        assert result["name"] == "test"  # plain CharField untouched
+
+    def test_uuid_for_fk_field_passes_through(self) -> None:
+        """A UUID string for a FK field is not wrapped."""
+        uid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        result = _normalize_fk_arguments({"parent": uid}, _NORMALIZATION_SCHEMA)
+        assert result["parent"] == uid
+
+    def test_dict_for_fk_field_passes_through(self) -> None:
+        """An already-dict value for a FK field is not modified."""
+        val = {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+        result = _normalize_fk_arguments({"parent": val}, _NORMALIZATION_SCHEMA)
+        assert result["parent"] == val
+
+    def test_m2m_items_normalized_individually(self) -> None:
+        """Each item in an M2M array is normalized; UUIDs pass through."""
+        uid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        result = _normalize_fk_arguments(
+            {"tags": ["alpha", uid, {"name": "gamma"}]}, _NORMALIZATION_SCHEMA
+        )
+        assert result["tags"] == [{"name": "alpha"}, uid, {"name": "gamma"}]
+
+    def test_m2m_empty_list_passes_through(self) -> None:
+        """An empty list (M2M clear) passes through without error."""
+        result = _normalize_fk_arguments({"tags": []}, _NORMALIZATION_SCHEMA)
+        assert result["tags"] == []
+
+    def test_slug_field_string_untouched(self) -> None:
+        """A plain-string schema field (SlugRelatedField) is never wrapped."""
+        result = _normalize_fk_arguments({"owner": "my-slug"}, _NORMALIZATION_SCHEMA)
+        assert result["owner"] == "my-slug"
+
+    def test_unknown_field_passes_through(self) -> None:
+        """An argument not in the schema properties is left unchanged."""
+        result = _normalize_fk_arguments(
+            {"unknown_field": "some-value"}, _NORMALIZATION_SCHEMA
+        )
+        assert result["unknown_field"] == "some-value"
+
+    def test_empty_schema_returns_args_unchanged(self) -> None:
+        """When schema has no properties, arguments are returned as-is."""
+        args = {"parent": "region"}
+        result = _normalize_fk_arguments(args, {"type": "object"})
+        assert result == args
+
+    def test_original_dict_not_mutated(self) -> None:
+        """The input arguments dict is not modified in place."""
+        args = {"parent": "region"}
+        _normalize_fk_arguments(args, _NORMALIZATION_SCHEMA)
+        assert args["parent"] == "region"  # shallow copy only
