@@ -22,14 +22,18 @@ To accept *either* OAuth tokens or static Bearer tokens::
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from django.conf import settings
 from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 from .models import OAuthAccessToken, _hmac_secret
 from .views import _get_base_url
+
+logger = logging.getLogger(__name__)
 
 
 class OAuthServicePrincipal:
@@ -132,6 +136,24 @@ class OAuthTokenAuthentication(BaseAuthentication):
             raise AuthenticationFailed("OAuth token has expired.")
 
         OAuthAccessToken.objects.filter(pk=access_token.pk).update(last_used_at=timezone.now())
+
+        # If the host app requires request.user to be a real Django User (e.g.
+        # Nautobot's ObjectChange FK), operators can set FRIESE_MCP_OAUTH_SERVICE_USER
+        # to the username of a dedicated service account.  Tier resolution is
+        # unaffected — it reads request.auth.permission (the OAuthAccessToken), not
+        # request.user attributes.
+        service_username: str | None = getattr(settings, "FRIESE_MCP_OAUTH_SERVICE_USER", None)
+        if service_username:
+            from django.contrib.auth import get_user_model  # pylint: disable=import-outside-toplevel
+            User = get_user_model()
+            try:
+                return (User.objects.get(username=service_username), access_token)
+            except User.DoesNotExist:
+                logger.warning(
+                    "FRIESE_MCP_OAUTH_SERVICE_USER '%s' not found; "
+                    "falling back to OAuthServicePrincipal",
+                    service_username,
+                )
 
         return (OAuthServicePrincipal(permission=access_token.permission), access_token)
 
