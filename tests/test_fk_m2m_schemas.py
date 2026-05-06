@@ -22,6 +22,7 @@ from friese_mcp.backends.discovery import (
     _schema_from_serializer,
 )
 from friese_mcp.backends.invocation import (
+    _extract_list_body,
     _is_fk_property,
     _normalize_fk_arguments,
     _normalize_fk_value,
@@ -94,6 +95,33 @@ class _TagSerializer(serializers.Serializer):  # type: ignore[type-arg]
     tags = TagSerializerField(required=False)
 
 
+# A duck-typed ContentTypeField stand-in — exercises the class-name fallback
+# for host-app fields (e.g. Nautobot's ContentTypeField) that accept bare
+# "app_label.model" strings rather than UUID/dict FK form.
+class ContentTypeField(serializers.RelatedField):  # type: ignore[type-arg]
+    """Stub with the canonical name; treated as a bare-string field."""
+
+    def to_representation(self, value: Any) -> Any:  # pragma: no cover
+        return str(value)
+
+    def to_internal_value(self, data: Any) -> Any:  # pragma: no cover
+        return data
+
+
+class _ContentTypeSingleSerializer(serializers.Serializer):  # type: ignore[type-arg]
+    """Serializer with a single ContentTypeField (non-M2M)."""
+
+    name = serializers.CharField()
+    content_type = ContentTypeField(queryset=[], required=False)
+
+
+class _ContentTypeM2MSerializer(serializers.Serializer):  # type: ignore[type-arg]
+    """Serializer with a ManyRelatedField wrapping a ContentTypeField (M2M)."""
+
+    name = serializers.CharField()
+    content_types = ContentTypeField(queryset=[], many=True, required=False)
+
+
 # ---------------------------------------------------------------------------
 # _field_to_schema — unit tests
 # ---------------------------------------------------------------------------
@@ -138,6 +166,25 @@ class TestFieldToSchema:
         """A plain CharField still goes through the simple table lookup."""
         schema = _field_to_schema(_ScalarOnlySerializer().fields["name"])
         assert schema == {"type": "string"}
+
+    def test_content_type_single_field_emits_string(self) -> None:
+        """Single ContentTypeField → plain {"type": "string"} — no FK oneOf wrapping."""
+        schema = _field_to_schema(_ContentTypeSingleSerializer().fields["content_type"])
+        assert schema == {"type": "string"}
+
+    def test_content_type_m2m_field_emits_array_of_strings(self) -> None:
+        """ManyRelatedField wrapping ContentTypeField → array of bare strings, not FK items."""
+        schema = _field_to_schema(_ContentTypeM2MSerializer().fields["content_types"])
+        assert schema == {"type": "array", "items": {"type": "string"}}
+
+    def test_content_type_m2m_not_normalized(self) -> None:
+        """content_types strings must NOT be wrapped as {"name": ...} by the normalization layer."""
+        schema = {"type": "object", "properties": {
+            "content_types": {"type": "array", "items": {"type": "string"}},
+        }}
+        args = {"content_types": ["dcim.device", "dcim.rack", "ipam.prefix"]}
+        result = _normalize_fk_arguments(args, schema)
+        assert result["content_types"] == ["dcim.device", "dcim.rack", "ipam.prefix"]
 
 
 # ---------------------------------------------------------------------------
@@ -405,3 +452,174 @@ class TestNormalizeFkArguments:
         args = {"parent": "region"}
         _normalize_fk_arguments(args, _NORMALIZATION_SCHEMA)
         assert args["parent"] == "region"  # shallow copy only
+
+
+# ---------------------------------------------------------------------------
+# _extract_list_body — bulk-create list unwrapping
+# ---------------------------------------------------------------------------
+
+
+class TestExtractListBody:
+    """_extract_list_body detects the bulk-create list convention."""
+
+    def test_objects_key_returns_list(self) -> None:
+        assert _extract_list_body({"objects": [{"name": "a"}, {"name": "b"}]}) == [
+            {"name": "a"},
+            {"name": "b"},
+        ]
+
+    def test_data_key_returns_list(self) -> None:
+        assert _extract_list_body({"data": [{"id": 1}]}) == [{"id": 1}]
+
+    def test_items_key_returns_list(self) -> None:
+        assert _extract_list_body({"items": [{"x": 1}]}) == [{"x": 1}]
+
+    def test_underscore_items_key_returns_list(self) -> None:
+        assert _extract_list_body({"_items": [{"x": 1}]}) == [{"x": 1}]
+
+    def test_unknown_key_returns_none(self) -> None:
+        assert _extract_list_body({"records": [{"name": "a"}]}) is None
+
+    def test_two_keys_returns_none(self) -> None:
+        """More than one key → not the list-body convention."""
+        assert _extract_list_body({"objects": [{"name": "a"}], "extra": 1}) is None
+
+    def test_value_not_list_returns_none(self) -> None:
+        assert _extract_list_body({"objects": {"name": "a"}}) is None
+
+    def test_empty_list_is_detected(self) -> None:
+        """An empty list is still the list-body convention (bulk-clear intent)."""
+        assert _extract_list_body({"objects": []}) == []
+
+    def test_regular_create_dict_returns_none(self) -> None:
+        """A normal create payload (multiple keys) is not mistaken for list-body."""
+        assert _extract_list_body({"name": "dev1", "device_type": "uuid", "role": "uuid"}) is None
+
+    def test_body_key_returns_list(self) -> None:
+        """The 'body' key (used by some orchestrators) is also a list-body convention."""
+        assert _extract_list_body({"body": [{"name": "a"}, {"name": "b"}]}) == [
+            {"name": "a"},
+            {"name": "b"},
+        ]
+
+
+# ---------------------------------------------------------------------------
+# registry.dispatch — bulk list-body bypasses required-field schema validation
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryDispatchListBodyBypass:
+    """
+    registry.dispatch skips required-field schema validation when arguments
+    look like a bulk list body ({objects: [...]} etc.), allowing bulk creates
+    to reach the invocation backend without being rejected by the single-item
+    schema (which has required fields like 'location' for devices).
+    """
+
+    def test_list_body_bypasses_required_field_validation(self) -> None:
+        """
+        A tool with required fields should not reject {objects: [...]} —
+        the list is the body, not a single-item create.
+        """
+        from django.http import HttpRequest
+
+        from friese_mcp.registry import ToolRegistry, ToolInputError
+
+        reg = ToolRegistry()
+        results = []
+
+        def handler(arguments: dict, request: HttpRequest) -> str:
+            results.append(arguments)
+            return "ok"
+
+        reg.register(
+            name="device.create",
+            fn=handler,
+            description="Create device",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "location": {"type": "string"},
+                },
+                "required": ["name", "location"],
+            },
+            permission_tier="read_write",
+        )
+
+        request = HttpRequest()
+        request.user = type("U", (), {"is_authenticated": True, "is_superuser": True})()
+        request.auth = type("A", (), {"permission": "read_write"})()
+
+        # {objects: [...]} should bypass required-field validation and reach the handler
+        reg.dispatch(request, "device.create", {"objects": [{"name": "d1", "location": "nyc"}]})
+        assert results == [{"objects": [{"name": "d1", "location": "nyc"}]}]
+
+    def test_list_body_missing_required_does_not_raise(self) -> None:
+        """
+        Even if individual items lack required fields, the schema layer should
+        not reject them — the host serializer is responsible for per-item validation.
+        """
+        from django.http import HttpRequest
+
+        from friese_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        results = []
+
+        def handler(arguments: dict, request: HttpRequest) -> str:
+            results.append(arguments)
+            return "ok"
+
+        reg.register(
+            name="device.create",
+            fn=handler,
+            description="Create device",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "location": {"type": "string"}},
+                "required": ["name", "location"],
+            },
+            permission_tier="read_write",
+        )
+
+        request = HttpRequest()
+        request.user = type("U", (), {"is_authenticated": True, "is_superuser": True})()
+        request.auth = type("A", (), {"permission": "read_write"})()
+
+        # Items missing 'location' — schema layer should pass, handler should be called
+        reg.dispatch(request, "device.create", {"objects": [{"name": "d1"}]})
+        assert len(results) == 1
+
+    def test_normal_create_still_validates_required_fields(self) -> None:
+        """
+        A regular single-create call that is missing a required field still
+        raises ToolInputError — the bypass is list-body-only.
+        """
+        from django.http import HttpRequest
+
+        from friese_mcp.registry import ToolInputError, ToolRegistry
+
+        reg = ToolRegistry()
+
+        def handler(arguments: dict, request: HttpRequest) -> str:
+            return "ok"
+
+        reg.register(
+            name="device.create",
+            fn=handler,
+            description="Create device",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "location": {"type": "string"}},
+                "required": ["name", "location"],
+            },
+            permission_tier="read_write",
+        )
+
+        request = HttpRequest()
+        request.user = type("U", (), {"is_authenticated": True, "is_superuser": True})()
+        request.auth = type("A", (), {"permission": "read_write"})()
+
+        with pytest.raises(ToolInputError, match="location"):
+            reg.dispatch(request, "device.create", {"name": "d1"})

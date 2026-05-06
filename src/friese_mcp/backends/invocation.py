@@ -49,6 +49,13 @@ _UUID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Param key names that signal a "list body" bulk-create convention.  When a write
+# action's body_args dict has exactly one of these keys and its value is a list,
+# the list is unwrapped and sent as the JSON array body so that host serializers
+# that accept "[{...}, ...]" for bulk-create (e.g. Nautobot's create and bulk_create)
+# receive the expected shape instead of {"objects": [...]}.
+_LIST_BODY_KEYS: frozenset[str] = frozenset({"objects", "data", "items", "_items", "body"})
+
 
 def _is_fk_property(prop_schema: dict[str, Any]) -> bool:
     """
@@ -85,6 +92,23 @@ def _normalize_fk_value(value: Any) -> Any:
     if isinstance(value, str) and not _UUID_RE.match(value):
         return {"name": value}
     return value
+
+
+def _extract_list_body(body_args: dict[str, Any]) -> list[Any] | None:
+    """
+    Return the list value when *body_args* matches the bulk-create convention.
+
+    When a caller passes ``{"objects": [{...}, ...]}`` (or ``"data"``/``"items"``)
+    as the only key in the body dict, the nested list is the intended JSON array
+    body for host serializers that accept ``[{...}, ...]`` for bulk-create.
+    Returns ``None`` when the dict does not match the convention (normal single-
+    object create).
+    """
+    if len(body_args) == 1:
+        key, value = next(iter(body_args.items()))
+        if key in _LIST_BODY_KEYS and isinstance(value, list):
+            return value
+    return None
 
 
 def _normalize_fk_arguments(
@@ -193,6 +217,8 @@ def _exception_envelope_message(exc: BaseException) -> str:
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
 
 # Map standard ViewSet action name → HTTP method for the synthetic request.
+# Includes Nautobot-style bulk list-route actions (PUT/PATCH/DELETE on the
+# list endpoint) so they are dispatched with the correct HTTP verb.
 _ACTION_TO_HTTP: dict[str, str] = {
     "list": "get",
     "retrieve": "get",
@@ -200,6 +226,9 @@ _ACTION_TO_HTTP: dict[str, str] = {
     "update": "put",
     "partial_update": "patch",
     "destroy": "delete",
+    "bulk_update": "put",
+    "bulk_partial_update": "patch",
+    "bulk_destroy": "delete",
 }
 
 # HTTP methods that carry arguments as query parameters rather than a body.
@@ -289,8 +318,19 @@ class SyncInvocation(BaseInvocationBackend):
         # WritableNestedSerializer) are wrapped as {"name": value} so the host
         # serializer can resolve them.  SlugRelatedField and plain CharField
         # fields are identified by their {"type": "string"} schema and skipped.
+        #
+        # Bulk-create convention: if the body dict has exactly one key in
+        # _LIST_BODY_KEYS (e.g. {"objects": [{...}, ...]}) the list is unwrapped
+        # so the host serializer receives a JSON array body rather than a nested
+        # dict.  FK normalization is skipped for list bodies (the host serializer
+        # accepts the items as-is; agents should provide UUIDs or {"name": ...}
+        # dicts directly in each element).
         if body_args:
-            body_args = _normalize_fk_arguments(body_args, tool.input_schema)
+            list_body = _extract_list_body(body_args)
+            if list_body is not None:
+                body_args = list_body  # type: ignore[assignment]
+            else:
+                body_args = _normalize_fk_arguments(body_args, tool.input_schema)
         inner_req = self._build_request(http_method, body_args, query_args, request)
 
         # Pass DRF's default parsers so the synthetic Request can deserialise
@@ -483,7 +523,12 @@ class SyncInvocation(BaseInvocationBackend):
         req.META["QUERY_STRING"] = qs
         req.GET = QueryDict(qs)
 
-        if http_method not in _GET_METHODS and http_method != "delete" and body_args:
+        # Send a body for any non-GET method that has one.  DELETE is included
+        # because bulk_destroy (DELETE to a list route) carries a body of
+        # [{"id": ...}, ...] — unlike single-object destroy which has no body.
+        # Regular destroy sends empty body_args (pk is in view_kwargs) so the
+        # ``body_args`` truthiness check keeps single-object DELETE body-free.
+        if http_method not in _GET_METHODS and body_args:
             body_bytes = json.dumps(body_args).encode("utf-8")
             req.META["CONTENT_TYPE"] = "application/json"
             req.META["CONTENT_LENGTH"] = str(len(body_bytes))

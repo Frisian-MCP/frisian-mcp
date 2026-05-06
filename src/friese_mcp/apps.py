@@ -444,9 +444,13 @@ def _make_invocation_fn(
     """
 
     def _invoke(arguments: dict[str, Any], request: HttpRequest) -> Any:
+        from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
+            ToolInvocationError,
+        )
+
         result = invocation.invoke(tool_def, arguments, request)
         if result.is_error:
-            raise RuntimeError(str(result.content))
+            raise ToolInvocationError(result.content)
         return result.content
 
     return _invoke

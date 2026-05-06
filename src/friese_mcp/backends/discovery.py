@@ -33,6 +33,11 @@ try:
 except ImportError:
     _DjangoFilterBackend = None  # type: ignore[assignment,misc]
 
+try:
+    from rest_framework.renderers import JSONRenderer as _JSONRenderer
+except ImportError:  # pragma: no cover
+    _JSONRenderer = None  # type: ignore[assignment,misc]
+
 from friese_mcp.backends.base import BaseDiscoveryBackend, ToolDefinition
 
 logger = logging.getLogger(__name__)
@@ -117,7 +122,11 @@ _VERSION_SEGMENTS: frozenset[str] = frozenset({"api", "rest", "v1", "v2", "v3", 
 _READ_ONLY_ACTIONS: frozenset[str] = frozenset({"list", "retrieve"})
 
 # Standard actions that carry a request body and benefit from serializer introspection.
-_BODY_ACTIONS: frozenset[str] = frozenset({"create", "update", "partial_update"})
+# bulk_update / bulk_partial_update operate on the list route and carry a body of
+# [{id, ...field...}, ...] — the same serializer class is used so introspection works.
+_BODY_ACTIONS: frozenset[str] = frozenset(
+    {"create", "update", "partial_update", "bulk_update", "bulk_partial_update"}
+)
 
 # All six standard DRF actions.  Custom @action methods are those NOT in this set.
 _STANDARD_ACTIONS: frozenset[str] = frozenset(
@@ -283,6 +292,28 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             return
         if getattr(cls, "_mcp_ignore", False):
             return
+
+        # Skip UI ViewSets — those that explicitly declare renderer_classes with no
+        # JSONRenderer subclass.  Nautobot's NautobotUIViewSet sets
+        # renderer_classes = [NautobotHTMLRenderer] (a BrowsableAPIRenderer subclass,
+        # NOT TemplateHTMLRenderer), so the previous TemplateHTMLRenderer check missed
+        # it.  The safe discriminator: if renderer_classes is explicitly set on the
+        # class and contains NO JSONRenderer subclass, the ViewSet produces only HTML
+        # and is not a REST API surface.  ViewSets that use the api_settings default
+        # (renderer_classes not explicitly set) are left untouched.
+        if _JSONRenderer is not None:
+            explicit_renderers: list[type] | None = getattr(cls, "renderer_classes", None)
+            if explicit_renderers:
+                has_json = any(
+                    isinstance(r, type) and issubclass(r, _JSONRenderer)
+                    for r in explicit_renderers
+                )
+                if not has_json:
+                    logger.debug(
+                        "friese_mcp: skipping %s — no JSONRenderer in renderer_classes (UI ViewSet)",
+                        cls.__name__,
+                    )
+                    return
 
         actions: dict[str, str] = getattr(view_func, "actions", {})
         # The full URL path is needed (a) to derive the resource name when
@@ -721,6 +752,12 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
         child = getattr(field, "child_relation", None)
         if isinstance(child, SlugRelatedField):
             return {"type": "array", "items": {"type": "string"}}
+        # ContentTypeField (e.g. Nautobot's nautobot.core.api.fields.ContentTypeField)
+        # accepts bare "app_label.model" strings — same contract as SlugRelatedField.
+        # Detected by class name to avoid a hard import from the host app.
+        child_class_name = type(child).__name__ if child is not None else ""
+        if "ContentType" in child_class_name:
+            return {"type": "array", "items": {"type": "string"}}
         return {"type": "array", "items": dict(_FK_ITEM_SCHEMA)}
     if isinstance(field, SlugRelatedField):
         # SlugRelatedField accepts a bare slug string — the host serializer
@@ -729,6 +766,9 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
         # SyncInvocation to incorrectly wrap "my-slug" as {"name": "my-slug"}.
         return {"type": "string"}
     if isinstance(field, RelatedField):
+        # ContentTypeField accepts bare "app_label.model" strings (not dict form).
+        if "ContentType" in type(field).__name__:
+            return {"type": "string"}
         return dict(_FK_ITEM_SCHEMA)
     if isinstance(field, ListSerializer):
         return {"type": "array", "items": {"type": "object"}}

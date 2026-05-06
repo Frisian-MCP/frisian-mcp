@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
 
+#: Single-key argument dicts whose value is a list are treated as bulk-create
+#: (or bulk-update/destroy) bodies.  When detected in :meth:`ToolRegistry.dispatch`
+#: the required-field schema validation is skipped — the host serializer validates
+#: each item individually.  Mirrors ``_LIST_BODY_KEYS`` in ``backends.invocation``.
+_BULK_LIST_BODY_KEYS: frozenset[str] = frozenset(
+    {"objects", "data", "items", "_items", "body"}
+)
+
 #: Recognised role-keys for ``FRIESE_MCP_TOKEN_TIER_MAP`` lookup.  Probed in
 #: this order against ``request.user`` attributes — the first match wins.
 _TOKEN_TIER_MAP_ROLE_PROBES: tuple[tuple[str, str], ...] = (
@@ -159,6 +167,20 @@ class ToolNotFoundError(LookupError):
 
 class ToolInputError(ValueError):
     """Raised when tool arguments fail JSON Schema validation."""
+
+
+class ToolInvocationError(Exception):
+    """
+    Raised by the tool invocation shim when the backend returns is_error=True.
+
+    Carries the original error *content* (dict or string) so that views.py can
+    forward it directly to the MCP client as an ``isError: true`` response
+    instead of hiding it behind the generic "Internal tool error" fallback.
+    """
+
+    def __init__(self, content: Any) -> None:
+        self.content: Any = content
+        super().__init__(str(content))
 
 
 class _ToolEntry:  # pylint: disable=too-many-instance-attributes
@@ -464,7 +486,18 @@ class ToolRegistry:
         # without triggering an enum mismatch — "help" is intentionally absent from
         # the action enum in the inputSchema.
         is_dispatcher_help = entry.is_dispatcher and arguments.get("action") == "help"
-        if not is_dispatcher_help:
+
+        # Bulk list-body calls ({objects: [...]} etc.) bypass required-field
+        # validation — the host serializer validates each item individually.
+        # Without this, a single-create schema (with required fields like
+        # "location") rejects a valid bulk payload before it reaches invocation.
+        _is_list_body = (
+            len(arguments) == 1
+            and next(iter(arguments)) in _BULK_LIST_BODY_KEYS
+            and isinstance(next(iter(arguments.values())), list)
+        )
+
+        if not is_dispatcher_help and not _is_list_body:
             try:
                 jsonschema.validate(instance=arguments, schema=entry.input_schema)
             except jsonschema.exceptions.ValidationError as exc:
