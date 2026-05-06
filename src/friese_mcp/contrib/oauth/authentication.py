@@ -137,25 +137,39 @@ class OAuthTokenAuthentication(BaseAuthentication):
 
         OAuthAccessToken.objects.filter(pk=access_token.pk).update(last_used_at=timezone.now())
 
-        # If the host app requires request.user to be a real Django User (e.g.
-        # Nautobot's ObjectChange FK), operators can set FRIESE_MCP_OAUTH_SERVICE_USER
-        # to the username of a dedicated service account.  Tier resolution is
-        # unaffected — it reads request.auth.permission (the OAuthAccessToken), not
-        # request.user attributes.
-        service_username: str | None = getattr(settings, "FRIESE_MCP_OAUTH_SERVICE_USER", None)
-        if service_username:
+        principal = OAuthServicePrincipal(permission=access_token.permission)
+
+        # Some host frameworks (e.g. Nautobot) require request.user to be a real
+        # Django User instance for audit-log FKs (ObjectChange.user).  Resolve a
+        # backing User in priority order:
+        #   1. FRIESE_MCP_OAUTH_SERVICE_USER setting — explicit named account.
+        #   2. Auto-detect: first superuser in the DB (covers Nautobot and similar).
+        #   3. Fall back to OAuthServicePrincipal (no User model or no superuser).
+        # Tier resolution is unaffected — _resolve_request_tier reads
+        # request.auth.permission (the OAuthAccessToken), not request.user.
+        try:
             from django.contrib.auth import get_user_model  # pylint: disable=import-outside-toplevel
             User = get_user_model()
-            try:
-                return (User.objects.get(username=service_username), access_token)
-            except User.DoesNotExist:
-                logger.warning(
-                    "FRIESE_MCP_OAUTH_SERVICE_USER '%s' not found; "
-                    "falling back to OAuthServicePrincipal",
-                    service_username,
-                )
+            service_username: str | None = getattr(settings, "FRIESE_MCP_OAUTH_SERVICE_USER", None)
+            if service_username:
+                django_user = User.objects.filter(username=service_username).first()
+                if django_user is None:
+                    logger.warning(
+                        "FRIESE_MCP_OAUTH_SERVICE_USER '%s' not found; trying superuser",
+                        service_username,
+                    )
+            else:
+                django_user = None
 
-        return (OAuthServicePrincipal(permission=access_token.permission), access_token)
+            if django_user is None:
+                django_user = User.objects.filter(is_superuser=True).order_by("pk").first()
+
+            if django_user is not None:
+                return (django_user, access_token)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+        return (principal, access_token)
 
     def authenticate_header(self, request: Any) -> str:
         """Return the WWW-Authenticate header value for 401 responses."""
