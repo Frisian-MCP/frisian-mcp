@@ -34,9 +34,9 @@ except ImportError:
     _DjangoFilterBackend = None  # type: ignore[assignment,misc]
 
 try:
-    from rest_framework.renderers import TemplateHTMLRenderer as _TemplateHTMLRenderer
+    from rest_framework.renderers import JSONRenderer as _JSONRenderer
 except ImportError:  # pragma: no cover
-    _TemplateHTMLRenderer = None  # type: ignore[assignment,misc]
+    _JSONRenderer = None  # type: ignore[assignment,misc]
 
 from friese_mcp.backends.base import BaseDiscoveryBackend, ToolDefinition
 
@@ -293,22 +293,27 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         if getattr(cls, "_mcp_ignore", False):
             return
 
-        # Skip UI ViewSets — those that render HTML templates (TemplateHTMLRenderer)
-        # rather than JSON.  Calling them via SyncInvocation returns non-serialisable
-        # objects (e.g. django-tables2 Table instances) and never produces useful MCP
-        # tool output.  BrowsableAPIRenderer is intentionally NOT excluded here: it is
-        # used alongside JSONRenderer in standard REST API ViewSets.
-        if _TemplateHTMLRenderer is not None:
-            renderer_classes: list[type] = getattr(cls, "renderer_classes", None) or []
-            if any(
-                isinstance(r, type) and issubclass(r, _TemplateHTMLRenderer)
-                for r in renderer_classes
-            ):
-                logger.debug(
-                    "friese_mcp: skipping %s — TemplateHTMLRenderer detected (UI ViewSet)",
-                    cls.__name__,
+        # Skip UI ViewSets — those that explicitly declare renderer_classes with no
+        # JSONRenderer subclass.  Nautobot's NautobotUIViewSet sets
+        # renderer_classes = [NautobotHTMLRenderer] (a BrowsableAPIRenderer subclass,
+        # NOT TemplateHTMLRenderer), so the previous TemplateHTMLRenderer check missed
+        # it.  The safe discriminator: if renderer_classes is explicitly set on the
+        # class and contains NO JSONRenderer subclass, the ViewSet produces only HTML
+        # and is not a REST API surface.  ViewSets that use the api_settings default
+        # (renderer_classes not explicitly set) are left untouched.
+        if _JSONRenderer is not None:
+            explicit_renderers: list[type] | None = getattr(cls, "renderer_classes", None)
+            if explicit_renderers:
+                has_json = any(
+                    isinstance(r, type) and issubclass(r, _JSONRenderer)
+                    for r in explicit_renderers
                 )
-                return
+                if not has_json:
+                    logger.debug(
+                        "friese_mcp: skipping %s — no JSONRenderer in renderer_classes (UI ViewSet)",
+                        cls.__name__,
+                    )
+                    return
 
         actions: dict[str, str] = getattr(view_func, "actions", {})
         # The full URL path is needed (a) to derive the resource name when

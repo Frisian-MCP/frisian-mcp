@@ -54,7 +54,7 @@ _UUID_RE = re.compile(
 # the list is unwrapped and sent as the JSON array body so that host serializers
 # that accept "[{...}, ...]" for bulk-create (e.g. Nautobot's create and bulk_create)
 # receive the expected shape instead of {"objects": [...]}.
-_LIST_BODY_KEYS: frozenset[str] = frozenset({"objects", "data", "items", "_items"})
+_LIST_BODY_KEYS: frozenset[str] = frozenset({"objects", "data", "items", "_items", "body"})
 
 
 def _is_fk_property(prop_schema: dict[str, Any]) -> bool:
