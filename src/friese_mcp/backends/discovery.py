@@ -33,6 +33,11 @@ try:
 except ImportError:
     _DjangoFilterBackend = None  # type: ignore[assignment,misc]
 
+try:
+    from rest_framework.renderers import TemplateHTMLRenderer as _TemplateHTMLRenderer
+except ImportError:  # pragma: no cover
+    _TemplateHTMLRenderer = None  # type: ignore[assignment,misc]
+
 from friese_mcp.backends.base import BaseDiscoveryBackend, ToolDefinition
 
 logger = logging.getLogger(__name__)
@@ -283,6 +288,23 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             return
         if getattr(cls, "_mcp_ignore", False):
             return
+
+        # Skip UI ViewSets — those that render HTML templates (TemplateHTMLRenderer)
+        # rather than JSON.  Calling them via SyncInvocation returns non-serialisable
+        # objects (e.g. django-tables2 Table instances) and never produces useful MCP
+        # tool output.  BrowsableAPIRenderer is intentionally NOT excluded here: it is
+        # used alongside JSONRenderer in standard REST API ViewSets.
+        if _TemplateHTMLRenderer is not None:
+            renderer_classes: list[type] = getattr(cls, "renderer_classes", None) or []
+            if any(
+                isinstance(r, type) and issubclass(r, _TemplateHTMLRenderer)
+                for r in renderer_classes
+            ):
+                logger.debug(
+                    "friese_mcp: skipping %s — TemplateHTMLRenderer detected (UI ViewSet)",
+                    cls.__name__,
+                )
+                return
 
         actions: dict[str, str] = getattr(view_func, "actions", {})
         # The full URL path is needed (a) to derive the resource name when
