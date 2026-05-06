@@ -161,6 +161,20 @@ class ToolInputError(ValueError):
     """Raised when tool arguments fail JSON Schema validation."""
 
 
+class ToolInvocationError(Exception):
+    """
+    Raised by the tool invocation shim when the backend returns is_error=True.
+
+    Carries the original error *content* (dict or string) so that views.py can
+    forward it directly to the MCP client as an ``isError: true`` response
+    instead of hiding it behind the generic "Internal tool error" fallback.
+    """
+
+    def __init__(self, content: Any) -> None:
+        self.content: Any = content
+        super().__init__(str(content))
+
+
 class _ToolEntry:  # pylint: disable=too-many-instance-attributes
     __slots__ = (
         "description",

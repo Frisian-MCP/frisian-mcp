@@ -63,7 +63,7 @@ from friese_mcp.protocol import (
     JsonDict,
     JsonRpcId,
 )
-from friese_mcp.registry import ToolInputError, tool_registry
+from friese_mcp.registry import ToolInputError, ToolInvocationError, ToolNotFoundError, tool_registry
 from friese_mcp.resources import ResourceNotFoundError, resource_registry
 
 logger = logging.getLogger(__name__)
@@ -770,7 +770,7 @@ def _handle_tools_call(
         result = build_middleware_chain(
             _tool_registry_dispatch, get_middleware_instances()
         )(request, tool_name, arguments)
-    except LookupError as exc:
+    except ToolNotFoundError as exc:
         # JSON-RPC 2.0: -32601 METHOD_NOT_FOUND is the correct code for an unknown
         # tool name.  -32602 INVALID_PARAMS is reserved for structural argument
         # errors; using it for a missing tool misleads clients into thinking their
@@ -788,8 +788,32 @@ def _handle_tools_call(
         data += f" Available tools: {', '.join(sorted(known_names))}."
         data += _REFRESH_HINT
         return _jsonrpc_error(request_id, METHOD_NOT_FOUND, "Unknown tool", data)
+    except LookupError as exc:
+        # LookupError from inside a registered tool (e.g. group dispatcher raises
+        # LookupError for an unknown resource/action pair).  Distinct from the
+        # tool-not-found case above: the MCP tool exists, but the sub-action does
+        # not.  Surface as isError:true so the agent can self-correct.
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                "isError": True,
+            },
+        )
     except ToolInputError as exc:
         return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc))
+    except ToolInvocationError as exc:
+        # Backend returned ToolResult.is_error=True (non-DRF exception in the ViewSet).
+        # Forward the actual error content so the agent receives actionable feedback
+        # instead of the generic "Internal tool error" fallback.
+        content = exc.content if isinstance(exc.content, dict) else {"error": str(exc.content)}
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps(content)}],
+                "isError": True,
+            },
+        )
     except PermissionError as exc:
         # Return as isError=True tool-level content, not a JSON-RPC protocol error.
         # INVALID_PARAMS (-32602) is reserved for argument structure failures; using
@@ -820,18 +844,6 @@ def _handle_tools_call(
             request_id,
             {
                 "content": [{"type": "text", "text": json.dumps({"error": msg})}],
-                "isError": True,
-            },
-        )
-    except LookupError as exc:
-        # Group dispatchers (make_group_invoke) and @mcp_dispatcher classes raise
-        # LookupError for unknown resource/action combinations.  Surface the message
-        # as an actionable tool error instead of letting it fall to the generic
-        # Exception handler where it would be hidden as "Internal tool error" in prod.
-        return _jsonrpc_success(
-            request_id,
-            {
-                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
                 "isError": True,
             },
         )
