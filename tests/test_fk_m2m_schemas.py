@@ -22,6 +22,7 @@ from friese_mcp.backends.discovery import (
     _schema_from_serializer,
 )
 from friese_mcp.backends.invocation import (
+    _extract_list_body,
     _is_fk_property,
     _normalize_fk_arguments,
     _normalize_fk_value,
@@ -451,3 +452,45 @@ class TestNormalizeFkArguments:
         args = {"parent": "region"}
         _normalize_fk_arguments(args, _NORMALIZATION_SCHEMA)
         assert args["parent"] == "region"  # shallow copy only
+
+
+# ---------------------------------------------------------------------------
+# _extract_list_body — bulk-create list unwrapping
+# ---------------------------------------------------------------------------
+
+
+class TestExtractListBody:
+    """_extract_list_body detects the bulk-create list convention."""
+
+    def test_objects_key_returns_list(self) -> None:
+        assert _extract_list_body({"objects": [{"name": "a"}, {"name": "b"}]}) == [
+            {"name": "a"},
+            {"name": "b"},
+        ]
+
+    def test_data_key_returns_list(self) -> None:
+        assert _extract_list_body({"data": [{"id": 1}]}) == [{"id": 1}]
+
+    def test_items_key_returns_list(self) -> None:
+        assert _extract_list_body({"items": [{"x": 1}]}) == [{"x": 1}]
+
+    def test_underscore_items_key_returns_list(self) -> None:
+        assert _extract_list_body({"_items": [{"x": 1}]}) == [{"x": 1}]
+
+    def test_unknown_key_returns_none(self) -> None:
+        assert _extract_list_body({"records": [{"name": "a"}]}) is None
+
+    def test_two_keys_returns_none(self) -> None:
+        """More than one key → not the list-body convention."""
+        assert _extract_list_body({"objects": [{"name": "a"}], "extra": 1}) is None
+
+    def test_value_not_list_returns_none(self) -> None:
+        assert _extract_list_body({"objects": {"name": "a"}}) is None
+
+    def test_empty_list_is_detected(self) -> None:
+        """An empty list is still the list-body convention (bulk-clear intent)."""
+        assert _extract_list_body({"objects": []}) == []
+
+    def test_regular_create_dict_returns_none(self) -> None:
+        """A normal create payload (multiple keys) is not mistaken for list-body."""
+        assert _extract_list_body({"name": "dev1", "device_type": "uuid", "role": "uuid"}) is None

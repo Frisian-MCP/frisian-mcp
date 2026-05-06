@@ -823,6 +823,18 @@ def _handle_tools_call(
                 "isError": True,
             },
         )
+    except LookupError as exc:
+        # Group dispatchers (make_group_invoke) and @mcp_dispatcher classes raise
+        # LookupError for unknown resource/action combinations.  Surface the message
+        # as an actionable tool error instead of letting it fall to the generic
+        # Exception handler where it would be hidden as "Internal tool error" in prod.
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                "isError": True,
+            },
+        )
     except ValueError as exc:
         # IT-3: Surface ValueError raised by @mcp_tool handlers — the convention is to
         # raise ValueError for user-correctable input problems (e.g. invalid UUID, bad
