@@ -494,3 +494,132 @@ class TestExtractListBody:
     def test_regular_create_dict_returns_none(self) -> None:
         """A normal create payload (multiple keys) is not mistaken for list-body."""
         assert _extract_list_body({"name": "dev1", "device_type": "uuid", "role": "uuid"}) is None
+
+    def test_body_key_returns_list(self) -> None:
+        """The 'body' key (used by some orchestrators) is also a list-body convention."""
+        assert _extract_list_body({"body": [{"name": "a"}, {"name": "b"}]}) == [
+            {"name": "a"},
+            {"name": "b"},
+        ]
+
+
+# ---------------------------------------------------------------------------
+# registry.dispatch — bulk list-body bypasses required-field schema validation
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryDispatchListBodyBypass:
+    """
+    registry.dispatch skips required-field schema validation when arguments
+    look like a bulk list body ({objects: [...]} etc.), allowing bulk creates
+    to reach the invocation backend without being rejected by the single-item
+    schema (which has required fields like 'location' for devices).
+    """
+
+    def test_list_body_bypasses_required_field_validation(self) -> None:
+        """
+        A tool with required fields should not reject {objects: [...]} —
+        the list is the body, not a single-item create.
+        """
+        from django.http import HttpRequest
+
+        from friese_mcp.registry import ToolRegistry, ToolInputError
+
+        reg = ToolRegistry()
+        results = []
+
+        def handler(arguments: dict, request: HttpRequest) -> str:
+            results.append(arguments)
+            return "ok"
+
+        reg.register(
+            name="device.create",
+            fn=handler,
+            description="Create device",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "location": {"type": "string"},
+                },
+                "required": ["name", "location"],
+            },
+            permission_tier="read_write",
+        )
+
+        request = HttpRequest()
+        request.user = type("U", (), {"is_authenticated": True, "is_superuser": True})()
+        request.auth = type("A", (), {"permission": "read_write"})()
+
+        # {objects: [...]} should bypass required-field validation and reach the handler
+        reg.dispatch(request, "device.create", {"objects": [{"name": "d1", "location": "nyc"}]})
+        assert results == [{"objects": [{"name": "d1", "location": "nyc"}]}]
+
+    def test_list_body_missing_required_does_not_raise(self) -> None:
+        """
+        Even if individual items lack required fields, the schema layer should
+        not reject them — the host serializer is responsible for per-item validation.
+        """
+        from django.http import HttpRequest
+
+        from friese_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        results = []
+
+        def handler(arguments: dict, request: HttpRequest) -> str:
+            results.append(arguments)
+            return "ok"
+
+        reg.register(
+            name="device.create",
+            fn=handler,
+            description="Create device",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "location": {"type": "string"}},
+                "required": ["name", "location"],
+            },
+            permission_tier="read_write",
+        )
+
+        request = HttpRequest()
+        request.user = type("U", (), {"is_authenticated": True, "is_superuser": True})()
+        request.auth = type("A", (), {"permission": "read_write"})()
+
+        # Items missing 'location' — schema layer should pass, handler should be called
+        reg.dispatch(request, "device.create", {"objects": [{"name": "d1"}]})
+        assert len(results) == 1
+
+    def test_normal_create_still_validates_required_fields(self) -> None:
+        """
+        A regular single-create call that is missing a required field still
+        raises ToolInputError — the bypass is list-body-only.
+        """
+        from django.http import HttpRequest
+
+        from friese_mcp.registry import ToolInputError, ToolRegistry
+
+        reg = ToolRegistry()
+
+        def handler(arguments: dict, request: HttpRequest) -> str:
+            return "ok"
+
+        reg.register(
+            name="device.create",
+            fn=handler,
+            description="Create device",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "location": {"type": "string"}},
+                "required": ["name", "location"],
+            },
+            permission_tier="read_write",
+        )
+
+        request = HttpRequest()
+        request.user = type("U", (), {"is_authenticated": True, "is_superuser": True})()
+        request.auth = type("A", (), {"permission": "read_write"})()
+
+        with pytest.raises(ToolInputError, match="location"):
+            reg.dispatch(request, "device.create", {"name": "d1"})
