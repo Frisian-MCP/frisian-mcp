@@ -122,7 +122,11 @@ _VERSION_SEGMENTS: frozenset[str] = frozenset({"api", "rest", "v1", "v2", "v3", 
 _READ_ONLY_ACTIONS: frozenset[str] = frozenset({"list", "retrieve"})
 
 # Standard actions that carry a request body and benefit from serializer introspection.
-_BODY_ACTIONS: frozenset[str] = frozenset({"create", "update", "partial_update"})
+# bulk_update / bulk_partial_update operate on the list route and carry a body of
+# [{id, ...field...}, ...] — the same serializer class is used so introspection works.
+_BODY_ACTIONS: frozenset[str] = frozenset(
+    {"create", "update", "partial_update", "bulk_update", "bulk_partial_update"}
+)
 
 # All six standard DRF actions.  Custom @action methods are those NOT in this set.
 _STANDARD_ACTIONS: frozenset[str] = frozenset(

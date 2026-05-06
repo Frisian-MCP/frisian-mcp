@@ -217,6 +217,8 @@ def _exception_envelope_message(exc: BaseException) -> str:
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
 
 # Map standard ViewSet action name → HTTP method for the synthetic request.
+# Includes Nautobot-style bulk list-route actions (PUT/PATCH/DELETE on the
+# list endpoint) so they are dispatched with the correct HTTP verb.
 _ACTION_TO_HTTP: dict[str, str] = {
     "list": "get",
     "retrieve": "get",
@@ -224,6 +226,9 @@ _ACTION_TO_HTTP: dict[str, str] = {
     "update": "put",
     "partial_update": "patch",
     "destroy": "delete",
+    "bulk_update": "put",
+    "bulk_partial_update": "patch",
+    "bulk_destroy": "delete",
 }
 
 # HTTP methods that carry arguments as query parameters rather than a body.
@@ -518,7 +523,12 @@ class SyncInvocation(BaseInvocationBackend):
         req.META["QUERY_STRING"] = qs
         req.GET = QueryDict(qs)
 
-        if http_method not in _GET_METHODS and http_method != "delete" and body_args:
+        # Send a body for any non-GET method that has one.  DELETE is included
+        # because bulk_destroy (DELETE to a list route) carries a body of
+        # [{"id": ...}, ...] — unlike single-object destroy which has no body.
+        # Regular destroy sends empty body_args (pk is in view_kwargs) so the
+        # ``body_args`` truthiness check keeps single-object DELETE body-free.
+        if http_method not in _GET_METHODS and body_args:
             body_bytes = json.dumps(body_args).encode("utf-8")
             req.META["CONTENT_TYPE"] = "application/json"
             req.META["CONTENT_LENGTH"] = str(len(body_bytes))
