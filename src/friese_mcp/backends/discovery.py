@@ -721,6 +721,12 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
         child = getattr(field, "child_relation", None)
         if isinstance(child, SlugRelatedField):
             return {"type": "array", "items": {"type": "string"}}
+        # ContentTypeField (e.g. Nautobot's nautobot.core.api.fields.ContentTypeField)
+        # accepts bare "app_label.model" strings — same contract as SlugRelatedField.
+        # Detected by class name to avoid a hard import from the host app.
+        child_class_name = type(child).__name__ if child is not None else ""
+        if "ContentType" in child_class_name:
+            return {"type": "array", "items": {"type": "string"}}
         return {"type": "array", "items": dict(_FK_ITEM_SCHEMA)}
     if isinstance(field, SlugRelatedField):
         # SlugRelatedField accepts a bare slug string — the host serializer
@@ -729,6 +735,9 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
         # SyncInvocation to incorrectly wrap "my-slug" as {"name": "my-slug"}.
         return {"type": "string"}
     if isinstance(field, RelatedField):
+        # ContentTypeField accepts bare "app_label.model" strings (not dict form).
+        if "ContentType" in type(field).__name__:
+            return {"type": "string"}
         return dict(_FK_ITEM_SCHEMA)
     if isinstance(field, ListSerializer):
         return {"type": "array", "items": {"type": "object"}}

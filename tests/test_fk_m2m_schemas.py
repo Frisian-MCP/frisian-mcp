@@ -94,6 +94,33 @@ class _TagSerializer(serializers.Serializer):  # type: ignore[type-arg]
     tags = TagSerializerField(required=False)
 
 
+# A duck-typed ContentTypeField stand-in — exercises the class-name fallback
+# for host-app fields (e.g. Nautobot's ContentTypeField) that accept bare
+# "app_label.model" strings rather than UUID/dict FK form.
+class ContentTypeField(serializers.RelatedField):  # type: ignore[type-arg]
+    """Stub with the canonical name; treated as a bare-string field."""
+
+    def to_representation(self, value: Any) -> Any:  # pragma: no cover
+        return str(value)
+
+    def to_internal_value(self, data: Any) -> Any:  # pragma: no cover
+        return data
+
+
+class _ContentTypeSingleSerializer(serializers.Serializer):  # type: ignore[type-arg]
+    """Serializer with a single ContentTypeField (non-M2M)."""
+
+    name = serializers.CharField()
+    content_type = ContentTypeField(queryset=[], required=False)
+
+
+class _ContentTypeM2MSerializer(serializers.Serializer):  # type: ignore[type-arg]
+    """Serializer with a ManyRelatedField wrapping a ContentTypeField (M2M)."""
+
+    name = serializers.CharField()
+    content_types = ContentTypeField(queryset=[], many=True, required=False)
+
+
 # ---------------------------------------------------------------------------
 # _field_to_schema — unit tests
 # ---------------------------------------------------------------------------
@@ -138,6 +165,25 @@ class TestFieldToSchema:
         """A plain CharField still goes through the simple table lookup."""
         schema = _field_to_schema(_ScalarOnlySerializer().fields["name"])
         assert schema == {"type": "string"}
+
+    def test_content_type_single_field_emits_string(self) -> None:
+        """Single ContentTypeField → plain {"type": "string"} — no FK oneOf wrapping."""
+        schema = _field_to_schema(_ContentTypeSingleSerializer().fields["content_type"])
+        assert schema == {"type": "string"}
+
+    def test_content_type_m2m_field_emits_array_of_strings(self) -> None:
+        """ManyRelatedField wrapping ContentTypeField → array of bare strings, not FK items."""
+        schema = _field_to_schema(_ContentTypeM2MSerializer().fields["content_types"])
+        assert schema == {"type": "array", "items": {"type": "string"}}
+
+    def test_content_type_m2m_not_normalized(self) -> None:
+        """content_types strings must NOT be wrapped as {"name": ...} by the normalization layer."""
+        schema = {"type": "object", "properties": {
+            "content_types": {"type": "array", "items": {"type": "string"}},
+        }}
+        args = {"content_types": ["dcim.device", "dcim.rack", "ipam.prefix"]}
+        result = _normalize_fk_arguments(args, schema)
+        assert result["content_types"] == ["dcim.device", "dcim.rack", "ipam.prefix"]
 
 
 # ---------------------------------------------------------------------------
