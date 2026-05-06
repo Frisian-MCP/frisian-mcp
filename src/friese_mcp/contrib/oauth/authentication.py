@@ -34,21 +34,57 @@ from .views import _get_base_url
 
 class OAuthServicePrincipal:
     """
-    Minimal principal object set as ``request.user`` for OAuth client_credentials auth.
+    Principal set as ``request.user`` for OAuth-authenticated MCP requests.
 
-    Unlike :class:`~django.contrib.auth.models.AnonymousUser`, this principal has
-    ``is_authenticated = True`` so that DRF's ``IsAuthenticated`` permission class
-    allows the request.  There is no associated Django user — the MCP client is an
-    AI agent or service, not a human account.
+    ``is_authenticated = True`` satisfies DRF's ``IsAuthenticated``.  The
+    permission tier is mapped to Django's ``is_superuser`` / ``is_staff`` flags
+    so that host frameworks that call the standard Django permission interface
+    (``has_perm``, ``get_all_permissions``, ``has_module_perms``) work correctly
+    without a database-backed user record.
+
+    Tier mapping:
+
+    * ``admin``      — ``is_superuser = True``; Django bypasses all permission
+                       checks, which is appropriate for a fully-trusted service
+                       principal.
+    * ``read_write`` — ``is_staff = True``; permission methods return ``True``
+                       because MCP tier filtering is the real access gate.
+    * ``read``       — no elevated flags; permission methods return ``False`` for
+                       any write-class permission, providing a defence-in-depth
+                       layer on top of MCP tool filtering.
     """
 
     is_authenticated: bool = True
     is_anonymous: bool = False
     is_active: bool = True
-    is_staff: bool = False
-    is_superuser: bool = False
     pk: None = None
     id: None = None
+
+    def __init__(self, permission: str = "read") -> None:
+        self.permission = permission
+        self.is_superuser: bool = permission == "admin"
+        self.is_staff: bool = permission in ("read_write", "admin")
+
+    # ------------------------------------------------------------------
+    # Django permission interface
+    # Required by host apps (e.g. Nautobot) that call these on request.user.
+    # ------------------------------------------------------------------
+
+    def get_all_permissions(self, obj: object = None) -> set:
+        return set()
+
+    def has_perm(self, perm: str, obj: object = None) -> bool:
+        if self.is_superuser:
+            return True
+        if self.permission == "read_write":
+            return True
+        return False
+
+    def has_perms(self, perm_list: object, obj: object = None) -> bool:
+        return all(self.has_perm(p, obj) for p in perm_list)
+
+    def has_module_perms(self, app_label: str) -> bool:
+        return self.is_superuser or self.permission == "read_write"
 
 
 class OAuthTokenAuthentication(BaseAuthentication):
@@ -97,7 +133,7 @@ class OAuthTokenAuthentication(BaseAuthentication):
 
         OAuthAccessToken.objects.filter(pk=access_token.pk).update(last_used_at=timezone.now())
 
-        return (OAuthServicePrincipal(), access_token)
+        return (OAuthServicePrincipal(permission=access_token.permission), access_token)
 
     def authenticate_header(self, request: Any) -> str:
         """Return the WWW-Authenticate header value for 401 responses."""

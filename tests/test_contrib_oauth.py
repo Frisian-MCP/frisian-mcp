@@ -294,6 +294,35 @@ class TestOAuthTokenAuthentication:
         assert auth_user.is_authenticated is True
         assert auth_token.pk == token.pk
 
+    def test_service_principal_permission_tiers(self) -> None:
+        """OAuthServicePrincipal maps permission tier to Django permission interface."""
+        admin = OAuthServicePrincipal(permission="admin")
+        assert admin.is_superuser is True
+        assert admin.is_staff is True
+        assert admin.has_perm("dcim.add_device") is True
+        assert admin.has_module_perms("dcim") is True
+
+        rw = OAuthServicePrincipal(permission="read_write")
+        assert rw.is_superuser is False
+        assert rw.is_staff is True
+        assert rw.has_perm("dcim.add_device") is True
+
+        read = OAuthServicePrincipal(permission="read")
+        assert read.is_superuser is False
+        assert read.is_staff is False
+        assert read.has_perm("dcim.add_device") is False
+        assert read.has_module_perms("dcim") is False
+
+    def test_principal_carries_token_permission(self) -> None:
+        """authenticate() passes the token's permission tier to OAuthServicePrincipal."""
+        client = OAuthClient.objects.create(name="admin-agent", permission="admin")
+        token = OAuthAccessToken.objects.create(client=client, permission="admin")
+        req = self._fake_request(_bearer(token.plaintext_token))
+        auth_user, _ = self._auth().authenticate(req)
+        assert isinstance(auth_user, OAuthServicePrincipal)
+        assert auth_user.permission == "admin"
+        assert auth_user.is_superuser is True
+
     def test_invalid_token_raises_auth_failed(self) -> None:
         """Unrecognised token string raises AuthenticationFailed."""
         req = self._fake_request(_bearer("notarealtoken"))
