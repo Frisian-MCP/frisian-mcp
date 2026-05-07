@@ -1156,6 +1156,13 @@ class McpView(APIView):
         if not getattr(settings, "FRIESE_MCP_SSE_CHANNEL", True):
             return HttpResponse(status=405)
 
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # WSGI context — async generators cannot be streamed. Return 405 so
+            # MCP clients fall back to POST-only transport (MCP spec §transport).
+            return HttpResponse(status=405)
+
         async def _keepalive_stream() -> AsyncGenerator[str, None]:
             while True:
                 yield ": keepalive\n\n"

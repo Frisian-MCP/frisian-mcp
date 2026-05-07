@@ -101,36 +101,58 @@ class TestHttpGuards:
         response = _view(request)
         assert json.loads(response.content) == {}
 
-    def test_get_returns_200_sse(self, rf: RequestFactory) -> None:
-        """GET requests return 200 with an SSE stream per MCP Streamable HTTP spec."""
+    def test_get_returns_405_in_wsgi(self, rf: RequestFactory) -> None:
+        """GET returns 405 in a WSGI context (no running event loop).
+
+        Clients must fall back to POST-only transport per the MCP Streamable
+        HTTP spec §transport — 405 is the correct signal, not a 500 crash.
+        """
         request = rf.get("/mcp/")
         request.user = _anon_user()
         response = _view(request)
+        assert response.status_code == 405
+
+    def test_get_returns_200_sse_in_async_context(self, rf: RequestFactory) -> None:
+        """GET returns 200 SSE stream when called from within a running event loop (ASGI)."""
+        async def _call() -> Any:
+            request = rf.get("/mcp/")
+            request.user = _anon_user()
+            return _view(request)
+
+        response = asyncio.run(_call())
         assert response.status_code == 200
         assert isinstance(response, StreamingHttpResponse)
         assert "text/event-stream" in response["Content-Type"]
 
-    def test_get_sets_cache_control(self, rf: RequestFactory) -> None:
-        """GET SSE response includes Cache-Control: no-cache."""
-        request = rf.get("/mcp/")
-        request.user = _anon_user()
-        response = _view(request)
+    def test_get_sets_cache_control_in_async_context(self, rf: RequestFactory) -> None:
+        """GET SSE response includes Cache-Control: no-cache (ASGI context)."""
+        async def _call() -> Any:
+            request = rf.get("/mcp/")
+            request.user = _anon_user()
+            return _view(request)
+
+        response = asyncio.run(_call())
         assert response["Cache-Control"] == "no-cache"
 
-    def test_get_sets_x_accel_buffering(self, rf: RequestFactory) -> None:
-        """GET SSE response includes X-Accel-Buffering: no to prevent nginx proxy buffering."""
-        request = rf.get("/mcp/")
-        request.user = _anon_user()
-        response = _view(request)
+    def test_get_sets_x_accel_buffering_in_async_context(self, rf: RequestFactory) -> None:
+        """GET SSE response includes X-Accel-Buffering: no (ASGI context)."""
+        async def _call() -> Any:
+            request = rf.get("/mcp/")
+            request.user = _anon_user()
+            return _view(request)
+
+        response = asyncio.run(_call())
         assert response["X-Accel-Buffering"] == "no"
 
     def test_get_stream_first_chunk_is_keepalive(self, rf: RequestFactory) -> None:
-        """GET SSE stream first yields an SSE keepalive comment, not an empty body."""
-        request = rf.get("/mcp/")
-        request.user = _anon_user()
-        response = _view(request)
-        # _iterator holds the raw async generator; read one chunk without blocking
-        first_chunk = asyncio.run(response._iterator.__anext__())  # pylint: disable=protected-access
+        """GET SSE stream first yields an SSE keepalive comment (ASGI context)."""
+        async def _call() -> str:
+            request = rf.get("/mcp/")
+            request.user = _anon_user()
+            response = _view(request)
+            return await response._iterator.__anext__()  # pylint: disable=protected-access
+
+        first_chunk = asyncio.run(_call())
         assert first_chunk == ": keepalive\n\n"
 
     def test_unsupported_method_returns_405(self, rf: RequestFactory) -> None:
