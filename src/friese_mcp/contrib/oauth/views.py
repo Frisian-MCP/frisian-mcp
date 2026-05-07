@@ -261,25 +261,47 @@ class TokenView(View):
         # One-time use: delete the code
         django_cache.delete(f"{_AUTH_CODE_CACHE_PREFIX}{code}")
 
+        pkce_auto: bool = getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False)
+        default_permission: str = getattr(
+            settings, "FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read"
+        )
         try:
             client = OAuthClient.objects.get(client_id=client_id, is_active=True)
+            # When the configured default permission has been raised (e.g. from
+            # "read" to "read_write" or "admin"), promote existing PKCE clients
+            # so reconnections pick up the new grant without requiring a DB reset.
+            if pkce_auto and client.permission != default_permission:
+                _TIER_RANK = ["read", "read_write", "admin"]
+                existing_rank = _TIER_RANK.index(client.permission) if client.permission in _TIER_RANK else 0
+                default_rank = _TIER_RANK.index(default_permission) if default_permission in _TIER_RANK else 0
+                if default_rank > existing_rank:
+                    client.permission = default_permission
+                    client.save(update_fields=["permission"])
+                    logger.info(
+                        "oauth_pkce_client_permission_promoted",
+                        extra={"client_id": client_id, "new_permission": default_permission},
+                    )
         except OAuthClient.DoesNotExist:
             # PKCE clients (e.g. Claude.ai, Cursor) generate their own client_id and
             # never pre-register.  When FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER is True the
             # server creates a new OAuthClient on first use rather than rejecting the
-            # exchange.  The permission tier defaults to
-            # FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION (default "read").
-            if not getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False):
+            # exchange.
+            if not pkce_auto:
                 return JsonResponse(
                     {"error": "invalid_client", "error_description": "Unknown or inactive client."},
                     status=401,
                 )
-            default_permission = getattr(
-                settings, "FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read"
-            )
+            if len(client_id) > 255:
+                return JsonResponse(
+                    {
+                        "error": "invalid_client",
+                        "error_description": "client_id exceeds maximum length of 255 characters.",
+                    },
+                    status=400,
+                )
             client = OAuthClient.objects.create(
                 client_id=client_id,
-                name=f"pkce-{client_id[:8]}",
+                name=f"pkce-{client_id[:24]}",
                 permission=default_permission,
                 redirect_uris=[redirect_uri],
             )

@@ -69,10 +69,10 @@ class OAuthClient(models.Model):
     """
 
     client_id = models.CharField(
-        max_length=32,
+        max_length=255,
         unique=True,
         editable=False,
-        help_text="Auto-generated OAuth client identifier.",
+        help_text="OAuth client identifier — auto-generated (32 hex chars) or supplied by the client.",
     )
     client_secret = models.CharField(
         max_length=64,
