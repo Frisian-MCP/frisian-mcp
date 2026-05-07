@@ -101,16 +101,27 @@ class TestHttpGuards:
         response = _view(request)
         assert json.loads(response.content) == {}
 
-    def test_get_returns_405_in_wsgi(self, rf: RequestFactory) -> None:
-        """GET returns 405 in a WSGI context (no running event loop).
+    def test_get_returns_200_sse_in_wsgi(self, rf: RequestFactory) -> None:
+        """GET returns 200 SSE stream in a WSGI context via sync generator.
 
-        Clients must fall back to POST-only transport per the MCP Streamable
-        HTTP spec §transport — 405 is the correct signal, not a 500 crash.
+        Some clients (e.g. Cursor) do not fall back to POST-only on 405 and
+        instead treat it as a hard connection failure. A sync generator keeps
+        the SSE stream alive by blocking the worker thread between keepalives.
         """
         request = rf.get("/mcp/")
         request.user = _anon_user()
         response = _view(request)
-        assert response.status_code == 405
+        assert response.status_code == 200
+        assert isinstance(response, StreamingHttpResponse)
+        assert "text/event-stream" in response["Content-Type"]
+
+    def test_get_wsgi_first_chunk_is_keepalive(self, rf: RequestFactory) -> None:
+        """GET SSE stream in WSGI context yields a keepalive comment immediately."""
+        request = rf.get("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        first_chunk = next(iter(response))
+        assert first_chunk == b": keepalive\n\n"
 
     def test_get_returns_200_sse_in_async_context(self, rf: RequestFactory) -> None:
         """GET returns 200 SSE stream when called from within a running event loop (ASGI)."""

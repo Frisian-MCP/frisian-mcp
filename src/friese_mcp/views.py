@@ -38,6 +38,7 @@ import importlib.metadata
 import json
 import logging
 import secrets
+import time
 import uuid
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
@@ -1159,9 +1160,21 @@ class McpView(APIView):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            # WSGI context — async generators cannot be streamed. Return 405 so
-            # MCP clients fall back to POST-only transport (MCP spec §transport).
-            return HttpResponse(status=405)
+            # WSGI context — async generators cannot be iterated synchronously,
+            # but a sync generator works fine: the worker thread blocks on
+            # time.sleep() between keepalives while the HTTP chunked stream stays
+            # open. This is preferable to returning 405 because some clients
+            # (e.g. Cursor) do not fall back to POST-only on 405 and instead
+            # treat it as a hard connection failure even though POST calls work.
+            def _wsgi_keepalive() -> Generator[str, None, None]:
+                while True:
+                    yield ": keepalive\n\n"
+                    time.sleep(15)
+
+            resp = StreamingHttpResponse(_wsgi_keepalive(), content_type="text/event-stream")
+            resp["Cache-Control"] = "no-cache"
+            resp["X-Accel-Buffering"] = "no"
+            return resp
 
         async def _keepalive_stream() -> AsyncGenerator[str, None]:
             while True:
