@@ -52,8 +52,8 @@ _UUID_RE = re.compile(
 # Param key names that signal a "list body" bulk-create convention.  When a write
 # action's body_args dict has exactly one of these keys and its value is a list,
 # the list is unwrapped and sent as the JSON array body so that host serializers
-# that accept "[{...}, ...]" for bulk-create (e.g. Nautobot's create and bulk_create)
-# receive the expected shape instead of {"objects": [...]}.
+# that accept "[{...}, ...]" for bulk-create receive the expected shape
+# instead of {"objects": [...]}.
 _LIST_BODY_KEYS: frozenset[str] = frozenset({"objects", "data", "items", "_items", "body"})
 
 
@@ -80,11 +80,10 @@ def _normalize_fk_value(value: Any) -> Any:
     """
     Wrap a bare non-UUID string as ``{"name": value}``; leave everything else unchanged.
 
-    Host serializers that support natural-key lookup (e.g. Nautobot's
-    ``WritableNestedSerializer``) accept both bare UUID strings and dict forms
-    ``{id, pk, name, slug}`` but reject bare name/slug strings.  Wrapping the
-    value as ``{"name": ...}`` lets the host serializer resolve it without
-    requiring the caller to know the object's UUID.
+    Host serializers that support natural-key lookup accept both bare UUID
+    strings and dict forms ``{id, pk, name, slug}`` but reject bare name/slug
+    strings.  Wrapping the value as ``{"name": ...}`` lets the host serializer
+    resolve it without requiring the caller to know the object's UUID.
 
     UUID strings are left unchanged — they are already valid as bare FK values
     for ``PrimaryKeyRelatedField`` and natural-key hybrids alike.
@@ -217,8 +216,8 @@ def _exception_envelope_message(exc: BaseException) -> str:
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
 
 # Map standard ViewSet action name → HTTP method for the synthetic request.
-# Includes Nautobot-style bulk list-route actions (PUT/PATCH/DELETE on the
-# list endpoint) so they are dispatched with the correct HTTP verb.
+# Includes bulk list-route actions (PUT/PATCH/DELETE on the list endpoint)
+# so they are dispatched with the correct HTTP verb.
 _ACTION_TO_HTTP: dict[str, str] = {
     "list": "get",
     "retrieve": "get",
@@ -314,9 +313,9 @@ class SyncInvocation(BaseInvocationBackend):
             tool.action, http_method, arguments
         )
         # PKG-24: pre-flight FK normalization.  Bare non-UUID strings for
-        # PrimaryKeyRelatedField / natural-key hybrid fields (e.g. Nautobot's
-        # WritableNestedSerializer) are wrapped as {"name": value} so the host
-        # serializer can resolve them.  SlugRelatedField and plain CharField
+        # PrimaryKeyRelatedField / natural-key hybrid fields are wrapped as
+        # {"name": value} so the host serializer can resolve them.
+        # SlugRelatedField and plain CharField
         # fields are identified by their {"type": "string"} schema and skipped.
         #
         # Bulk-create convention: if the body dict has exactly one key in
@@ -386,15 +385,13 @@ class SyncInvocation(BaseInvocationBackend):
         # right to see.
         #
         # _ignore_model_permissions bypasses DjangoObjectPermissions (and all
-        # subclasses, e.g. Nautobot's TokenPermissions) has_permission() check.
-        # Without it, every non-superuser token needs a host-app ObjectPermission
-        # configured per model — impractical for large surfaces (1500+ Nautobot
-        # models).  Our MCP tier system is the primary access gate; the host
-        # app's queryset restriction (restrict_queryset / .restrict()) still
-        # fires, so callers without ObjectPermissions see an empty result set
-        # rather than a 403.  Write operations remain protected by Nautobot's
-        # post-save _validate_objects() which rolls back creates that fall
-        # outside the restricted queryset.
+        # subclasses) has_permission() check.  Without it, every non-superuser
+        # token needs a host-app ObjectPermission configured per model —
+        # impractical for large API surfaces.  Our MCP tier system is the
+        # primary access gate; the host app's queryset restriction still fires,
+        # so callers without ObjectPermissions see an empty result set rather
+        # than a 403.  Write operations remain protected by post-save validation
+        # hooks that roll back creates falling outside the restricted queryset.
         viewset._ignore_model_permissions = True  # pylint: disable=protected-access
         try:
             viewset.initial(drf_request, **view_kwargs)
