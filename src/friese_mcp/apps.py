@@ -150,6 +150,7 @@ def _install_trailing_slash_middleware() -> bool:
 _MCP_AUTO_URL_ATTR: str = "_friese_mcp_auto_url"
 _OAUTH_AUTO_URL_ATTR: str = "_friese_mcp_oauth_auto_url"
 _WELLKNOWN_AUTO_URL_ATTR: str = "_friese_mcp_wellknown_auto_url"
+_HEALTHCHECK_AUTO_URL_ATTR: str = "_friese_mcp_healthcheck_auto_url"
 
 #: Stable ``dispatch_uid`` for the PKG-21 deferred discovery signal handler so
 #: connect / disconnect calls reliably target the same registration even when
@@ -280,6 +281,68 @@ def _install_wellknown_urls() -> bool:
     resolver.url_patterns.insert(0, auto_resolver)
     clear_url_caches()
     return True
+
+
+_DEFAULT_HEALTHCHECK_PATHS: list[str] = ["backend/healthcheck"]
+
+
+def _install_healthcheck_urls() -> int:
+    """
+    Auto-register lightweight healthcheck views at configured paths.
+
+    Some MCP clients (e.g. Grok) poll a ``GET /backend/healthcheck/`` endpoint
+    before issuing any MCP requests.  A 404 causes those clients to withhold
+    tools from the user even though the OAuth flow completed successfully.
+
+    Paths are read from ``settings.FRIESE_MCP_HEALTHCHECK_PATHS`` (default:
+    ``["backend/healthcheck"]``).  Each path gets a simple view that returns
+    ``{"status": "ok"}`` with HTTP 200.
+
+    The function is **idempotent**: paths already registered by a prior
+    ``ready()`` call (or manually by the host app) are skipped.
+
+    Returns:
+        The number of paths injected by this call.
+
+    """
+    if not getattr(settings, "ROOT_URLCONF", None):
+        return 0
+
+    from django.http import JsonResponse  # pylint: disable=import-outside-toplevel
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        path,
+    )
+
+    paths: list[str] = getattr(
+        settings, "FRIESE_MCP_HEALTHCHECK_PATHS", _DEFAULT_HEALTHCHECK_PATHS
+    )
+    if not paths:
+        return 0
+
+    def _healthcheck_view(request: HttpRequest) -> JsonResponse:
+        return JsonResponse({"status": "ok"})
+
+    resolver = get_resolver()
+    injected = 0
+    for raw_path in paths:
+        clean = raw_path.strip("/")
+        # Skip if already injected in a prior call.
+        already = any(
+            getattr(p, _HEALTHCHECK_AUTO_URL_ATTR, None) == clean
+            for p in resolver.url_patterns
+        )
+        if already:
+            continue
+        auto_pattern = path(f"{clean}/", _healthcheck_view)
+        setattr(auto_pattern, _HEALTHCHECK_AUTO_URL_ATTR, clean)
+        resolver.url_patterns.insert(0, auto_pattern)
+        injected += 1
+
+    if injected:
+        clear_url_caches()
+    return injected
 
 
 #: Match ``api/`` as a path segment — at the start of the prefix or after a
@@ -535,6 +598,17 @@ class FrieseMcpConfig(AppConfig):
 
         if _install_wellknown_urls():
             logger.debug("friese_mcp: auto-registered well-known URLs at /.well-known/")
+
+        hc_count = _install_healthcheck_urls()
+        if hc_count:
+            hc_paths = getattr(
+                settings, "FRIESE_MCP_HEALTHCHECK_PATHS", _DEFAULT_HEALTHCHECK_PATHS
+            )
+            logger.debug(
+                "friese_mcp: auto-registered %d healthcheck path(s): %s",
+                hc_count,
+                hc_paths,
+            )
 
         if not getattr(settings, "FRIESE_MCP_AUTODISCOVER", True):
             logger.debug("friese_mcp auto-discovery disabled — skipping")
