@@ -148,6 +148,7 @@ def _install_trailing_slash_middleware() -> bool:
 #: Attribute name used as a sentinel to identify auto-registered URL patterns.
 #: Prevents double-injection across multiple ready() calls in a single process.
 _MCP_AUTO_URL_ATTR: str = "_friese_mcp_auto_url"
+_MCP_EXTRA_URL_ATTR: str = "_friese_mcp_extra_url"
 _OAUTH_AUTO_URL_ATTR: str = "_friese_mcp_oauth_auto_url"
 _WELLKNOWN_AUTO_URL_ATTR: str = "_friese_mcp_wellknown_auto_url"
 _HEALTHCHECK_AUTO_URL_ATTR: str = "_friese_mcp_healthcheck_auto_url"
@@ -208,6 +209,57 @@ def _install_mcp_url() -> bool:
     resolver.url_patterns.insert(0, auto_resolver)
     clear_url_caches()
     return True
+
+
+def _install_extra_mcp_paths() -> int:
+    """
+    Mount McpView at additional paths listed in ``FRIESE_MCP_EXTRA_PATHS``.
+
+    Some MCP clients (e.g. ChatGPT) strip the path component from the
+    configured server URL and POST to the origin root.  Setting::
+
+        FRIESE_MCP_EXTRA_PATHS = [""]
+
+    registers McpView at ``/`` in addition to the primary
+    ``FRIESE_MCP_PATH``, so those clients reach the gateway correctly
+    without changing the primary endpoint or the well-known metadata.
+
+    Idempotent — paths already registered in a prior call are skipped.
+
+    Returns:
+        The number of extra paths injected by this call.
+
+    """
+    extra_paths: list[str] = getattr(settings, "FRIESE_MCP_EXTRA_PATHS", [])
+    if not extra_paths or not getattr(settings, "ROOT_URLCONF", None):
+        return 0
+
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        include,
+        re_path,
+    )
+
+    resolver = get_resolver()
+    injected = 0
+    for raw_path in extra_paths:
+        clean = raw_path.strip("/")
+        already = any(
+            getattr(p, _MCP_EXTRA_URL_ATTR, None) == clean
+            for p in resolver.url_patterns
+        )
+        if already:
+            continue
+        pattern = re.escape(clean)
+        auto_resolver = re_path(rf"^{pattern}/?$", include("friese_mcp.urls"))
+        setattr(auto_resolver, _MCP_EXTRA_URL_ATTR, clean)
+        resolver.url_patterns.insert(0, auto_resolver)
+        injected += 1
+
+    if injected:
+        clear_url_caches()
+    return injected
 
 
 def _install_oauth_urls() -> bool:
@@ -591,6 +643,14 @@ class FrieseMcpConfig(AppConfig):
             logger.debug(
                 "friese_mcp: auto-registered McpView URL at path %r",
                 getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/"),
+            )
+
+        extra_count = _install_extra_mcp_paths()
+        if extra_count:
+            logger.debug(
+                "friese_mcp: auto-registered McpView at %d extra path(s): %s",
+                extra_count,
+                getattr(settings, "FRIESE_MCP_EXTRA_PATHS", []),
             )
 
         if _install_oauth_urls():

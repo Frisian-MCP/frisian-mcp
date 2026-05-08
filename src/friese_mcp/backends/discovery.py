@@ -294,10 +294,10 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             return
 
         # Skip UI ViewSets — those that explicitly declare renderer_classes with no
-        # JSONRenderer subclass.  Nautobot's NautobotUIViewSet sets
-        # renderer_classes = [NautobotHTMLRenderer] (a BrowsableAPIRenderer subclass,
-        # NOT TemplateHTMLRenderer), so the previous TemplateHTMLRenderer check missed
-        # it.  The safe discriminator: if renderer_classes is explicitly set on the
+        # JSONRenderer subclass.  Some frameworks use a BrowsableAPIRenderer subclass
+        # (not TemplateHTMLRenderer) for their UI ViewSets, so the previous
+        # TemplateHTMLRenderer check missed them.  The safe discriminator: if
+        # renderer_classes is explicitly set on the
         # class and contains NO JSONRenderer subclass, the ViewSet produces only HTML
         # and is not a REST API surface.  ViewSets that use the api_settings default
         # (renderer_classes not explicitly set) are left untouched.
@@ -752,8 +752,8 @@ def _field_to_schema(field: Any) -> dict[str, Any]:
         child = getattr(field, "child_relation", None)
         if isinstance(child, SlugRelatedField):
             return {"type": "array", "items": {"type": "string"}}
-        # ContentTypeField (e.g. Nautobot's nautobot.core.api.fields.ContentTypeField)
-        # accepts bare "app_label.model" strings — same contract as SlugRelatedField.
+        # ContentTypeField (class name: "ContentTypeField") accepts bare
+        # "app_label.model" strings — same contract as SlugRelatedField.
         # Detected by class name to avoid a hard import from the host app.
         child_class_name = type(child).__name__ if child is not None else ""
         if "ContentType" in child_class_name:
@@ -793,12 +793,12 @@ def _infer_required(field: Any, field_name: str) -> bool:
     mismatch — serializers often set ``required=False`` so one serializer works for
     both verbs, but the model field may be ``NOT NULL`` / no default.
 
-    Many DRF host apps (including Nautobot) set ``required=False`` on FK
-    serializer fields so the same serializer works for both ``create`` and
-    ``partial_update`` (PATCH).  The model field, however, may be ``NOT NULL``
-    with no default, meaning any ``create`` that omits the field will fail at
-    the DB layer with a cryptic constraint error.  This function catches that
-    mismatch so the dispatcher schema marks the field as required.
+    Many DRF host apps set ``required=False`` on FK serializer fields so the
+    same serializer works for both ``create`` and ``partial_update`` (PATCH).
+    The model field, however, may be ``NOT NULL`` with no default, meaning any
+    ``create`` that omits the field will fail at the DB layer with a cryptic
+    constraint error.  This function catches that mismatch so the dispatcher
+    schema marks the field as required.
 
     Returns ``True`` when **all** of the following hold:
 
@@ -812,11 +812,13 @@ def _infer_required(field: Any, field_name: str) -> bool:
     Falls back to ``False`` on any introspection failure so that a non-standard
     queryset or computed field never raises during discovery.
 
-    Many DRF host apps (including Nautobot) set ``required=False`` on FK
-    serializer fields so the same serializer works for both ``create`` and
-    ``partial_update`` (PATCH).  The model field, however, may be ``NOT NULL``
-    with no default, meaning any ``create`` that omits the field will fail at
-    the DB layer with a cryptic constraint error.  This function catches that
+    The repeated paragraph above is intentional — it duplicates the lead-in for
+    the docstring body so both the module-level and inline readers get full
+    context.  DRF apps commonly set ``required=False`` on FK fields so the same
+    serializer works for both ``create`` and ``partial_update`` (PATCH).  The
+    model field, however, may be ``NOT NULL`` with no default, meaning any
+    ``create`` that omits the field will fail at the DB layer with a cryptic
+    constraint error.  This function catches that
     mismatch so the dispatcher schema marks the field as required.
 
     Returns ``True`` when **all** of the following hold:

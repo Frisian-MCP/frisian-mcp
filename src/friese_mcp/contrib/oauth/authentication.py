@@ -71,7 +71,7 @@ class OAuthServicePrincipal:
 
     # ------------------------------------------------------------------
     # Django permission interface
-    # Required by host apps (e.g. Nautobot) that call these on request.user.
+    # Required by host apps that call permission methods on request.user.
     # ------------------------------------------------------------------
 
     def get_all_permissions(self, obj: object = None) -> set:
@@ -139,11 +139,11 @@ class OAuthTokenAuthentication(BaseAuthentication):
 
         principal = OAuthServicePrincipal(permission=access_token.permission)
 
-        # Some host frameworks (e.g. Nautobot) require request.user to be a real
-        # Django User instance for audit-log FKs (ObjectChange.user).  Resolve a
+        # Some host frameworks require request.user to be a real Django User
+        # instance for audit-log FKs (e.g. ObjectChange.user).  Resolve a
         # backing User in priority order:
         #   1. FRIESE_MCP_OAUTH_SERVICE_USER setting — explicit named account.
-        #   2. Auto-detect: first superuser in the DB (covers Nautobot and similar).
+        #   2. Auto-detect: first superuser in the DB.
         #   3. Fall back to OAuthServicePrincipal (no User model or no superuser).
         # Tier resolution is unaffected — _resolve_request_tier reads
         # request.auth.permission (the OAuthAccessToken), not request.user.
