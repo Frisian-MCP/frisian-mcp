@@ -500,11 +500,40 @@ def _install_dispatch_groups() -> tuple[int, int]:
         member_tools = _find_group_members(all_names, prefix_set, sep)
 
         if not member_tools:
+            # Build "did you mean" hints: normalize configured prefixes by
+            # stripping hyphens/underscores and match against registered names.
+            # The most common mistake is using URL slugs (dns-views, a-records)
+            # instead of DRF basenames (Model._meta.object_name.lower() →
+            # dnsview, arecord).  Normalizing both sides catches that pattern.
+            sep_re = re.compile(r"[-_]")
+            registered_resources = sorted({n.split(sep)[0] for n in all_names})
+            suggestions: list[str] = []
+            for prefix in sorted(prefix_set):
+                norm = sep_re.sub("", prefix).lower()
+                similar = [
+                    r for r in registered_resources
+                    if sep_re.sub("", r).lower().startswith(norm[:5])
+                ][:4]
+                if similar:
+                    suggestions.append(f"  '{prefix}' -> try: {similar}")
+            hint = (
+                "Did you mean:\n" + "\n".join(suggestions)
+                if suggestions
+                else f"No similar names found. Sample registered resources: {registered_resources[:8]}"
+            )
             logger.warning(
                 "FRIESE_MCP_DISPATCH_GROUPS: group %r has no matching resources "
-                "(prefixes=%s) — no dispatcher registered",
+                "(prefixes=%s) — no dispatcher registered.\n"
+                "Basenames must be Model._meta.object_name.lower() not URL slugs.\n%s",
                 group_name,
                 sorted(prefix_set),
+                hint,
+            )
+            print(  # noqa: T201 — always-on warning; misconfigured group leaves flat tools visible
+                f"[friese-mcp] WARNING: dispatch group {group_name!r} has 0 matching tools "
+                f"— its flat tools will remain visible in tools/list and may crowd out "
+                f"other dispatchers. Hint: use Model._meta.object_name.lower(). See log.",
+                flush=True,
             )
             continue
 
