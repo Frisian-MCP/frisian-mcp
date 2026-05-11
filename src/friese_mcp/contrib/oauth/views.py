@@ -413,9 +413,13 @@ class RegistrationView(View):
                     status=400,
                 )
 
+        default_permission: str = getattr(
+            settings, "FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read"
+        )
         client = OAuthClient.objects.create(
             name=client_name.strip(),
             redirect_uris=list(raw_uris),
+            permission=default_permission,
         )
 
         logger.info(
