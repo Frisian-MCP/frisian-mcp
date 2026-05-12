@@ -1179,7 +1179,7 @@ class McpView(APIView):
         async def _keepalive_stream() -> AsyncGenerator[str, None]:
             while True:
                 yield ": keepalive\n\n"
-                await asyncio.sleep(15)
+                await asyncio.sleep(3)
 
         resp = StreamingHttpResponse(_keepalive_stream(), content_type="text/event-stream")
         resp["Cache-Control"] = "no-cache"
