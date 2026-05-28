@@ -487,6 +487,11 @@ class ToolRegistry:
             caller_rank = _TIER_RANK.get(caller_tier, 0)
             tool_rank = _TIER_RANK.get(entry.permission_tier, 0)
             if caller_rank < tool_rank:
+                if getattr(request, "_mcp_max_tier", None) is not None:
+                    # On a max-tier-capped endpoint the tool must appear
+                    # nonexistent — returning a tier error leaks that the tool
+                    # exists and reveals the elevation path to callers.
+                    raise ToolNotFoundError(f"No tool registered with name {name!r}")
                 raise PermissionError(
                     f"Tool {entry.name!r} requires {entry.permission_tier!r} permission; "
                     f"caller has {caller_tier!r} permission."
