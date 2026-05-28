@@ -262,6 +262,60 @@ def _install_extra_mcp_paths() -> int:
     return injected
 
 
+_MCP_PROTECTED_URL_ATTR: str = "_friese_mcp_protected_url"
+
+
+def _install_protected_mcp_url() -> bool:
+    """
+    Register an auth-required McpView at ``FRIESE_MCP_PROTECTED_PATH`` when set.
+
+    Unlike the primary ``FRIESE_MCP_PATH`` endpoint (which respects the global
+    ``FRIESE_MCP_PERMISSION_CLASSES`` setting and can be left open), the view
+    registered here always enforces ``IsAuthenticated`` regardless of that
+    setting.  Useful when you want one open/read-only MCP endpoint and a second
+    endpoint that requires a token or OAuth credential.
+
+    Set in settings::
+
+        FRIESE_MCP_PROTECTED_PATH = "api/breakingprod"
+
+    Returns:
+        ``True`` when the URL was injected by this call, ``False`` when the
+        setting is unset, already registered, or ``ROOT_URLCONF`` is absent.
+
+    """
+    protected_path: str | None = getattr(settings, "FRIESE_MCP_PROTECTED_PATH", None)
+    if not protected_path or not getattr(settings, "ROOT_URLCONF", None):
+        return False
+
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        re_path,
+    )
+    from rest_framework.permissions import (  # pylint: disable=import-outside-toplevel
+        IsAuthenticated,
+    )
+
+    from friese_mcp.views import McpView  # pylint: disable=import-outside-toplevel
+
+    resolver = get_resolver()
+
+    if any(getattr(p, _MCP_PROTECTED_URL_ATTR, False) for p in resolver.url_patterns):
+        return False
+
+    class _ProtectedMcpView(McpView):
+        def get_permissions(self) -> list:  # type: ignore[override]
+            return [IsAuthenticated()]
+
+    clean = protected_path.strip("/")
+    pattern = re_path(rf"^{re.escape(clean)}/?$", _ProtectedMcpView.as_view())
+    setattr(pattern, _MCP_PROTECTED_URL_ATTR, True)
+    resolver.url_patterns.insert(0, pattern)
+    clear_url_caches()
+    return True
+
+
 def _install_oauth_urls() -> bool:
     """
     Auto-register OAuth endpoint URLs when ``friese_mcp.contrib.oauth`` is installed.
@@ -680,6 +734,12 @@ class FrieseMcpConfig(AppConfig):
                 "friese_mcp: auto-registered McpView at %d extra path(s): %s",
                 extra_count,
                 getattr(settings, "FRIESE_MCP_EXTRA_PATHS", []),
+            )
+
+        if _install_protected_mcp_url():
+            logger.debug(
+                "friese_mcp: auto-registered auth-required McpView at path %r",
+                getattr(settings, "FRIESE_MCP_PROTECTED_PATH", "").strip("/"),
             )
 
         if _install_oauth_urls():
