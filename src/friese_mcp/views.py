@@ -101,15 +101,10 @@ def _get_token_permission(request: Any) -> str:
     even a superuser hitting an open endpoint receives at most the declared cap.
     """
     from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
-        _TIER_RANK,
         _resolve_request_tier,
     )
 
-    tier = _resolve_request_tier(request)
-    max_tier: str | None = getattr(request, "_mcp_max_tier", None)
-    if max_tier is not None and _TIER_RANK.get(tier, 0) > _TIER_RANK.get(max_tier, 0):
-        return max_tier
-    return tier
+    return _resolve_request_tier(request)
 
 
 def invalidate_tools_list_cache() -> None:

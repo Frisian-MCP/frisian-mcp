@@ -138,8 +138,14 @@ def _resolve_request_tier(request: Any) -> str:
         return role_tier
 
     if auth_obj is None:
-        return str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
-    return "read"
+        tier = str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
+    else:
+        tier = "read"
+
+    max_tier: str | None = getattr(request, "_mcp_max_tier", None)
+    if max_tier is not None and _TIER_RANK.get(tier, 0) > _TIER_RANK.get(max_tier, 0):
+        return max_tier
+    return tier
 
 
 def _camel_to_snake(name: str) -> str:
