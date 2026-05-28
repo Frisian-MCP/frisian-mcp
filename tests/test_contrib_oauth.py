@@ -22,13 +22,13 @@ from friese_mcp.contrib.oauth.views import (
     _get_base_url,
 )
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpEndpointView
+from friese_mcp.views import McpView
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_mcp_view = McpEndpointView.as_view()
+_mcp_view = McpView.as_view()
 _token_view = TokenView.as_view()
 _register_view = RegistrationView.as_view()
 _auth_server_view = OAuthAuthorizationServerView.as_view()
@@ -297,31 +297,31 @@ class TestOAuthTokenAuthentication:
     def test_service_principal_permission_tiers(self) -> None:
         """OAuthServicePrincipal maps permission tier to Django permission interface."""
         admin = OAuthServicePrincipal(permission="admin")
-        assert admin.is_superuser is True
+        assert admin.is_superuser is False
         assert admin.is_staff is True
-        assert admin.has_perm("dcim.add_device") is True
-        assert admin.has_module_perms("dcim") is True
+        assert admin.has_perm("svc.add_item") is True
+        assert admin.has_module_perms("svc") is True
 
         rw = OAuthServicePrincipal(permission="read_write")
         assert rw.is_superuser is False
         assert rw.is_staff is True
-        assert rw.has_perm("dcim.add_device") is True
+        assert rw.has_perm("svc.add_item") is True
 
         read = OAuthServicePrincipal(permission="read")
         assert read.is_superuser is False
         assert read.is_staff is False
-        assert read.has_perm("dcim.add_device") is False
-        assert read.has_module_perms("dcim") is False
+        assert read.has_perm("svc.add_item") is False
+        assert read.has_module_perms("svc") is False
 
-    def test_principal_carries_token_permission(self) -> None:
-        """authenticate() passes the token's permission tier to OAuthServicePrincipal."""
+    def test_principal_carries_client_permission(self) -> None:
+        """Authenticate reads permission from the client rather than the token snapshot."""
         client = OAuthClient.objects.create(name="admin-agent", permission="admin")
         token = OAuthAccessToken.objects.create(client=client, permission="admin")
         req = self._fake_request(_bearer(token.plaintext_token))
         auth_user, _ = self._auth().authenticate(req)
         assert isinstance(auth_user, OAuthServicePrincipal)
         assert auth_user.permission == "admin"
-        assert auth_user.is_superuser is True
+        assert auth_user.is_superuser is False
 
     def test_invalid_token_raises_auth_failed(self) -> None:
         """Unrecognised token string raises AuthenticationFailed."""
@@ -576,13 +576,13 @@ class TestRegistrationView:
         assert OAuthClient.objects.filter(client_id=data["client_id"]).exists()
 
     def test_registration_scope_string_in_response(self, rf: RequestFactory, settings: Any) -> None:
-        """Registration response includes scope string mapped from client permission."""
+        """DCR clients without redirect_uris get the PKCE default permission tier (read)."""
         settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
         request = _post_register(rf, {"client_name": "new-client"})
         response = _register_view(request)
         assert response.status_code == 201
         data = json.loads(response.content)
-        assert data["scope"] == "mcp:read mcp:write"  # default permission=read_write
+        assert data["scope"] == "mcp:read"  # default permission=read (PKCE default)
 
     def test_missing_client_name_returns_400(self, rf: RequestFactory, settings: Any) -> None:
         """Missing client_name returns 400 with invalid_client_metadata error."""
@@ -677,13 +677,13 @@ class TestWellKnownEndpoints:
 
 
 # ---------------------------------------------------------------------------
-# Integration: McpEndpointView + OAuthTokenAuthentication + IsAuthenticated
+# Integration: McpView + OAuthTokenAuthentication + IsAuthenticated
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestMcpEndpointOAuthIntegration:
-    """Integration tests: McpEndpointView + OAuthTokenAuthentication + IsAuthenticated."""
+class TestMcpViewOAuthIntegration:
+    """Integration tests: McpView + OAuthTokenAuthentication + IsAuthenticated."""
 
     def _configure_auth(self, settings: Any) -> None:
         """Point the MCP gateway at OAuthTokenAuthentication + IsAuthenticated."""

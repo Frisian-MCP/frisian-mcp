@@ -33,14 +33,14 @@ def _stub_tool(value: str) -> Any:
 
 @pytest.fixture()
 def populated_registry() -> ToolRegistry:
-    """Return a registry pre-populated with DCIM and IPAM flat tools."""
+    """Return a registry pre-populated with svc and network flat tools."""
     reg = ToolRegistry()
     flat = {
-        "device_list": _stub_tool("device.list"),
-        "device_retrieve": _stub_tool("device.retrieve"),
-        "device_create": _stub_tool("device.create"),
-        "rack_list": _stub_tool("rack.list"),
-        "interface_list": _stub_tool("interface.list"),
+        "item_list": _stub_tool("item.list"),
+        "item_retrieve": _stub_tool("item.retrieve"),
+        "item_create": _stub_tool("item.create"),
+        "container_list": _stub_tool("container.list"),
+        "endpoint_list": _stub_tool("endpoint.list"),
         "ipaddress_list": _stub_tool("ipaddress.list"),
         "prefix_list": _stub_tool("prefix.list"),
         "user_list": _stub_tool("user.list"),  # ungrouped
@@ -105,42 +105,42 @@ class TestBuildGroupHelp:
     def test_help_returns_resource_action_tree(self, populated_registry: ToolRegistry) -> None:
         """Help groups actions by resource and sorts them."""
         help_payload = build_group_help(
-            "dcim",
-            ["device_list", "device_retrieve", "rack_list"],
+            "svc",
+            ["item_list", "item_retrieve", "container_list"],
             populated_registry,
         )
         assert help_payload["help"] is True
-        assert help_payload["group"] == "dcim"
-        assert help_payload["resources"]["device"] == ["list", "retrieve"]
-        assert help_payload["resources"]["rack"] == ["list"]
+        assert help_payload["group"] == "svc"
+        assert help_payload["resources"]["item"] == ["list", "retrieve"]
+        assert help_payload["resources"]["container"] == ["list"]
 
     def test_help_filters_actions_by_tier(self, populated_registry: ToolRegistry) -> None:
-        """A 'read' caller does not see write actions like device_create."""
+        """A 'read' caller does not see write actions like item_create."""
         help_payload = build_group_help(
-            "dcim",
-            ["device_list", "device_retrieve", "device_create"],
+            "svc",
+            ["item_list", "item_retrieve", "item_create"],
             populated_registry,
             max_tier="read",
         )
-        assert "create" not in help_payload["resources"].get("device", [])
-        assert "list" in help_payload["resources"]["device"]
+        assert "create" not in help_payload["resources"].get("item", [])
+        assert "list" in help_payload["resources"]["item"]
 
     def test_help_unfiltered_includes_write_actions(
         self, populated_registry: ToolRegistry
     ) -> None:
         """Without a max_tier, every action is listed."""
         help_payload = build_group_help(
-            "dcim",
-            ["device_list", "device_create"],
+            "svc",
+            ["item_list", "item_create"],
             populated_registry,
         )
-        assert "create" in help_payload["resources"]["device"]
+        assert "create" in help_payload["resources"]["item"]
 
     def test_help_skips_unknown_tools(self, populated_registry: ToolRegistry) -> None:
         """Tool names not in the registry are silently dropped."""
         help_payload = build_group_help(
-            "dcim",
-            ["device_list", "ghost_list"],
+            "svc",
+            ["item_list", "ghost_list"],
             populated_registry,
         )
         assert "ghost" not in help_payload["resources"]
@@ -159,40 +159,40 @@ class TestMakeGroupInvoke:
     ) -> None:
         """A valid resource/action pair dispatches through the registry."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list", "rack_list"}),
+            "svc",
+            frozenset({"item_list", "container_list"}),
             populated_registry,
         )
         result = invoke(
-            {"resource": "device", "action": "list", "params": {}},
+            {"resource": "item", "action": "list", "params": {}},
             _request(rf, permission="read"),
         )
-        assert result["called"] == "device.list"
+        assert result["called"] == "item.list"
 
     def test_help_response_when_action_missing(
         self, populated_registry: ToolRegistry, rf: RequestFactory
     ) -> None:
         """Omitting action returns the help tree."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list", "rack_list"}),
+            "svc",
+            frozenset({"item_list", "container_list"}),
             populated_registry,
         )
         result = invoke({}, _request(rf, permission="read"))
         assert result["help"] is True
-        assert result["group"] == "dcim"
+        assert result["group"] == "svc"
 
     def test_explicit_help_action(
         self, populated_registry: ToolRegistry, rf: RequestFactory
     ) -> None:
         """action='help' returns the help tree even when resource is set."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list"}),
+            "svc",
+            frozenset({"item_list"}),
             populated_registry,
         )
         result = invoke(
-            {"action": "help", "resource": "device"},
+            {"action": "help", "resource": "item"},
             _request(rf, permission="read"),
         )
         assert result["help"] is True
@@ -202,13 +202,13 @@ class TestMakeGroupInvoke:
     ) -> None:
         """Unknown resource yields LookupError with a 'did you mean' hint."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list", "rack_list"}),
+            "svc",
+            frozenset({"item_list", "container_list"}),
             populated_registry,
         )
         with pytest.raises(LookupError) as exc:
             invoke(
-                {"resource": "devic", "action": "list", "params": {}},
+                {"resource": "ite", "action": "list", "params": {}},
                 _request(rf, permission="read"),
             )
         assert "Did you mean" in str(exc.value)
@@ -218,8 +218,8 @@ class TestMakeGroupInvoke:
     ) -> None:
         """Non-help action without resource raises ValueError."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list"}),
+            "svc",
+            frozenset({"item_list"}),
             populated_registry,
         )
         with pytest.raises(ValueError, match="resource is required"):
@@ -233,12 +233,12 @@ class TestMakeGroupInvoke:
     ) -> None:
         """Flat {action, resource, key: val} form (no params wrapper) works."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list"}),
+            "svc",
+            frozenset({"item_list"}),
             populated_registry,
         )
         result = invoke(
-            {"resource": "device", "action": "list", "filter": "x"},
+            {"resource": "item", "action": "list", "filter": "x"},
             _request(rf, permission="read"),
         )
         # The flat 'filter' kwarg is forwarded as part of params to the tool.
@@ -272,7 +272,7 @@ class TestInstallDispatchGroups:
     ) -> None:
         """A two-group setting yields two new dispatcher tools."""
         settings.FRIESE_MCP_DISPATCH_GROUPS = {
-            "dcim": ["device", "rack", "interface"],
+            "svc": ["item", "container", "endpoint"],
             "ipam": ["ipaddress", "prefix"],
         }
         with patch("friese_mcp.registry.tool_registry", populated_registry):
@@ -283,7 +283,7 @@ class TestInstallDispatchGroups:
         # because the populated_registry fixture may evolve, but it must be > 0
         # whenever any groups were registered.
         assert bundled_count > 0
-        assert populated_registry.get_entry("dcim") is not None
+        assert populated_registry.get_entry("svc") is not None
         assert populated_registry.get_entry("ipam") is not None
 
     def test_grouped_tools_hidden_from_list_tools(
@@ -291,21 +291,21 @@ class TestInstallDispatchGroups:
     ) -> None:
         """Tools bundled under a group disappear from list_tools()."""
         settings.FRIESE_MCP_DISPATCH_GROUPS = {
-            "dcim": ["device", "rack", "interface"],
+            "svc": ["item", "container", "endpoint"],
         }
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         names = {t["name"] for t in populated_registry.list_tools()}
-        assert "device_list" not in names
-        assert "rack_list" not in names
-        assert "dcim" in names
+        assert "item_list" not in names
+        assert "container_list" not in names
+        assert "svc" in names
 
     def test_ungrouped_tools_remain_visible(
         self, populated_registry: ToolRegistry, settings: Any
     ) -> None:
         """Resources not in any group keep appearing as flat tools."""
         settings.FRIESE_MCP_DISPATCH_GROUPS = {
-            "dcim": ["device", "rack", "interface"],
+            "svc": ["item", "container", "endpoint"],
         }
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
@@ -318,13 +318,13 @@ class TestInstallDispatchGroups:
         self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
     ) -> None:
         """Hidden tools remain reachable through registry.dispatch()."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"dcim": ["device"]}
+        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         result = populated_registry.dispatch(
-            _request(rf, permission="read"), "device_list", {}
+            _request(rf, permission="read"), "item_list", {}
         )
-        assert result["called"] == "device.list"
+        assert result["called"] == "item.list"
 
     def test_empty_group_logs_warning_and_skips(
         self,
@@ -351,15 +351,15 @@ class TestInstallDispatchGroups:
         rf: RequestFactory,
     ) -> None:
         """End-to-end: register the group, then dispatch through it."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"dcim": ["device"]}
+        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         result = populated_registry.dispatch(
             _request(rf, permission="read"),
-            "dcim",
-            {"resource": "device", "action": "list", "params": {}},
+            "svc",
+            {"resource": "item", "action": "list", "params": {}},
         )
-        assert result["called"] == "device.list"
+        assert result["called"] == "item.list"
 
 
 # ---------------------------------------------------------------------------
@@ -377,14 +377,14 @@ class TestGroupDispatcherTierEnforcement:
         rf: RequestFactory,
     ) -> None:
         """A 'read' caller cannot route to a 'read_write' tool through the group."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"dcim": ["device"]}
+        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         with pytest.raises(PermissionError):
             populated_registry.dispatch(
                 _request(rf, permission="read"),
-                "dcim",
-                {"resource": "device", "action": "create", "params": {}},
+                "svc",
+                {"resource": "item", "action": "create", "params": {}},
             )
 
     def test_read_write_caller_can_invoke_write_tool(
@@ -394,12 +394,12 @@ class TestGroupDispatcherTierEnforcement:
         rf: RequestFactory,
     ) -> None:
         """A 'read_write' caller can route to a 'read_write' tool."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"dcim": ["device"]}
+        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
         with patch("friese_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         result = populated_registry.dispatch(
             _request(rf, permission="read_write"),
-            "dcim",
-            {"resource": "device", "action": "create", "params": {}},
+            "svc",
+            {"resource": "item", "action": "create", "params": {}},
         )
-        assert result["called"] == "device.create"
+        assert result["called"] == "item.create"

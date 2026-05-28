@@ -12,9 +12,9 @@ from django.test import RequestFactory, override_settings
 
 from friese_mcp.protocol import INVALID_PARAMS
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpEndpointView, _decode_cursor, _encode_cursor
+from friese_mcp.views import McpView, _decode_cursor, _encode_cursor
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 _rf = RequestFactory()
 
 

@@ -64,7 +64,12 @@ from friese_mcp.protocol import (
     JsonDict,
     JsonRpcId,
 )
-from friese_mcp.registry import ToolInputError, ToolInvocationError, ToolNotFoundError, tool_registry
+from friese_mcp.registry import (
+    ToolInputError,
+    ToolInvocationError,
+    ToolNotFoundError,
+    tool_registry,
+)
 from friese_mcp.resources import ResourceNotFoundError, resource_registry
 
 logger = logging.getLogger(__name__)
@@ -89,6 +94,11 @@ def _get_token_permission(request: Any) -> str:
     fallback) is applied in one canonical place.  Retained as a thin shim for
     backwards compatibility with code (and tests) that imports
     ``views._get_token_permission`` directly.
+
+    If ``request._mcp_max_tier`` is set (stamped by :meth:`McpView.post` from
+    the view's :meth:`~McpView._effective_max_tier`), the resolved tier is
+    clamped to that maximum.  This is the ``FRIESE_MCP_MAX_TIER`` mechanism:
+    even a superuser hitting an open endpoint receives at most the declared cap.
     """
     from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
         _resolve_request_tier,
@@ -433,7 +443,7 @@ def _get_agent_connection(request: Any) -> Any | None:
 # ---------------------------------------------------------------------------
 
 
-def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse:
+def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse | StreamingHttpResponse:
     """
     Wrap *response* as a single-message SSE stream when the caller accepts it.
 
@@ -1116,6 +1126,17 @@ class McpView(APIView):
 
     renderer_classes = [JSONRenderer, _EventStreamRenderer]
 
+    def _effective_max_tier(self) -> str | None:
+        """
+        Return the tier cap for this endpoint, or ``None`` for no cap.
+
+        Reads ``FRIESE_MCP_MAX_TIER`` from settings.  Override in a subclass
+        to pin a different cap (or ``None`` to disable it) without touching
+        global settings — the auto-registered protected endpoint does exactly
+        this so that authenticated callers receive their full tier there.
+        """
+        return getattr(settings, "FRIESE_MCP_MAX_TIER", None)
+
     def get_authenticators(self) -> list[Any]:
         """
         Return authenticator instances for this view.
@@ -1141,7 +1162,9 @@ class McpView(APIView):
             return []
         return [cls() for cls in classes]
 
-    def get(self, request: DRFRequest, *args: Any, **kwargs: Any) -> StreamingHttpResponse | HttpResponse:
+    def get(
+        self, request: DRFRequest, *args: Any, **kwargs: Any
+    ) -> StreamingHttpResponse | HttpResponse:
         """
         Handle GET — open an SSE keepalive channel per MCP Streamable HTTP spec.
 
@@ -1186,8 +1209,11 @@ class McpView(APIView):
         resp["X-Accel-Buffering"] = "no"
         return resp
 
-    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse:
+    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse | StreamingHttpResponse:
         """Handle POST — dispatch JSON-RPC 2.0 requests."""
+        # Stamp the endpoint-level tier cap so _get_token_permission can apply
+        # it throughout the request without re-reading settings on each call.
+        request._mcp_max_tier = self._effective_max_tier()  # type: ignore[attr-defined]
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             return _maybe_sse(
                 JsonResponse(
@@ -1197,6 +1223,22 @@ class McpView(APIView):
                         "error": {"code": INTERNAL_ERROR, "message": "MCP gateway is disabled"},
                     },
                     status=503,
+                ),
+                request,
+            )
+        # Enforce a request-body size limit.  Django's DATA_UPLOAD_MAX_MEMORY_SIZE
+        # only applies to multipart/form-encoded bodies; raw JSON POST bodies are
+        # unbounded by default.  FRIESE_MCP_REQUEST_BODY_MAX_SIZE (bytes, default
+        # 1 MiB) protects against oversized payloads being loaded into memory by
+        # json.loads() in _parse_and_dispatch.
+        max_body: int = getattr(settings, "FRIESE_MCP_REQUEST_BODY_MAX_SIZE", 1 * 1024 * 1024)
+        if len(request.body) > max_body:
+            return _maybe_sse(
+                _jsonrpc_error(
+                    None,
+                    INVALID_REQUEST,
+                    "Request body too large",
+                    f"Maximum allowed size is {max_body} bytes.",
                 ),
                 request,
             )
@@ -1218,7 +1260,3 @@ class McpView(APIView):
             },
             status=405,
         )
-
-
-#: Backward-compatible alias — prefer :class:`McpView` for new code.
-McpEndpointView = McpView

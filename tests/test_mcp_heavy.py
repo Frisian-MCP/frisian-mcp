@@ -13,12 +13,12 @@ from django.test import RequestFactory, override_settings
 from friese_mcp.decorators import _merge_negotiation_schema, mcp_heavy
 from friese_mcp.registry import ToolRegistry
 from friese_mcp.views import (
-    McpEndpointView,
+    McpView,
     _build_probe_envelope,
     _serve_heavy_mode,
 )
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 
 
 # ---------------------------------------------------------------------------

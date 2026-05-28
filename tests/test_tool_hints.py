@@ -34,10 +34,10 @@ def _stub_tool(value: str) -> Any:
 
 @pytest.fixture()
 def registry() -> ToolRegistry:
-    """Registry with device and rack tools."""
+    """Registry with item and container tools."""
     reg = ToolRegistry()
     schema: dict[str, Any] = {"type": "object", "properties": {}}
-    for name in ("device_list", "device_create", "rack_list"):
+    for name in ("item_list", "item_create", "container_list"):
         tier = "read_write" if "create" in name else "read"
         reg.register(name, _stub_tool(name), "stub", schema, permission_tier=tier)
     return reg
@@ -68,31 +68,31 @@ class TestBuildGroupHelpHints:
 
     def test_hints_included_in_full_help(self, registry: ToolRegistry) -> None:
         """Hints dict is included in the full-group help payload."""
-        hints = {"device_create": "Requires extras.role to exist first."}
-        result = build_group_help("dcim", ["device_list", "device_create"], registry, hints=hints)
+        hints = {"item_create": "Requires setup to exist first."}
+        result = build_group_help("svc", ["item_list", "item_create"], registry, hints=hints)
         assert result["hints"] == hints
 
     def test_no_hints_key_when_hints_not_supplied(self, registry: ToolRegistry) -> None:
         """When hints is None, the 'hints' key is absent from the response."""
-        result = build_group_help("dcim", ["device_list"], registry)
+        result = build_group_help("svc", ["item_list"], registry)
         assert "hints" not in result
 
     def test_empty_hints_dict_suppressed(self, registry: ToolRegistry) -> None:
         """An empty hints dict does not add a 'hints' key."""
-        result = build_group_help("dcim", ["device_list"], registry, hints={})
+        result = build_group_help("svc", ["item_list"], registry, hints={})
         assert "hints" not in result
 
     def test_multiple_hints_all_present(self, registry: ToolRegistry) -> None:
         """All provided hints appear in the full-group response."""
         hints = {
-            "device_create": "Needs role.",
-            "rack_list": "Check location_type content_types.",
+            "item_create": "Needs role.",
+            "container_list": "Check location_type content_types.",
         }
         result = build_group_help(
-            "dcim", ["device_list", "device_create", "rack_list"], registry, hints=hints
+            "svc", ["item_list", "item_create", "container_list"], registry, hints=hints
         )
-        assert result["hints"]["device_create"] == "Needs role."
-        assert result["hints"]["rack_list"] == "Check location_type content_types."
+        assert result["hints"]["item_create"] == "Needs role."
+        assert result["hints"]["container_list"] == "Check location_type content_types."
 
 
 # ---------------------------------------------------------------------------
@@ -106,51 +106,51 @@ class TestBuildGroupHelpResourceScoped:
     def test_resource_scoped_returns_resource_key(self, registry: ToolRegistry) -> None:
         """resource= produces 'resource' and 'actions' keys instead of 'resources'."""
         result = build_group_help(
-            "dcim", ["device_list", "device_create", "rack_list"], registry, resource="device"
+            "svc", ["item_list", "item_create", "container_list"], registry, resource="item"
         )
-        assert result["resource"] == "device"
+        assert result["resource"] == "item"
         assert "actions" in result
         assert "resources" not in result
 
     def test_resource_scoped_actions_match_resource(self, registry: ToolRegistry) -> None:
         """Only actions for the requested resource are listed."""
         result = build_group_help(
-            "dcim", ["device_list", "device_create", "rack_list"], registry, resource="device"
+            "svc", ["item_list", "item_create", "container_list"], registry, resource="item"
         )
         assert set(result["actions"]) == {"list", "create"}
 
     def test_resource_scoped_hints_filtered_to_resource(self, registry: ToolRegistry) -> None:
         """Only hints whose key starts with '{resource}.' are included."""
         hints = {
-            "device_create": "Needs role.",
-            "rack_list": "Check content_types.",
+            "item_create": "Needs role.",
+            "container_list": "Check content_types.",
         }
         result = build_group_help(
-            "dcim",
-            ["device_list", "device_create", "rack_list"],
+            "svc",
+            ["item_list", "item_create", "container_list"],
             registry,
             hints=hints,
-            resource="device",
+            resource="item",
         )
-        assert "device_create" in result["hints"]
-        assert "rack_list" not in result["hints"]
+        assert "item_create" in result["hints"]
+        assert "container_list" not in result["hints"]
 
     def test_resource_scoped_no_hints_when_no_matches(self, registry: ToolRegistry) -> None:
         """If no hints match this resource, 'hints' key is absent."""
-        hints = {"rack_list": "Check content_types."}
+        hints = {"container_list": "Check content_types."}
         result = build_group_help(
-            "dcim", ["device_list", "rack_list"], registry, hints=hints, resource="device"
+            "svc", ["item_list", "container_list"], registry, hints=hints, resource="item"
         )
         assert "hints" not in result
 
     def test_resource_scoped_help_is_true(self, registry: ToolRegistry) -> None:
         """Resource-scoped payload still has help=True."""
-        result = build_group_help("dcim", ["device_list"], registry, resource="device")
+        result = build_group_help("svc", ["item_list"], registry, resource="item")
         assert result["help"] is True
 
     def test_unknown_resource_returns_empty_actions(self, registry: ToolRegistry) -> None:
         """An unrecognized resource name returns an empty actions list gracefully."""
-        result = build_group_help("dcim", ["device_list"], registry, resource="ghost")
+        result = build_group_help("svc", ["item_list"], registry, resource="ghost")
         assert result["actions"] == []
 
 
@@ -167,28 +167,28 @@ class TestMakeGroupInvokeHints:
     ) -> None:
         """FRIESE_MCP_TOOL_HINTS entries for group tools appear in help payload."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list", "device_create"}),
+            "svc",
+            frozenset({"item_list", "item_create"}),
             registry,
         )
-        hints_setting = {"device_create": "Create extras.role first."}
+        hints_setting = {"item_create": "Create setup first."}
         with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
             mock_settings.FRIESE_MCP_TOOL_HINTS = hints_setting
             mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
             result = invoke({"action": "help"}, _req(rf))
-        assert result["hints"]["device_create"] == "Create extras.role first."
+        assert result["hints"]["item_create"] == "Create setup first."
 
     def test_hints_for_other_groups_filtered_out(
         self, registry: ToolRegistry, rf: RequestFactory
     ) -> None:
         """Hints for tools not in this group are not surfaced."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list"}),
+            "svc",
+            frozenset({"item_list"}),
             registry,
         )
         hints_setting = {
-            "device_list": "DCIM hint.",
+            "item_list": "Svc hint.",
             "prefix.create": "IPAM hint — different group.",
         }
         with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
@@ -196,13 +196,13 @@ class TestMakeGroupInvokeHints:
             mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
             result = invoke({"action": "help"}, _req(rf))
         assert "prefix.create" not in result.get("hints", {})
-        assert result["hints"]["device_list"] == "DCIM hint."
+        assert result["hints"]["item_list"] == "Svc hint."
 
     def test_no_hints_setting_produces_no_hints_key(
         self, registry: ToolRegistry, rf: RequestFactory
     ) -> None:
         """When FRIESE_MCP_TOOL_HINTS is absent, 'hints' key is absent."""
-        invoke = make_group_invoke("dcim", frozenset({"device_list"}), registry)
+        invoke = make_group_invoke("svc", frozenset({"item_list"}), registry)
         with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
             del mock_settings.FRIESE_MCP_TOOL_HINTS
             mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
@@ -213,7 +213,7 @@ class TestMakeGroupInvokeHints:
         self, registry: ToolRegistry, rf: RequestFactory
     ) -> None:
         """FRIESE_MCP_TOOL_HINTS=None is treated as absent."""
-        invoke = make_group_invoke("dcim", frozenset({"device_list"}), registry)
+        invoke = make_group_invoke("svc", frozenset({"item_list"}), registry)
         with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
             mock_settings.FRIESE_MCP_TOOL_HINTS = None
             mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
@@ -225,15 +225,15 @@ class TestMakeGroupInvokeHints:
     ) -> None:
         """resource= on action=help returns scoped payload including matching hints."""
         invoke = make_group_invoke(
-            "dcim",
-            frozenset({"device_list", "device_create", "rack_list"}),
+            "svc",
+            frozenset({"item_list", "item_create", "container_list"}),
             registry,
         )
-        hints_setting = {"device_create": "Needs role.", "rack_list": "Check location_type."}
+        hints_setting = {"item_create": "Needs role.", "container_list": "Check location_type."}
         with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
             mock_settings.FRIESE_MCP_TOOL_HINTS = hints_setting
             mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
-            result = invoke({"action": "help", "resource": "device"}, _req(rf))
-        assert result["resource"] == "device"
-        assert "device_create" in result["hints"]
-        assert "rack_list" not in result.get("hints", {})
+            result = invoke({"action": "help", "resource": "item"}, _req(rf))
+        assert result["resource"] == "item"
+        assert "item_create" in result["hints"]
+        assert "container_list" not in result.get("hints", {})

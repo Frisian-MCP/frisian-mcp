@@ -216,7 +216,7 @@ def mcp_resource(
             ResourceDefinition(
                 uri_template=uri_template,
                 name=name,
-                fn=fn,  # type: ignore[arg-type]
+                fn=fn,
                 description=description,
                 mime_type=mime_type,
             )

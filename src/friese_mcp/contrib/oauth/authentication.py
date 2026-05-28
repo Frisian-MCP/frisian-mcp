@@ -23,6 +23,7 @@ To accept *either* OAuth tokens or static Bearer tokens::
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from django.conf import settings
@@ -41,32 +42,37 @@ class OAuthServicePrincipal:
     Principal set as ``request.user`` for OAuth-authenticated MCP requests.
 
     ``is_authenticated = True`` satisfies DRF's ``IsAuthenticated``.  The
-    permission tier is mapped to Django's ``is_superuser`` / ``is_staff`` flags
-    so that host frameworks that call the standard Django permission interface
-    (``has_perm``, ``get_all_permissions``, ``has_module_perms``) work correctly
-    without a database-backed user record.
+    permission tier controls the Django staff flag and permission methods so
+    that host frameworks using the standard Django permission interface
+    (``has_perm``, ``get_all_permissions``, ``has_module_perms``) work
+    correctly without a database-backed user record.
+
+    ``is_superuser`` is intentionally never set to ``True``.  Django bypasses
+    all object-level permission checks for superusers, which is too broad for
+    a service principal that may interact with host-app models.  Host code that
+    needs to distinguish the admin MCP tier should check
+    ``request.auth.permission == "admin"`` directly rather than relying on
+    ``request.user.is_superuser``.
 
     Tier mapping:
 
-    * ``admin``      — ``is_superuser = True``; Django bypasses all permission
-                       checks, which is appropriate for a fully-trusted service
-                       principal.
-    * ``read_write`` — ``is_staff = True``; permission methods return ``True``
-                       because MCP tier filtering is the real access gate.
-    * ``read``       — no elevated flags; permission methods return ``False`` for
-                       any write-class permission, providing a defence-in-depth
-                       layer on top of MCP tool filtering.
+    * ``admin``      — ``is_staff = True``; ``has_perm`` / ``has_module_perms``
+                       return ``True`` (MCP tier filtering is the real gate).
+    * ``read_write`` — ``is_staff = True``; same as admin at the Django level.
+    * ``read``       — no elevated flags; permission methods return ``False``
+                       for any write-class check.
     """
 
     is_authenticated: bool = True
     is_anonymous: bool = False
     is_active: bool = True
+    is_superuser: bool = False
     pk: None = None
     id: None = None
 
     def __init__(self, permission: str = "read") -> None:
+        """Set the permission tier and derive is_staff from it."""
         self.permission = permission
-        self.is_superuser: bool = permission == "admin"
         self.is_staff: bool = permission in ("read_write", "admin")
 
     # ------------------------------------------------------------------
@@ -74,21 +80,21 @@ class OAuthServicePrincipal:
     # Required by host apps that call permission methods on request.user.
     # ------------------------------------------------------------------
 
-    def get_all_permissions(self, obj: object = None) -> set:
+    def get_all_permissions(self, obj: object = None) -> set[str]:  # pylint: disable=unused-argument
+        """Return an empty set; MCP tier filtering is the real permission gate."""
         return set()
 
-    def has_perm(self, perm: str, obj: object = None) -> bool:
-        if self.is_superuser:
-            return True
-        if self.permission == "read_write":
-            return True
-        return False
+    def has_perm(self, perm: str, obj: object = None) -> bool:  # pylint: disable=unused-argument
+        """Return True for read_write and admin tiers; False for read-only."""
+        return self.permission in ("read_write", "admin")
 
-    def has_perms(self, perm_list: object, obj: object = None) -> bool:
+    def has_perms(self, perm_list: Iterable[str], obj: object = None) -> bool:
+        """Return True only when has_perm passes for every permission in perm_list."""
         return all(self.has_perm(p, obj) for p in perm_list)
 
-    def has_module_perms(self, app_label: str) -> bool:
-        return self.is_superuser or self.permission == "read_write"
+    def has_module_perms(self, app_label: str) -> bool:  # pylint: disable=unused-argument
+        """Return True for read_write and admin tiers; False for read-only."""
+        return self.permission in ("read_write", "admin")
 
 
 class OAuthTokenAuthentication(BaseAuthentication):
@@ -114,12 +120,29 @@ class OAuthTokenAuthentication(BaseAuthentication):
         header is absent, or raises
         :class:`~rest_framework.exceptions.AuthenticationFailed` when the token
         is invalid, expired, or the issuing client is inactive.
+
+        The permission tier is read from the issuing **client** at authentication
+        time (not the token's stored snapshot) so that permission changes on the
+        client propagate to outstanding tokens without waiting for expiry.
+
+        ``request.user`` is set to either:
+
+        * The Django user named by ``FRIESE_MCP_OAUTH_SERVICE_USER`` (if set and
+          the account exists), for host apps that need a real User FK on audit
+          records.
+        * :class:`OAuthServicePrincipal` otherwise — a lightweight stand-in that
+          satisfies DRF's ``IsAuthenticated`` without touching the database.
+
+        The ``is_superuser`` fallback (auto-detecting the first DB superuser) was
+        removed because it silently granted superuser-level ``request.user`` access
+        to every OAuth token regardless of the token's permission tier.
         """
         auth_header: str = request.META.get("HTTP_AUTHORIZATION", "")
-        if not auth_header.startswith("Bearer "):
+        # RFC 7235 §2.1 / RFC 6750 §2.1: scheme names are case-insensitive.
+        if not auth_header.lower().startswith("bearer "):
             return None
 
-        token_str = auth_header[len("Bearer ") :]
+        token_str = auth_header[7:]  # len("bearer ") == 7; raw case preserved
         # Tokens are stored as HMAC-SHA256 digests (SEC-1).  Hash the bearer
         # value before lookup so a leaked DB row cannot be replayed directly.
         try:
@@ -137,37 +160,37 @@ class OAuthTokenAuthentication(BaseAuthentication):
 
         OAuthAccessToken.objects.filter(pk=access_token.pk).update(last_used_at=timezone.now())
 
-        principal = OAuthServicePrincipal(permission=access_token.permission)
+        # Read permission from the client so that admin-console permission
+        # changes take effect immediately without waiting for token expiry.
+        principal = OAuthServicePrincipal(permission=access_token.client.permission)
 
         # Some host frameworks require request.user to be a real Django User
-        # instance for audit-log FKs (e.g. ObjectChange.user).  Resolve a
-        # backing User in priority order:
-        #   1. FRIESE_MCP_OAUTH_SERVICE_USER setting — explicit named account.
-        #   2. Auto-detect: first superuser in the DB.
-        #   3. Fall back to OAuthServicePrincipal (no User model or no superuser).
-        # Tier resolution is unaffected — _resolve_request_tier reads
-        # request.auth.permission (the OAuthAccessToken), not request.user.
-        try:
-            from django.contrib.auth import get_user_model  # pylint: disable=import-outside-toplevel
-            User = get_user_model()
-            service_username: str | None = getattr(settings, "FRIESE_MCP_OAUTH_SERVICE_USER", None)
-            if service_username:
-                django_user = User.objects.filter(username=service_username).first()
-                if django_user is None:
-                    logger.warning(
-                        "FRIESE_MCP_OAUTH_SERVICE_USER '%s' not found; trying superuser",
-                        service_username,
-                    )
-            else:
-                django_user = None
+        # instance for audit-log FKs (e.g. ObjectChange.user).  Honour the
+        # explicit FRIESE_MCP_OAUTH_SERVICE_USER setting when provided.
+        # Do NOT fall back to "first superuser in DB" — that silently elevates
+        # every OAuth token to superuser-level request.user (SEC-839c3b7c).
+        service_username: str | None = getattr(settings, "FRIESE_MCP_OAUTH_SERVICE_USER", None)
+        if service_username:
+            try:
+                from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+                    get_user_model,
+                )
 
-            if django_user is None:
-                django_user = User.objects.filter(is_superuser=True).order_by("pk").first()
-
-            if django_user is not None:
-                return (django_user, access_token)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+                user_model = get_user_model()
+                django_user = user_model.objects.filter(username=service_username).first()
+                if django_user is not None:
+                    return (django_user, access_token)
+                logger.warning(
+                    "FRIESE_MCP_OAUTH_SERVICE_USER '%s' not found; "
+                    "falling back to OAuthServicePrincipal",
+                    service_username,
+                )
+            except Exception:  # pylint: disable=broad-exception-caught  # noqa: BLE001
+                logger.debug(
+                    "Could not resolve FRIESE_MCP_OAUTH_SERVICE_USER; "
+                    "falling back to OAuthServicePrincipal",
+                    exc_info=True,
+                )
 
         return (principal, access_token)
 

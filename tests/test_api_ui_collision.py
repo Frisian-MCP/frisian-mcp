@@ -62,20 +62,20 @@ class TestPreferApiTool:
         assert _prefer_api_tool(None, candidate) is candidate
 
     # The url_path strings below mirror what DRFSyncDiscovery actually emits:
-    # unanchored, no leading slash (e.g. ``api/dcim/devices/``).  The post-
+    # unanchored, no leading slash (e.g. ``api/svc/items/``).  The post-
     # PKG-22-regression fix accepts an ``api/`` path segment at the start of
     # the prefix as well as in the middle (regex ``(^|/)api/``).
 
     def test_api_candidate_beats_non_api_existing(self) -> None:
         """An ``api/`` candidate replaces a non-``api/`` existing entry."""
-        existing = _tool(url_path="dcim/devices/")
-        candidate = _tool(url_path="api/dcim/devices/")
+        existing = _tool(url_path="svc/items/")
+        candidate = _tool(url_path="api/svc/items/")
         assert _prefer_api_tool(existing, candidate) is candidate
 
     def test_non_api_candidate_loses_to_api_existing(self) -> None:
         """A non-``api/`` candidate does NOT replace an ``api/`` existing entry."""
-        existing = _tool(url_path="api/dcim/devices/")
-        candidate = _tool(url_path="dcim/devices/")
+        existing = _tool(url_path="api/svc/items/")
+        candidate = _tool(url_path="svc/items/")
         assert _prefer_api_tool(existing, candidate) is existing
 
     def test_api_segment_at_start_matches(self) -> None:
@@ -85,26 +85,26 @@ class TestPreferApiTool:
         Regression guard for the PKG-22 follow-up: the previous substring
         check ``"/api/" in url_path`` missed this shape and let UI win.
         """
-        existing = _tool(url_path="dcim/devices/")
-        candidate = _tool(url_path="api/dcim/devices/")
+        existing = _tool(url_path="svc/items/")
+        candidate = _tool(url_path="api/svc/items/")
         assert _prefer_api_tool(existing, candidate) is candidate
 
     def test_api_segment_with_leading_slash_matches(self) -> None:
         """``/api/`` mid-path also matches (e.g. ``some/api/path/...``)."""
-        existing = _tool(url_path="dcim/devices/")
-        candidate = _tool(url_path="some/api/path/devices/")
+        existing = _tool(url_path="svc/items/")
+        candidate = _tool(url_path="some/api/path/items/")
         assert _prefer_api_tool(existing, candidate) is candidate
 
     def test_both_api_keeps_first_seen(self) -> None:
         """When both contain ``api/``, first-seen wins (deterministic)."""
-        existing = _tool(url_path="api/dcim/devices/")
-        candidate = _tool(url_path="api/v2/dcim/devices/")
+        existing = _tool(url_path="api/svc/items/")
+        candidate = _tool(url_path="api/v2/svc/items/")
         assert _prefer_api_tool(existing, candidate) is existing
 
     def test_both_non_api_keeps_first_seen(self) -> None:
         """When neither contains ``api/``, first-seen wins (existing behaviour)."""
-        existing = _tool(url_path="dcim/devices/")
-        candidate = _tool(url_path="ui/dcim/devices/")
+        existing = _tool(url_path="svc/items/")
+        candidate = _tool(url_path="ui/svc/items/")
         assert _prefer_api_tool(existing, candidate) is existing
 
     def test_api_must_be_a_path_segment(self) -> None:
@@ -312,7 +312,7 @@ class TestUrlPathPopulated:
         PKG-23: regex anchors (^, $) are stripped from ``url_path`` at discovery.
 
         Raw Django ``re_path`` patterns embed ``^`` / ``$`` for anchoring
-        (e.g. ``api/dcim/^devices/$``).  The stored ``url_path`` should be
+        (e.g. ``api/svc/^items/$``).  The stored ``url_path`` should be
         a clean path so downstream prefix / equality / display logic does
         not have to special-case the regex syntax.
         """
@@ -334,10 +334,10 @@ class TestUrlPathPopulated:
         """
         PKG-23 regression guard: stripping anchors must not break _prefer_api_tool.
 
-        After stripping, ``api/dcim/^devices/$`` becomes ``api/dcim/devices/``
+        After stripping, ``api/svc/^items/$`` becomes ``api/svc/items/``
         which still satisfies the ``(^|/)api/`` segment regex used by the
         collision resolver.
         """
-        existing = _tool(url_path="dcim/devices/")
-        candidate = _tool(url_path="api/dcim/devices/")
+        existing = _tool(url_path="svc/items/")
+        candidate = _tool(url_path="api/svc/items/")
         assert _prefer_api_tool(existing, candidate) is candidate

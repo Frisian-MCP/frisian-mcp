@@ -31,7 +31,7 @@ try:
         DjangoFilterBackend as _DjangoFilterBackend,
     )
 except ImportError:
-    _DjangoFilterBackend = None  # type: ignore[assignment,misc]
+    _DjangoFilterBackend = None
 
 try:
     from rest_framework.renderers import JSONRenderer as _JSONRenderer
@@ -47,10 +47,10 @@ logger = logging.getLogger(__name__)
 _PARAM_RE = re.compile(r"\(\?P<[^>]+>[^)]+\)|<[^>]+>")
 
 # Regex anchors that appear in raw Django URL pattern strings (``re_path``
-# regexes such as ``^devices/$``).  PKG-23: stripped from ``url_path`` before
+# regexes such as ``^products/$``).  PKG-23: stripped from ``url_path`` before
 # the value is stored on a :class:`ToolDefinition` so downstream consumers
 # can do prefix / equality / display logic without tripping over regex
-# syntax (``api/dcim/^devices/$`` → ``api/dcim/devices/``).
+# syntax (``api/catalog/^products/$`` → ``api/catalog/products/``).
 _REGEX_ANCHOR_RE = re.compile(r"[\^\$]")
 
 # Map DRF field class names to JSON Schema primitive types.
@@ -116,7 +116,40 @@ def _tool_name_separator() -> str:
 
 # URL path segments that represent API versioning or routing prefixes rather than resource names.
 # _resource_from_path skips these when searching for the resource name from the right.
-_VERSION_SEGMENTS: frozenset[str] = frozenset({"api", "rest", "v1", "v2", "v3", "v4", "v5"})
+# Override via FRIESE_MCP_VERSION_SEGMENTS (list) or FRIESE_MCP_VERSION_SEGMENT_PATTERN (regex).
+_DEFAULT_VERSION_SEGMENTS: frozenset[str] = frozenset(
+    {"api", "rest", "v1", "v2", "v3", "v4", "v5"}
+)
+
+
+def _is_version_segment(segment: str) -> bool:
+    r"""
+    Return ``True`` when *segment* is a versioning or routing prefix to skip.
+
+    Resolution order:
+
+    1. ``FRIESE_MCP_VERSION_SEGMENT_PATTERN`` (a regex string) — when set,
+       the segment is matched against this pattern.  Useful for schemes that
+       can't be enumerated up front, e.g. ``r"^(api|rest|v\d+|\d{4}-\d{2})$"``
+       to accept any ``v<N>`` and date-based versions like ``2024-01``.
+
+    2. ``FRIESE_MCP_VERSION_SEGMENTS`` (a list of strings) — when set,
+       replaces the built-in set entirely.  Use when the host has a small,
+       known set of routing prefixes (e.g. ``["api", "internal", "svc"]``).
+
+    3. :data:`_DEFAULT_VERSION_SEGMENTS` — fallback when neither setting is
+       configured (``api``, ``rest``, ``v1`` … ``v5``).
+
+    The *segment* passed in is already normalised (hyphens → underscores) by
+    :func:`_resource_from_path`, so patterns and lists should use underscores.
+    """
+    pattern: str | None = getattr(settings, "FRIESE_MCP_VERSION_SEGMENT_PATTERN", None)
+    if pattern is not None:
+        return bool(re.fullmatch(pattern, segment))
+    custom: list[str] | None = getattr(settings, "FRIESE_MCP_VERSION_SEGMENTS", None)
+    if custom is not None:
+        return segment in frozenset(custom)
+    return segment in _DEFAULT_VERSION_SEGMENTS
 
 # Actions that do not require request body data (read-only actions).
 _READ_ONLY_ACTIONS: frozenset[str] = frozenset({"list", "retrieve"})
@@ -393,7 +426,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             # that inspect self.request.method or self.request.user do not raise
             # AttributeError.  The stub carries the most common write-action method
             # (POST) and an anonymous user to avoid any auth-dependent branching.
-            viewset.request = types.SimpleNamespace(  # type: ignore[assignment]
+            viewset.request = types.SimpleNamespace(
                 method="POST",
                 auth=None,
                 META={},
@@ -650,9 +683,11 @@ def _resource_from_path(path: str) -> str:
     Extract the resource name from a URL pattern string.
 
     Strips regex anchors and parameter placeholders, then scans path segments
-    from right to left, skipping known versioning/routing prefixes defined in
-    :data:`_VERSION_SEGMENTS` (``api``, ``rest``, ``v1`` … ``v5``).  Returns
-    the first non-version segment found, or ``"unknown"`` when none exists.
+    from right to left, skipping versioning/routing prefixes recognised by
+    :func:`_is_version_segment` (defaults: ``api``, ``rest``, ``v1`` … ``v5``;
+    override via ``FRIESE_MCP_VERSION_SEGMENTS`` or
+    ``FRIESE_MCP_VERSION_SEGMENT_PATTERN``).  Returns the first non-version
+    segment found, or ``"unknown"`` when none exists.
 
     Examples::
 
@@ -667,7 +702,7 @@ def _resource_from_path(path: str) -> str:
     parts = [p for p in clean.split("/") if p and not p.startswith("(")]
     for segment in reversed(parts):
         name = segment.replace("-", "_")
-        if name not in _VERSION_SEGMENTS:
+        if not _is_version_segment(name):
             return name
     return "unknown"
 

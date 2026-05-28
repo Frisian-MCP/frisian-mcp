@@ -15,9 +15,9 @@ from friese_mcp.resources import (
     ResourceNotFoundError,
     ResourceRegistry,
 )
-from friese_mcp.views import McpEndpointView
+from friese_mcp.views import McpView
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 
 # ---------------------------------------------------------------------------
 # Helpers

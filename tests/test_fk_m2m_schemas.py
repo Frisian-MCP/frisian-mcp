@@ -182,9 +182,9 @@ class TestFieldToSchema:
         schema = {"type": "object", "properties": {
             "content_types": {"type": "array", "items": {"type": "string"}},
         }}
-        args = {"content_types": ["dcim.device", "dcim.rack", "ipam.prefix"]}
+        args = {"content_types": ["inventory.asset", "inventory.container", "ipam.prefix"]}
         result = _normalize_fk_arguments(args, schema)
-        assert result["content_types"] == ["dcim.device", "dcim.rack", "ipam.prefix"]
+        assert result["content_types"] == ["inventory.asset", "inventory.container", "ipam.prefix"]
 
 
 # ---------------------------------------------------------------------------

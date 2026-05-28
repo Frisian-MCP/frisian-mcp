@@ -14,11 +14,11 @@ from django.test import RequestFactory
 from friese_mcp.contrib.tokens.models import FrieseMcpToken
 from friese_mcp.contrib.tokens.permissions import IsAuthenticatedOrServiceToken
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpEndpointView
+from friese_mcp.views import McpView
 
 User = get_user_model()
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 _PERM = "friese_mcp.contrib.tokens.permissions.IsAuthenticatedOrServiceToken"
 _AUTH = "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication"
 
@@ -109,7 +109,7 @@ class TestIsAuthenticatedOrServiceToken:
 
 
 # ---------------------------------------------------------------------------
-# Integration: McpEndpointView + FrieseMcpTokenAuthentication
+# Integration: McpView + FrieseMcpTokenAuthentication
 # ---------------------------------------------------------------------------
 
 

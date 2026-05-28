@@ -20,7 +20,7 @@ class Migration(migrations.Migration):
                 blank=True,
                 help_text=(
                     'Optional JSON array of tool names this agent may see and call '
-                    '(e.g. ["users.list", "workouts.create"]). '
+                    '(e.g. ["users.list", "items.create"]). '
                     "Leave blank to allow all registered tools."
                 ),
                 null=True,

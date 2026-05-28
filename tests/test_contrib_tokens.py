@@ -19,7 +19,7 @@ from friese_mcp.contrib.tokens.authentication import (
 )
 from friese_mcp.contrib.tokens.models import FrieseMcpToken
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpEndpointView
+from friese_mcp.views import McpView
 
 User = get_user_model()
 
@@ -27,7 +27,7 @@ User = get_user_model()
 # Helpers
 # ---------------------------------------------------------------------------
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 
 
 def _bearer(token: str) -> dict[str, str]:
@@ -206,13 +206,13 @@ class TestFrieseMcpTokenAuthentication:
 
 
 # ---------------------------------------------------------------------------
-# Integration: McpEndpointView + FrieseMcpTokenAuthentication
+# Integration: McpView + FrieseMcpTokenAuthentication
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestMcpEndpointTokenIntegration:
-    """Integration tests: McpEndpointView + FrieseMcpTokenAuthentication + IsAuthenticated."""
+class TestMcpViewTokenIntegration:
+    """Integration tests: McpView + FrieseMcpTokenAuthentication + IsAuthenticated."""
 
     def _configure_auth(self, settings: Any) -> None:
         """Point the MCP gateway at FrieseMcpTokenAuthentication + IsAuthenticated."""
@@ -425,13 +425,13 @@ class TestFrieseMcpApiKeyAuthentication:
 
 
 # ---------------------------------------------------------------------------
-# Integration: McpEndpointView + FrieseMcpApiKeyAuthentication
+# Integration: McpView + FrieseMcpApiKeyAuthentication
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestMcpEndpointApiKeyIntegration:
-    """Integration tests: McpEndpointView + FrieseMcpApiKeyAuthentication."""
+class TestMcpViewApiKeyIntegration:
+    """Integration tests: McpView + FrieseMcpApiKeyAuthentication."""
 
     def test_no_key_returns_401(self, rf: RequestFactory, settings: Any) -> None:
         """No Authorization header → 401 (authenticate_header triggers WWW-Auth challenge)."""

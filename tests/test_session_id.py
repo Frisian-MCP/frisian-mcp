@@ -10,9 +10,9 @@ from django.contrib.auth.models import AnonymousUser
 from django.http import StreamingHttpResponse
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.views import McpEndpointView
+from friese_mcp.views import McpView
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 _rf = RequestFactory()
 
 

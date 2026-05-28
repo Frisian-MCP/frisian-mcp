@@ -25,6 +25,9 @@ env/
 # pytest cache
 .pytest_cache/
 
+# ruff cache
+.ruff_cache/
+
 # Coverage
 .coverage
 htmlcov/

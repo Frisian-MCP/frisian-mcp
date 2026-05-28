@@ -157,7 +157,7 @@ MCP Client (Claude, Cursor, GPT, …)
        │  JSON-RPC 2.0 over HTTP POST
        ▼
 ┌──────────────────────────────────────────────────┐
-│  McpEndpointView  (DRF APIView)                   │
+│  McpView  (DRF APIView)                           │
 │  ├─ Authentication  (FRIESE_MCP_AUTHENTICATION_CLASSES) │
 │  ├─ Permissions     (FRIESE_MCP_PERMISSION_CLASSES)     │
 │  └─ Method dispatch                              │
@@ -503,8 +503,8 @@ Each key becomes the name of one MCP tool in `tools/list`. Each value is a list 
 
 ```python
 FRIESE_MCP_DISPATCH_GROUPS = {
-    "devices":  ["device", "rack", "interface", "cable"],
-    "network":  ["ipaddress", "prefix", "vlan", "vrf"],
+    "catalog":  ["product", "category", "tag"],
+    "orders":   ["order", "line_item"],
     "identity": ["user", "group", "token"],
 }
 ```
@@ -753,7 +753,7 @@ FRIESE_MCP_BASE_URL = "https://api.example.com/mcp/"  # mcp_config command outpu
 
 ## Authentication and permissions
 
-`McpEndpointView` extends DRF's `APIView`. This means authentication and permission enforcement happen at the DRF layer, before any method handler or tool is invoked.
+`McpView` extends DRF's `APIView`. This means authentication and permission enforcement happen at the DRF layer, before any method handler or tool is invoked.
 
 ### Gateway-level vs tool-level enforcement
 
@@ -1251,7 +1251,7 @@ AgentConnection.objects.create(
     name="Claude Code — production",
     agent_type="claude-code",
     token=token,
-    allowed_tools=["users.list", "workouts.create"],
+    allowed_tools=["users.list", "items.create"],
 )
 ```
 
@@ -1454,13 +1454,13 @@ For host applications with a large number of ViewSets, auto-discovery can regist
 ```python
 # settings.py
 FRIESE_MCP_DISPATCH_GROUPS = {
-    "devices":  ["device", "rack", "interface", "cable"],
-    "network":  ["ipaddress", "prefix", "vlan", "vrf"],
+    "catalog":  ["product", "category", "tag"],
+    "orders":   ["order", "line_item"],
     "identity": ["user", "group", "token"],
 }
 ```
 
-Each key is the MCP tool name that will appear in `tools/list`. Each value is a list of resource name prefixes to bundle. A resource prefix matches any tool whose name starts with `{prefix}{separator}` (e.g. `device_list`, `device_create`).
+Each key is the MCP tool name that will appear in `tools/list`. Each value is a list of resource name prefixes to bundle. A resource prefix matches any tool whose name starts with `{prefix}{separator}` (e.g. `product_list`, `product_create`).
 
 At startup:
 - Each group is registered as a single `@mcp_dispatcher` tool.
@@ -1472,7 +1472,7 @@ At startup:
 ```json
 // Discover available resources in the group
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-  "name": "devices",
+  "name": "catalog",
   "arguments": {"resource": null, "action": "help"}
 }}
 
@@ -1480,22 +1480,22 @@ At startup:
 {
   "result": {
     "help": true,
-    "group": "devices",
+    "group": "catalog",
     "resources": {
-      "device":    ["list", "retrieve", "create", "update", "destroy"],
-      "rack":      ["list", "retrieve", "create"],
-      "interface": ["list", "retrieve", "create", "update", "partial_update", "destroy"]
+      "product":  ["list", "retrieve", "create", "update", "destroy"],
+      "category": ["list", "retrieve", "create"],
+      "tag":      ["list", "retrieve", "create", "update", "partial_update", "destroy"]
     }
   }
 }
 ```
 
 ```json
-// List devices with a filter
+// List products with a filter
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-  "name": "devices",
+  "name": "catalog",
   "arguments": {
-    "resource": "device",
+    "resource": "product",
     "action":   "list",
     "params":   {"status": "active", "limit": 10}
   }
@@ -1503,13 +1503,13 @@ At startup:
 ```
 
 ```json
-// Create a device
+// Create a product
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-  "name": "devices",
+  "name": "catalog",
   "arguments": {
-    "resource": "device",
+    "resource": "product",
     "action":   "create",
-    "params":   {"name": "router-01", "device_type": "ISR4321", "status": "planned"}
+    "params":   {"name": "widget-pro", "category": "tools", "status": "available"}
   }
 }}
 ```
@@ -1520,12 +1520,12 @@ Adds hint strings to dispatcher help responses for specific tools. Useful for do
 
 ```python
 FRIESE_MCP_TOOL_HINTS = {
-    "device_create": "Requires a role (from the identity group) and a device type to exist first.",
-    "prefix_create": "Requires a namespace to exist. Create one with network.namespace_create.",
+    "product_create": "Requires a category (from the catalog group) to exist first.",
+    "order_create": "Requires at least one product. Create one with catalog.product_create.",
 }
 ```
 
-Hints appear in the `action="help"` response under a top-level `"hints"` key, keyed by tool name. They are also shown in resource-scoped help (`action="help"`, `resource="device"`).
+Hints appear in the `action="help"` response under a top-level `"hints"` key, keyed by tool name. They are also shown in resource-scoped help (`action="help"`, `resource="product"`).
 
 ### Single-entry-point dispatcher pattern
 
@@ -1803,21 +1803,21 @@ from friese_mcp import mcp_dispatcher, mcp_action
 
 When a `@mcp_dispatcher` is registered for a resource name, friese-mcp automatically suppresses any auto-discovered ViewSet tools whose resource name conflicts. The dispatcher declaration is authoritative for its resource's MCP surface — no `@mcp_ignore` needed on the underlying ViewSet.
 
-**Why:** Writing `@mcp_dispatcher("exercises")` is an explicit declaration that you own the `exercises` resource. If auto-discovery also emits `exercise.list`, `exercise.create`, etc. from the underlying ViewSet, both sets of names appear in `tools/list` but only the dispatcher routes correctly — the flat names return `-32601`. The auto-suppression eliminates this split-brain at startup rather than at call time.
+**Why:** Writing `@mcp_dispatcher("orders")` is an explicit declaration that you own the `orders` resource. If auto-discovery also emits `order.list`, `order.create`, etc. from the underlying ViewSet, both sets of names appear in `tools/list` but only the dispatcher routes correctly — the flat names return `-32601`. The auto-suppression eliminates this split-brain at startup rather than at call time.
 
-**Match rule:** Strict prefix match. A dispatcher named `exercises` suppresses any auto-discovered tool whose resource prefix is `exercises` (exact) or `exercise` (singular — strips one trailing `s`). No fuzzy matching beyond that.
+**Match rule:** Strict prefix match. A dispatcher named `orders` suppresses any auto-discovered tool whose resource prefix is `orders` (exact) or `order` (singular — strips one trailing `s`). No fuzzy matching beyond that.
 
 | Auto-discovered tool | Dispatcher | Suppressed? |
 |---|---|---|
-| `exercise.list` | `exercises` | Yes — singular match |
-| `exercises.custom` | `exercises` | Yes — exact match |
-| `programs.list` | `exercises` | No — different resource |
+| `order.list` | `orders` | Yes — singular match |
+| `orders.custom` | `orders` | Yes — exact match |
+| `users.list` | `orders` | No — different resource |
 | `users.list` | `users` | Yes — exact match |
 
 **Suppression logging:** When a tool is suppressed, friese-mcp logs at INFO:
 
 ```
-friese_mcp: suppressing auto-discovered tool 'exercise.list' — shadowed by dispatcher 'exercises'
+friese_mcp: suppressing auto-discovered tool 'order.list' — shadowed by dispatcher 'orders'
 ```
 
 Check your logs if expected auto-discovered tools go missing — a misspelled dispatcher name would silently suppress the wrong resource without this signal.
@@ -1832,7 +1832,7 @@ Check your logs if expected auto-discovered tools go missing — a misspelled di
 
 **Custom handlers and fresh projects:** Projects that use custom tool handlers (not DRF ViewSets) will find that auto-discovery produces no tools for those handlers — suppression never fires. Projects with only dispatchers or only auto-discovery are also unaffected.
 
-**Intentional-both edge case:** If you genuinely need both a `@mcp_dispatcher("exercises")` and flat auto-discovered `exercise.*` tools in `tools/list`, the suppression will remove the flat tools. This is intentional — advertising both would recreate the split-brain bug. Use distinct resource names if you need both surfaces.
+**Intentional-both edge case:** If you genuinely need both a `@mcp_dispatcher("orders")` and flat auto-discovered `order.*` tools in `tools/list`, the suppression will remove the flat tools. This is intentional — advertising both would recreate the split-brain bug. Use distinct resource names if you need both surfaces.
 
 ### `@mcp_resource`
 
@@ -2173,14 +2173,14 @@ Validate, authorise, and invoke a registered tool. Thread-safe. Steps:
 
 All requests and responses follow [JSON-RPC 2.0](https://www.jsonrpc.org/specification). The endpoint handles all MCP traffic through a single URL.
 
-> **View class rename:** The gateway view is now `friese_mcp.views.McpView`. `McpEndpointView` is retained as a backward-compatible alias and will continue to work — existing URL configurations that import `McpEndpointView` require no changes. New code should use `McpView`.
+> **Migration note:** The gateway view was renamed from `McpEndpointView` to `McpView` in a pre-1.0 release. Update any existing imports:
 >
 > ```python
-> # Preferred (new code)
-> from friese_mcp.views import McpView
->
-> # Backward-compatible alias (existing code — no changes required)
+> # Before
 > from friese_mcp.views import McpEndpointView
+>
+> # After
+> from friese_mcp.views import McpView
 > ```
 
 ### Supported methods
@@ -2686,7 +2686,7 @@ When a tool raises an unhandled exception, `tools/call` returns `{"isError": tru
 
 ### CSRF and session authentication
 
-`McpEndpointView` extends DRF's `APIView`. DRF exempts `APIView` from Django's CSRF middleware by default, so no `@csrf_exempt` decorator is needed. However, if `SessionAuthentication` is included in `FRIESE_MCP_AUTHENTICATION_CLASSES`, DRF will enforce CSRF for session-authenticated requests (standard DRF behaviour). MCP clients should use token authentication (Bearer / API key) rather than session cookies to avoid this complexity.
+`McpView` extends DRF's `APIView`. DRF exempts `APIView` from Django's CSRF middleware by default, so no `@csrf_exempt` decorator is needed. However, if `SessionAuthentication` is included in `FRIESE_MCP_AUTHENTICATION_CLASSES`, DRF will enforce CSRF for session-authenticated requests (standard DRF behaviour). MCP clients should use token authentication (Bearer / API key) rather than session cookies to avoid this complexity.
 
 ### Rate limiting
 

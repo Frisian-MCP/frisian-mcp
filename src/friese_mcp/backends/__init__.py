@@ -84,12 +84,12 @@ def get_discovery_backends() -> list[BaseDiscoveryBackend]:
     """
     plural: list[str] | None = getattr(settings, "FRIESE_MCP_DISCOVERY_BACKENDS", None)
     if plural is not None:
-        return [_load_class(path)() for path in plural]  # type: ignore[misc]
+        return [_load_class(path)() for path in plural]
 
     singular: str | None = getattr(settings, "FRIESE_MCP_DISCOVERY_BACKEND", None)
     if singular is not None:
         cls = _load_class(singular)
-        return [cls()]  # type: ignore[return-value]
+        return [cls()]
 
     return [DRFSyncDiscovery()]
 

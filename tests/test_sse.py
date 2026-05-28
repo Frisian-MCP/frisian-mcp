@@ -9,9 +9,9 @@ from django.contrib.auth.models import AnonymousUser
 from django.http import JsonResponse, StreamingHttpResponse
 from django.test import RequestFactory
 
-from friese_mcp.views import McpEndpointView, _maybe_sse
+from friese_mcp.views import McpView, _maybe_sse
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 _rf = RequestFactory()
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ class TestMaybeSse:
 
 
 # ---------------------------------------------------------------------------
-# TestSseIntegration — end-to-end through McpEndpointView
+# TestSseIntegration — end-to-end through McpView
 # ---------------------------------------------------------------------------
 
 

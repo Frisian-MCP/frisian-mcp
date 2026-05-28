@@ -11,10 +11,10 @@ from django.test import RequestFactory, override_settings
 
 from friese_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpEndpointView, _get_token_permission
+from friese_mcp.views import McpView, _get_token_permission
 
 _rf = RequestFactory()
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 
 
 # ---------------------------------------------------------------------------
