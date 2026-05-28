@@ -94,12 +94,22 @@ def _get_token_permission(request: Any) -> str:
     fallback) is applied in one canonical place.  Retained as a thin shim for
     backwards compatibility with code (and tests) that imports
     ``views._get_token_permission`` directly.
+
+    If ``request._mcp_max_tier`` is set (stamped by :meth:`McpView.post` from
+    the view's :meth:`~McpView._effective_max_tier`), the resolved tier is
+    clamped to that maximum.  This is the ``FRIESE_MCP_MAX_TIER`` mechanism:
+    even a superuser hitting an open endpoint receives at most the declared cap.
     """
     from friese_mcp.registry import (  # pylint: disable=import-outside-toplevel
+        _TIER_RANK,
         _resolve_request_tier,
     )
 
-    return _resolve_request_tier(request)
+    tier = _resolve_request_tier(request)
+    max_tier: str | None = getattr(request, "_mcp_max_tier", None)
+    if max_tier is not None and _TIER_RANK.get(tier, 0) > _TIER_RANK.get(max_tier, 0):
+        return max_tier
+    return tier
 
 
 def invalidate_tools_list_cache() -> None:
@@ -1121,6 +1131,17 @@ class McpView(APIView):
 
     renderer_classes = [JSONRenderer, _EventStreamRenderer]
 
+    def _effective_max_tier(self) -> str | None:
+        """
+        Return the tier cap for this endpoint, or ``None`` for no cap.
+
+        Reads ``FRIESE_MCP_MAX_TIER`` from settings.  Override in a subclass
+        to pin a different cap (or ``None`` to disable it) without touching
+        global settings — the auto-registered protected endpoint does exactly
+        this so that authenticated callers receive their full tier there.
+        """
+        return getattr(settings, "FRIESE_MCP_MAX_TIER", None)
+
     def get_authenticators(self) -> list[Any]:
         """
         Return authenticator instances for this view.
@@ -1195,6 +1216,9 @@ class McpView(APIView):
 
     def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse | StreamingHttpResponse:
         """Handle POST — dispatch JSON-RPC 2.0 requests."""
+        # Stamp the endpoint-level tier cap so _get_token_permission can apply
+        # it throughout the request without re-reading settings on each call.
+        request._mcp_max_tier = self._effective_max_tier()  # type: ignore[attr-defined]
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             return _maybe_sse(
                 JsonResponse(

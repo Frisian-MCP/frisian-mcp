@@ -305,8 +305,11 @@ def _install_protected_mcp_url() -> bool:
         return False
 
     class _ProtectedMcpView(McpView):
-        def get_permissions(self) -> list:  # type: ignore[override]
+        def get_permissions(self) -> list[Any]:
             return [IsAuthenticated()]
+
+        def _effective_max_tier(self) -> str | None:
+            return None  # no cap — authenticated callers receive their full tier here
 
     clean = protected_path.strip("/")
     pattern = re_path(rf"^{re.escape(clean)}/?$", _ProtectedMcpView.as_view())
