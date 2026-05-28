@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -81,7 +81,7 @@ def _load_backend(dotted_path: str) -> AbstractRateLimitBackend:
         ) from exc
     module = importlib.import_module(module_path)
     cls = getattr(module, cls_name)
-    return cls()
+    return cast("AbstractRateLimitBackend", cls())
 
 
 class RateLimitMiddleware:
@@ -164,7 +164,7 @@ class RateLimitMiddleware:
                 xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
                 parts = [p.strip() for p in xff.split(",") if p.strip()]
                 if len(parts) >= self._proxy_count:
-                    return parts[-self._proxy_count]
+                    return str(parts[-self._proxy_count])
             return str(request.META.get("REMOTE_ADDR", "unknown"))
 
         user = getattr(request, "user", None)

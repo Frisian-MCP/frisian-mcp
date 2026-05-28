@@ -31,7 +31,7 @@ try:
         DjangoFilterBackend as _DjangoFilterBackend,
     )
 except ImportError:
-    _DjangoFilterBackend = None  # type: ignore[assignment,misc]
+    _DjangoFilterBackend = None
 
 try:
     from rest_framework.renderers import JSONRenderer as _JSONRenderer
@@ -426,7 +426,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             # that inspect self.request.method or self.request.user do not raise
             # AttributeError.  The stub carries the most common write-action method
             # (POST) and an anonymous user to avoid any auth-dependent branching.
-            viewset.request = types.SimpleNamespace(  # type: ignore[assignment]
+            viewset.request = types.SimpleNamespace(
                 method="POST",
                 auth=None,
                 META={},

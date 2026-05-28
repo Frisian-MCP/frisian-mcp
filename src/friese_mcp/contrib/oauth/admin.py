@@ -8,7 +8,7 @@ from django.utils.html import format_html
 from .models import OAuthAccessToken, OAuthClient
 
 
-class OAuthClientAdminForm(forms.ModelForm):
+class OAuthClientAdminForm(forms.ModelForm):  # type: ignore[type-arg]
     """ModelForm for OAuthClient that suppresses verbose RFC jargon in help text."""
 
     class Meta:

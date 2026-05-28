@@ -345,13 +345,13 @@ class SyncInvocation(BaseInvocationBackend):
         # ``self.context['request'].user.is_authenticated`` or queryset-scoping
         # helpers like ``.restrict(user, 'view')`` for permission-aware FK
         # lookups.  Setting the private slots directly skips the lazy path.
-        drf_request._user = getattr(  # pylint: disable=protected-access
+        drf_request._user = getattr(  # type: ignore[attr-defined]  # pylint: disable=protected-access
             request, "user", AnonymousUser()
         )
-        drf_request._auth = getattr(  # pylint: disable=protected-access
+        drf_request._auth = getattr(  # type: ignore[attr-defined]  # pylint: disable=protected-access
             request, "auth", None
         )
-        drf_request._authenticator = None  # pylint: disable=protected-access
+        drf_request._authenticator = None  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
         # Populate accepted_renderer / accepted_media_type so ViewSets that access
         # these attributes (standard since DRF 3.14) do not raise AttributeError.
@@ -529,9 +529,9 @@ class SyncInvocation(BaseInvocationBackend):
             body_bytes = json.dumps(body_args).encode("utf-8")
             req.META["CONTENT_TYPE"] = "application/json"
             req.META["CONTENT_LENGTH"] = str(len(body_bytes))
-            req._stream = BytesIO(body_bytes)  # type: ignore[attr-defined]  # pylint: disable=protected-access
+            req._stream = BytesIO(body_bytes)  # pylint: disable=protected-access
         else:
-            req._stream = BytesIO(b"")  # type: ignore[attr-defined]  # pylint: disable=protected-access
+            req._stream = BytesIO(b"")  # pylint: disable=protected-access
         # DRF 3.17 _load_stream() accesses _request._read_started directly; the
         # attribute is not initialised in HttpRequest.__init__ but only set on
         # first read().  Set it explicitly so the synthetic request works.

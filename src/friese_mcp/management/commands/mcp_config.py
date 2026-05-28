@@ -6,6 +6,8 @@ import argparse
 import json
 import sys
 
+from typing import Any
+
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
@@ -20,7 +22,7 @@ _CLAUDE_DESKTOP_CONFIG_PATH = {
 }
 
 
-def _server_block(url: str, client: str, token: str | None) -> dict:
+def _server_block(url: str, client: str, token: str | None) -> dict[str, Any]:
     """
     Build the per-server config block for the given *client* type.
 
@@ -34,7 +36,7 @@ def _server_block(url: str, client: str, token: str | None) -> dict:
         headers["Authorization"] = f"Bearer {token}"
 
     if client in ("claude-code", "cursor"):
-        block: dict = {"type": "http", "url": url}
+        block: dict[str, Any] = {"type": "http", "url": url}
         if headers:
             block["headers"] = headers
         return block

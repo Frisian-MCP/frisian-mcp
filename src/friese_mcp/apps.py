@@ -831,7 +831,7 @@ class FrieseMcpConfig(AppConfig):
                 flush=True,
             )
 
-        tool_hints: dict | None = getattr(settings, "FRIESE_MCP_TOOL_HINTS", None)
+        tool_hints: dict[str, Any] | None = getattr(settings, "FRIESE_MCP_TOOL_HINTS", None)
         if tool_hints and startup_print:
             print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
                 f"[friese-mcp] {len(tool_hints)} tool hint(s) configured "

@@ -438,7 +438,7 @@ def _get_agent_connection(request: Any) -> Any | None:
 # ---------------------------------------------------------------------------
 
 
-def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse:
+def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse | StreamingHttpResponse:
     """
     Wrap *response* as a single-message SSE stream when the caller accepts it.
 
@@ -1146,7 +1146,7 @@ class McpView(APIView):
             return []
         return [cls() for cls in classes]
 
-    def get(  # type: ignore[override]
+    def get(
         self, request: DRFRequest, *args: Any, **kwargs: Any
     ) -> StreamingHttpResponse | HttpResponse:
         """
@@ -1193,7 +1193,7 @@ class McpView(APIView):
         resp["X-Accel-Buffering"] = "no"
         return resp
 
-    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse:
+    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse | StreamingHttpResponse:
         """Handle POST — dispatch JSON-RPC 2.0 requests."""
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             return _maybe_sse(

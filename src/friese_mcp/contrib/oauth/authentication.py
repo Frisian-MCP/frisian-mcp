@@ -23,6 +23,7 @@ To accept *either* OAuth tokens or static Bearer tokens::
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from django.conf import settings
@@ -79,7 +80,7 @@ class OAuthServicePrincipal:
     # Required by host apps that call permission methods on request.user.
     # ------------------------------------------------------------------
 
-    def get_all_permissions(self, obj: object = None) -> set:  # pylint: disable=unused-argument
+    def get_all_permissions(self, obj: object = None) -> set[str]:  # pylint: disable=unused-argument
         """Return an empty set; MCP tier filtering is the real permission gate."""
         return set()
 
@@ -87,7 +88,7 @@ class OAuthServicePrincipal:
         """Return True for read_write and admin tiers; False for read-only."""
         return self.permission in ("read_write", "admin")
 
-    def has_perms(self, perm_list: object, obj: object = None) -> bool:
+    def has_perms(self, perm_list: Iterable[str], obj: object = None) -> bool:
         """Return True only when has_perm passes for every permission in perm_list."""
         return all(self.has_perm(p, obj) for p in perm_list)
 

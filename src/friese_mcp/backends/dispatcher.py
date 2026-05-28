@@ -209,6 +209,6 @@ def _make_dispatcher_invoke(
                     f"Invalid params for action {action!r}: {exc.message}"
                 ) from exc
 
-        return entry.method(instance, request, params)  # type: ignore[return-value]
+        return entry.method(instance, request, params)  # type: ignore[no-any-return]
 
     return invoke
