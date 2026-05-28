@@ -28,7 +28,7 @@ Usage::
         name="Claude Code — production",
         agent_type="claude-code",
         token=token,
-        allowed_tools=["users.list", "workouts.create"],
+        allowed_tools=["users.list", "items.create"],
     )
 
 """
@@ -121,7 +121,7 @@ class AgentConnection(models.Model):
         validators=[validate_tool_name_list],
         help_text=(
             'Optional JSON array of tool names this agent may see and call '
-            '(e.g. ["users.list", "workouts.create"]). '
+            '(e.g. ["users.list", "items.create"]). '
             "Leave blank to allow all registered tools."
         ),
     )

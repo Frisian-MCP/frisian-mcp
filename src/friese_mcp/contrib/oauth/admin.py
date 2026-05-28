@@ -9,7 +9,11 @@ from .models import OAuthAccessToken, OAuthClient
 
 
 class OAuthClientAdminForm(forms.ModelForm):
+    """ModelForm for OAuthClient that suppresses verbose RFC jargon in help text."""
+
     class Meta:
+        """Form metadata."""
+
         model = OAuthClient
         fields = "__all__"
         help_texts = {"redirect_uris": ""}  # suppress model-level RFC jargon
@@ -79,12 +83,14 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
     @admin.display(description="Sign-in URL")
     def connector_sign_in_url(self, obj: OAuthClient) -> str:  # pylint: disable=unused-argument
+        """Return the OAuth authorize URL formatted as an HTML code element."""
         issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "").rstrip("/")
         url = f"{issuer}/oauth/authorize/"
         return format_html("<code>{}</code>", url)
 
     @admin.display(description="MCP server URL")
     def connector_mcp_url(self, obj: OAuthClient) -> str:  # pylint: disable=unused-argument
+        """Return the MCP gateway URL formatted as an HTML code element."""
         issuer: str = getattr(settings, "FRIESE_MCP_OAUTH_ISSUER", "").rstrip("/")
         mcp_path: str = getattr(settings, "FRIESE_MCP_PATH", "/mcp/")
         url = f"{issuer}/{mcp_path.lstrip('/')}"
@@ -110,7 +116,11 @@ class OAuthAccessTokenAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             "Token",
             {
                 "fields": ("token",),
-                "description": "The raw Bearer token secret.",
+                "description": (
+                    "HMAC-SHA256 digest of the Bearer token (not the raw value).  "
+                    "The raw Bearer token was returned to the client exactly once "
+                    "at issuance via the token endpoint and is never stored or recoverable."
+                ),
             },
         ),
         (

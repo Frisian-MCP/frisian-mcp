@@ -14,6 +14,7 @@ from friese_mcp.backends.discovery import (
     DRFSyncDiscovery,
     _action_description,
     _filterset_properties,
+    _is_version_segment,
     _resource_from_path,
     _schema_from_action_signature,
     _schema_from_filter_backends,
@@ -76,6 +77,59 @@ class TestResourceFromPath:
     def test_api_segment_skipped(self) -> None:
         """'api' segment is treated as a version prefix and skipped."""
         assert _resource_from_path("v1/") == "unknown"
+
+
+class TestVersionSegmentConfig:
+    """Tests for FRIESE_MCP_VERSION_SEGMENTS and FRIESE_MCP_VERSION_SEGMENT_PATTERN."""
+
+    def test_default_segments_unchanged(self) -> None:
+        """Default set covers api, rest, v1-v5; behaviour is preserved."""
+        assert _is_version_segment("api")
+        assert _is_version_segment("rest")
+        assert _is_version_segment("v1")
+        assert _is_version_segment("v5")
+        assert not _is_version_segment("users")
+        assert not _is_version_segment("v6")
+
+    def test_custom_list_replaces_default(self, settings: Any) -> None:
+        """FRIESE_MCP_VERSION_SEGMENTS replaces the default set entirely."""
+        settings.FRIESE_MCP_VERSION_SEGMENTS = ["api", "internal", "svc"]
+        assert _is_version_segment("api")
+        assert _is_version_segment("internal")
+        assert _is_version_segment("svc")
+        assert not _is_version_segment("rest")
+        assert not _is_version_segment("v1")
+
+    def test_custom_list_skips_in_path(self, settings: Any) -> None:
+        """A custom list entry (e.g. 'internal') is skipped in path extraction."""
+        settings.FRIESE_MCP_VERSION_SEGMENTS = ["api", "internal"]
+        assert _resource_from_path("internal/users/") == "users"
+        assert _resource_from_path("api/internal/widgets/") == "widgets"
+
+    def test_regex_pattern_accepts_v6_through_v99(self, settings: Any) -> None:
+        r"""A regex pattern like r'^v\d+$' matches v6 through v99 and beyond."""
+        settings.FRIESE_MCP_VERSION_SEGMENT_PATTERN = r"^v\d+$"
+        assert _is_version_segment("v6")
+        assert _is_version_segment("v10")
+        assert _is_version_segment("v99")
+        assert _is_version_segment("v1")
+        assert not _is_version_segment("api")
+        assert not _is_version_segment("users")
+        assert not _is_version_segment("v")
+
+    def test_regex_pattern_skips_in_path(self, settings: Any) -> None:
+        """Regex pattern is applied during path extraction."""
+        settings.FRIESE_MCP_VERSION_SEGMENT_PATTERN = r"^(api|rest|v\d+|\d{4}-\d{2})$"
+        assert _resource_from_path("api/v6/orders/") == "orders"
+        assert _resource_from_path("rest/v10/products/") == "products"
+        assert _resource_from_path("api/2024-01/invoices/") == "invoices"
+
+    def test_regex_pattern_takes_precedence_over_list(self, settings: Any) -> None:
+        """When both settings are set, PATTERN takes precedence over SEGMENTS."""
+        settings.FRIESE_MCP_VERSION_SEGMENTS = ["api"]
+        settings.FRIESE_MCP_VERSION_SEGMENT_PATTERN = r"^v\d+$"
+        assert _is_version_segment("v6")
+        assert not _is_version_segment("api")
 
 
 # ---------------------------------------------------------------------------
@@ -737,76 +791,76 @@ class TestSuppressDispatcherShadowed:
 
     def test_no_dispatchers_returns_all(self) -> None:
         """With no dispatchers, all tools are returned unchanged."""
-        tools = [_tool_def("exercises_list"), _tool_def("exercises_create")]
+        tools = [_tool_def("records_list"), _tool_def("records_create")]
         result = _suppress_dispatcher_shadowed(tools, frozenset())
-        assert [t.name for t in result] == ["exercises_list", "exercises_create"]
+        assert [t.name for t in result] == ["records_list", "records_create"]
 
     def test_exact_match_suppresses_tool(self) -> None:
         """Discovered tool with same resource prefix as dispatcher is suppressed."""
-        tools = [_tool_def("exercises_list"), _tool_def("exercises_create")]
-        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        tools = [_tool_def("records_list"), _tool_def("records_create")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
         assert result == []
 
     def test_singular_match_suppresses_tool(self) -> None:
-        """Dispatcher 'exercises' suppresses discovered 'exercise_list'."""
-        tools = [_tool_def("exercise_list"), _tool_def("exercise_retrieve")]
-        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        """Dispatcher 'records' suppresses discovered 'record_list'."""
+        tools = [_tool_def("record_list"), _tool_def("record_retrieve")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
         assert result == []
 
     def test_unrelated_tools_not_suppressed(self) -> None:
-        """Dispatcher 'exercises' does not affect 'orders_list'."""
+        """Dispatcher 'records' does not affect 'orders_list'."""
         tools = [_tool_def("orders_list"), _tool_def("orders_create")]
-        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
         assert [t.name for t in result] == ["orders_list", "orders_create"]
 
     def test_mixed_resources_suppresses_only_matching(self) -> None:
         """Only tools whose resource matches the dispatcher are removed."""
         tools = [
-            _tool_def("exercises_list"),
-            _tool_def("exercises_create"),
+            _tool_def("records_list"),
+            _tool_def("records_create"),
             _tool_def("orders_list"),
         ]
-        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
         assert [t.name for t in result] == ["orders_list"]
 
     def test_multiple_dispatchers_suppress_respective_tools(self) -> None:
         """Two dispatchers each suppress their own resource tools."""
         tools = [
-            _tool_def("exercises_list"),
+            _tool_def("records_list"),
             _tool_def("programs_list"),
             _tool_def("orders_list"),
         ]
         result = _suppress_dispatcher_shadowed(
-            tools, frozenset({"exercises", "programs"})
+            tools, frozenset({"records", "programs"})
         )
         assert [t.name for t in result] == ["orders_list"]
 
     def test_non_dotted_tool_exact_match(self) -> None:
         """A tool without a dot is matched by its full name."""
-        tools = [_tool_def("exercises")]
-        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        tools = [_tool_def("records")]
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
         assert result == []
 
     def test_non_dotted_tool_no_match(self) -> None:
         """A tool without a dot is not suppressed when name differs."""
         tools = [_tool_def("orders")]
-        result = _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
         assert [t.name for t in result] == ["orders"]
 
     def test_empty_tool_list(self) -> None:
         """Empty tool list returns empty list regardless of dispatchers."""
-        result = _suppress_dispatcher_shadowed([], frozenset({"exercises"}))
+        result = _suppress_dispatcher_shadowed([], frozenset({"records"}))
         assert result == []
 
     def test_suppressed_tools_logged(self, caplog: Any) -> None:
         """Suppressed tools are logged at INFO level."""
         import logging
 
-        tools = [_tool_def("exercises_list")]
+        tools = [_tool_def("records_list")]
         with caplog.at_level(logging.INFO, logger="friese_mcp.apps"):
-            _suppress_dispatcher_shadowed(tools, frozenset({"exercises"}))
-        assert any("exercises_list" in r.message for r in caplog.records)
-        assert any("exercises" in r.message for r in caplog.records)
+            _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
+        assert any("records_list" in r.message for r in caplog.records)
+        assert any("records" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

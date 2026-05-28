@@ -19,7 +19,7 @@ from friese_mcp.registry import (
 )
 from friese_mcp.resources import ResourceNotFoundError, ResourceRegistry, resource_registry
 
-__version__ = "0.2.0"
+__version__ = "0.9.51"
 
 # ``invalidate_tools_list_cache`` is exposed via ``__getattr__`` (PEP 562),
 # not as a top-level binding — pylint cannot statically resolve such entries.

@@ -20,9 +20,26 @@ class Command(BaseCommand):
 
     Checks gateway installation, URL mounting, contrib app wiring, security
     settings, and performance hints. Exits non-zero if any errors are found.
+
+    Use ``--security`` for an extended OAuth security audit that surfaces
+    common misconfigurations that could allow privilege escalation or
+    information disclosure.
     """
 
     help = "Audit friese-mcp configuration and report integration issues."
+
+    def add_arguments(self, parser: Any) -> None:
+        """Add --security flag for the extended OAuth security audit."""
+        parser.add_argument(
+            "--security",
+            action="store_true",
+            default=False,
+            help=(
+                "Run extended OAuth security checks in addition to the standard audit.  "
+                "Surfaces misconfigurations that could allow privilege escalation, "
+                "credential exposure, or unauthenticated access."
+            ),
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         """Run all checks and print a summary."""
@@ -37,6 +54,15 @@ class Command(BaseCommand):
         self._check_performance_hints(warnings)
         self._check_oauth_registration(warnings)
         self._check_oauth_authorize_url(warnings)
+
+        if options.get("security"):
+            self.stdout.write("")
+            self.stdout.write(self.style.HTTP_INFO("  — Extended security audit —"))
+            self._check_oauth_service_user(warnings)
+            self._check_body_size_limit(warnings)
+            self._check_pkce_auto_register(warnings)
+            self._check_oauth_registration_vs_wellknown(warnings)
+            self._check_hmac_key_rotation(warnings)
 
         self.stdout.write("")
         if errors:
@@ -341,6 +367,104 @@ class Command(BaseCommand):
                 warnings,
                 f"FRIESE_MCP_OAUTH_AUTHORIZE_URL={url!r} returned HTTP {status} (expected 200)"
                 " — OAuth /authorize endpoint may not be mounted correctly",
+            )
+
+    # ------------------------------------------------------------------
+    # Extended security checks (--security flag)
+    # ------------------------------------------------------------------
+
+    def _check_oauth_service_user(self, warnings: list[str]) -> None:
+        """Warn when contrib.oauth is installed but FRIESE_MCP_OAUTH_SERVICE_USER is not set."""
+        oauth_installed = "friese_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
+        if not oauth_installed:
+            return
+
+        service_user: str | None = getattr(settings, "FRIESE_MCP_OAUTH_SERVICE_USER", None)
+        if service_user:
+            self._ok(
+                f"FRIESE_MCP_OAUTH_SERVICE_USER='{service_user}' — OAuth requests will be "
+                "attributed to this Django user for audit-log FKs"
+            )
+        else:
+            self._warn_msg(
+                warnings,
+                "FRIESE_MCP_OAUTH_SERVICE_USER is not set — OAuth-authenticated requests "
+                "use OAuthServicePrincipal (no real Django User).  Set this to a dedicated "
+                "service account username if host models require a User FK for audit logging.",
+            )
+
+    def _check_body_size_limit(self, warnings: list[str]) -> None:
+        """Warn when FRIESE_MCP_REQUEST_BODY_MAX_SIZE is not explicitly configured."""
+        limit: int | None = getattr(settings, "FRIESE_MCP_REQUEST_BODY_MAX_SIZE", None)
+        if limit is not None:
+            self._ok(
+                f"FRIESE_MCP_REQUEST_BODY_MAX_SIZE={limit} bytes "
+                f"({limit // 1024} KiB) — oversized MCP bodies will be rejected"
+            )
+        else:
+            self._warn_msg(
+                warnings,
+                "FRIESE_MCP_REQUEST_BODY_MAX_SIZE is not set — defaults to 1 MiB.  "
+                "Set explicitly in settings to document and tune the intended limit.",
+            )
+
+    def _check_pkce_auto_register(self, warnings: list[str]) -> None:
+        """Warn when PKCE auto-registration is enabled in a production-like environment."""
+        debug: bool = getattr(settings, "DEBUG", False)
+        pkce_auto: bool = getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False)
+        if pkce_auto and not debug:
+            self._warn_msg(
+                warnings,
+                "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER=True in a non-debug environment — "
+                "any caller can register a new OAuth client by presenting an unknown client_id "
+                "at the authorize endpoint.  Ensure this is intentional for your deployment "
+                "(e.g. open MCP platform).  Disable for closed or enterprise deployments.",
+            )
+        elif pkce_auto:
+            self._warn_msg(
+                warnings,
+                "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER=True — unauthenticated callers can "
+                "cache authorization codes for arbitrary client_ids.  Acceptable for local "
+                "development; disable before production.",
+            )
+        else:
+            self._ok("FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER=False — PKCE auto-registration disabled")
+
+    def _check_oauth_registration_vs_wellknown(self, _warnings: list[str]) -> None:
+        """Verify registration_endpoint advertisement matches actual registration state."""
+        oauth_installed = "friese_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
+        if not oauth_installed:
+            return
+
+        reg_open: bool = getattr(settings, "FRIESE_MCP_OAUTH_REGISTRATION_OPEN", False)
+        self._ok(
+            f"FRIESE_MCP_OAUTH_REGISTRATION_OPEN={'True' if reg_open else 'False'} — "
+            f"registration_endpoint {'will be' if reg_open else 'will not be'} "
+            "advertised in .well-known metadata"
+        )
+
+    def _check_hmac_key_rotation(self, warnings: list[str]) -> None:
+        """Check HMAC key independence from SECRET_KEY for safe key rotation."""
+        hmac_key: str | None = getattr(settings, "FRIESE_MCP_HMAC_KEY", None)
+        secret_key: str = getattr(settings, "SECRET_KEY", "")
+        if hmac_key and hmac_key != secret_key:
+            self._ok(
+                "FRIESE_MCP_HMAC_KEY is set and differs from SECRET_KEY — "
+                "token HMACs can be rotated independently of Django's session/CSRF key"
+            )
+        elif hmac_key:
+            self._warn_msg(
+                warnings,
+                "FRIESE_MCP_HMAC_KEY is set but equals SECRET_KEY — "
+                "rotating SECRET_KEY will still invalidate all issued tokens.  "
+                "Use a separate randomly-generated HMAC key.",
+            )
+        else:
+            self._warn_msg(
+                warnings,
+                "FRIESE_MCP_HMAC_KEY is not set — token HMACs use SECRET_KEY.  "
+                "Rotating SECRET_KEY invalidates all tokens.  "
+                "Set FRIESE_MCP_HMAC_KEY to a separate key for independent rotation.",
             )
 
     # ------------------------------------------------------------------

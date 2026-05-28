@@ -26,9 +26,9 @@ from friese_mcp.protocol import (
     METHOD_NOT_FOUND,
 )
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpEndpointView
+from friese_mcp.views import McpView
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -85,7 +85,7 @@ def _response_data(response: Any) -> dict[str, Any]:
 
 
 class TestHttpGuards:
-    """Tests for HTTP-method and feature-flag guards in McpEndpointView."""
+    """Tests for HTTP-method and feature-flag guards in McpView."""
 
     def test_delete_returns_200(self, rf: RequestFactory) -> None:
         """DELETE requests return HTTP 200 (stateless no-op for session cleanup)."""

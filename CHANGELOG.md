@@ -9,6 +9,12 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **`McpEndpointView` alias dropped.** The `McpEndpointView` name (a backward-compatible alias
+  for `McpView` introduced during the rename) has been removed before the 1.0 release. Update
+  any imports: `from friese_mcp.views import McpView`.
+
 ### Security
 
 - **AUTH-4 — Token hashing:** `FrieseMcpToken.token` and `OAuthClient.client_secret` are
@@ -24,4 +30,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Rotating `SECRET_KEY` also invalidates all tokens; this is intentional and desirable.
 
-  `OAuthAccessToken.token` remains plaintext (short-lived, 1-hour TTL).
+  `OAuthAccessToken.token` follows the same pattern — stored as HMAC-SHA256 of the raw
+  Bearer value, never plaintext.  The raw token is exposed exactly once via
+  ``plaintext_token`` on the freshly-saved instance (see ``TokenView``).  Existing access
+  tokens are also invalidated on upgrade and will need to be re-issued.

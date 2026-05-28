@@ -25,8 +25,10 @@ class FrieseMcpTokenAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             {
                 "fields": ("token",),
                 "description": (
-                    "The Bearer token secret. Shown once after creation — "
-                    "copy it before navigating away."
+                    "HMAC-SHA256 digest of the Bearer token (not the raw value).  "
+                    "The raw Bearer token is set when the token object is first created "
+                    "in code (available as <code>plaintext_token</code> on the returned "
+                    "instance) and is never persisted or shown here."
                 ),
             },
         ),

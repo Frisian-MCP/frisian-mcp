@@ -4,12 +4,12 @@ Group dispatcher: bundle multiple resource tools under a single MCP tool.
 Configured via ``settings.FRIESE_MCP_DISPATCH_GROUPS``::
 
     FRIESE_MCP_DISPATCH_GROUPS = {
-        "dcim": ["device", "rack", "interface"],
-        "ipam": ["ipaddress", "prefix", "vlan"],
+        "catalog": ["product", "category", "tag"],
+        "orders":  ["order", "line_item"],
     }
 
-Each group becomes ONE MCP tool (e.g. ``"dcim"``) that accepts
-``{"resource": "device", "action": "list", "params": {...}}``.  The dispatcher
+Each group becomes ONE MCP tool (e.g. ``"catalog"``) that accepts
+``{"resource": "product", "action": "list", "params": {...}}``.  The dispatcher
 routes to the already-registered flat tool ``device.list`` via
 :meth:`~friese_mcp.registry.ToolRegistry.dispatch`, which keeps schema
 validation and tier enforcement in one place.
@@ -131,13 +131,13 @@ def build_group_help(
 
         {
             "help": True,
-            "group": "dcim",
+            "group": "catalog",
             "resources": {
-                "device": ["list", "retrieve", ...],
-                "rack":   ["list", ...],
+                "product":  ["list", "retrieve", ...],
+                "category": ["list", ...],
             },
             "hints": {           # only present when FRIESE_MCP_TOOL_HINTS has entries
-                "device.create": "Requires an extras.role to exist first.",
+                "product.create": "Requires a category to exist first.",
             },
         }
 
@@ -145,11 +145,11 @@ def build_group_help(
 
         {
             "help": True,
-            "group": "dcim",
-            "resource": "device",
+            "group": "catalog",
+            "resource": "product",
             "actions": ["create", "list", "retrieve"],
             "hints": {
-                "device.create": "Requires an extras.role to exist first.",
+                "product.create": "Requires a category to exist first.",
             },
         }
 
@@ -159,9 +159,9 @@ def build_group_help(
     actions via ``action="help"``.
 
     Args:
-        group_name: Name of the dispatcher group (e.g. ``"dcim"``).
+        group_name: Name of the dispatcher group (e.g. ``"catalog"``).
         tool_names: Ordered list of tool names in the group
-            (e.g. ``["device.list", "device.create", "rack.list"]``).
+            (e.g. ``["product.list", "product.create", "category.list"]``).
         registry: The active tool registry used to look up permission tiers.
         max_tier: When supplied, actions whose tier rank exceeds this value
             are hidden (mirrors the ``tools/list`` filtering).
@@ -237,7 +237,7 @@ def make_group_invoke(
       with a ``difflib`` "did you mean?" suggestion against known resources.
 
     Args:
-        group_name: Dispatcher group name (e.g. ``"dcim"``).
+        group_name: Dispatcher group name (e.g. ``"catalog"``).
         tool_names: Frozenset of the flat tool names bundled in this group.
         registry: The active :class:`~friese_mcp.registry.ToolRegistry`.
         resource_prefixes: The resource prefix strings that were used to

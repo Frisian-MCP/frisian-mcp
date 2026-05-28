@@ -14,9 +14,9 @@ from friese_mcp.contrib.agents.models import AgentConnection, validate_tool_name
 from friese_mcp.contrib.oauth.models import OAuthClient
 from friese_mcp.contrib.tokens.models import FrieseMcpToken
 from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpEndpointView
+from friese_mcp.views import McpView
 
-_view = McpEndpointView.as_view()
+_view = McpView.as_view()
 
 _TOKEN_AUTH = "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication"
 _OAUTH_AUTH = "friese_mcp.contrib.oauth.authentication.OAuthTokenAuthentication"

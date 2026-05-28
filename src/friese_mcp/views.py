@@ -64,7 +64,12 @@ from friese_mcp.protocol import (
     JsonDict,
     JsonRpcId,
 )
-from friese_mcp.registry import ToolInputError, ToolInvocationError, ToolNotFoundError, tool_registry
+from friese_mcp.registry import (
+    ToolInputError,
+    ToolInvocationError,
+    ToolNotFoundError,
+    tool_registry,
+)
 from friese_mcp.resources import ResourceNotFoundError, resource_registry
 
 logger = logging.getLogger(__name__)
@@ -1141,7 +1146,9 @@ class McpView(APIView):
             return []
         return [cls() for cls in classes]
 
-    def get(self, request: DRFRequest, *args: Any, **kwargs: Any) -> StreamingHttpResponse | HttpResponse:
+    def get(  # type: ignore[override]
+        self, request: DRFRequest, *args: Any, **kwargs: Any
+    ) -> StreamingHttpResponse | HttpResponse:
         """
         Handle GET — open an SSE keepalive channel per MCP Streamable HTTP spec.
 
@@ -1200,6 +1207,22 @@ class McpView(APIView):
                 ),
                 request,
             )
+        # Enforce a request-body size limit.  Django's DATA_UPLOAD_MAX_MEMORY_SIZE
+        # only applies to multipart/form-encoded bodies; raw JSON POST bodies are
+        # unbounded by default.  FRIESE_MCP_REQUEST_BODY_MAX_SIZE (bytes, default
+        # 1 MiB) protects against oversized payloads being loaded into memory by
+        # json.loads() in _parse_and_dispatch.
+        max_body: int = getattr(settings, "FRIESE_MCP_REQUEST_BODY_MAX_SIZE", 1 * 1024 * 1024)
+        if len(request.body) > max_body:
+            return _maybe_sse(
+                _jsonrpc_error(
+                    None,
+                    INVALID_REQUEST,
+                    "Request body too large",
+                    f"Maximum allowed size is {max_body} bytes.",
+                ),
+                request,
+            )
         return _maybe_sse(_parse_and_dispatch(request), request)
 
     def delete(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse:
@@ -1218,7 +1241,3 @@ class McpView(APIView):
             },
             status=405,
         )
-
-
-#: Backward-compatible alias — prefer :class:`McpView` for new code.
-McpEndpointView = McpView

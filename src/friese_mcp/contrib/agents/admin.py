@@ -48,7 +48,7 @@ class AgentConnectionAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
                 "fields": ("allowed_tools",),
                 "description": (
                     "Enter a JSON array of exact tool names to restrict this agent, "
-                    'e.g. ["users.list", "workouts.create"].  '
+                    'e.g. ["users.list", "items.create"].  '
                     "Leave blank to allow all registered tools."
                 ),
             },

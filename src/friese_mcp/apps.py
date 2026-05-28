@@ -26,8 +26,8 @@ def _suppress_dispatcher_shadowed(
 
     A discovered tool ``{resource}.{action}`` is suppressed when *resource*
     exactly matches a dispatcher name, or when the dispatcher name is the
-    plural form of *resource* (e.g. dispatcher ``"exercises"`` suppresses
-    ``"exercise.list"``).
+    plural form of *resource* (e.g. dispatcher ``"orders"`` suppresses
+    ``"order.list"``).
 
     Args:
         tool_defs: The filtered list of auto-discovered tool definitions.
@@ -399,7 +399,7 @@ def _install_healthcheck_urls() -> int:
 
 #: Match ``api/`` as a path segment — at the start of the prefix or after a
 #: ``/``.  ``DRFSyncDiscovery`` populates ``url_path`` from the resolver-tree
-#: walk, which produces unanchored strings like ``api/dcim/^devices/$``
+#: walk, which produces unanchored strings like ``api/catalog/^products/$``
 #: (segment at start, no leading slash) or ``some/api/path/^x/$`` (segment in
 #: the middle).  A bare ``"/api/" in url_path`` substring check misses the
 #: leading-segment case and silently picks the wrong winner; the regex form
@@ -425,7 +425,7 @@ def _prefer_api_tool(
     one or both do, fall back to first-seen so the existing-installed-base
     behaviour for pure-API hosts is unchanged.
 
-    The path-segment regex (``(^|/)api/``) covers both ``api/dcim/...`` (no
+    The path-segment regex (``(^|/)api/``) covers both ``api/catalog/...`` (no
     leading slash, segment at start) and ``some/api/...`` (segment in
     middle), while still rejecting ``notapi/`` and ``myapi/`` substrings.
     """
@@ -792,43 +792,48 @@ class FrieseMcpConfig(AppConfig):
 
         load_middleware()
 
-        # Always emit the startup summary via both logger AND print() so that
-        # operators can verify the package loaded regardless of how the host
-        # app has configured the 'friese_mcp' logger.  Many host apps set
-        # the root logger to WARNING and never configure a 'friese_mcp'
-        # handler, which silently drops INFO messages.  See PKG-9.
+        # Emit the startup summary via logger.  Also print() to stdout when
+        # FRIESE_MCP_STARTUP_PRINT is True (default) so operators can verify
+        # the package loaded regardless of how the host app configured the
+        # 'friese_mcp' logger — many set the root logger to WARNING and never
+        # add a handler for it.  Set FRIESE_MCP_STARTUP_PRINT = False to
+        # suppress the stdout lines (e.g. in test runners or silent deployments).
+        # See PKG-9.
+        startup_print: bool = getattr(settings, "FRIESE_MCP_STARTUP_PRINT", True)
         mcp_path = getattr(settings, "FRIESE_MCP_PATH", "mcp").strip("/")
         if tool_defs:
             logger.info("friese_mcp: auto-discovery registered %d tools", len(tool_defs))
-            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
-                f"[friese-mcp] registered {len(tool_defs)} tools at /{mcp_path}/",
-                flush=True,
-            )
+            if startup_print:
+                print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
+                    f"[friese-mcp] registered {len(tool_defs)} tools at /{mcp_path}/",
+                    flush=True,
+                )
         else:
             logger.warning(
                 "friese_mcp: auto-discovery found 0 tools. "
                 "If your project uses @api_view FBVs, use @mcp_tool for manual registration."
             )
-            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
-                f"[friese-mcp] registered 0 tools at /{mcp_path}/ "
-                "(use @mcp_tool for manual registration if you rely on @api_view FBVs)",
-                flush=True,
-            )
+            if startup_print:
+                print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
+                    f"[friese-mcp] registered 0 tools at /{mcp_path}/ "
+                    "(use @mcp_tool for manual registration if you rely on @api_view FBVs)",
+                    flush=True,
+                )
 
         # Group dispatchers run last so they can bundle every tool registered
         # above (auto-discovered + decorator + dispatcher).  Bundled flat tools
         # are marked hidden and disappear from tools/list.
         group_count, bundled_count = _install_dispatch_groups()
-        if group_count:
-            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
+        if group_count and startup_print:
+            print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
                 f"[friese-mcp] {group_count} dispatch group(s) bundling "
                 f"{bundled_count} tools",
                 flush=True,
             )
 
         tool_hints: dict | None = getattr(settings, "FRIESE_MCP_TOOL_HINTS", None)
-        if tool_hints:
-            print(  # noqa: T201 — intentional always-on startup summary; see PKG-9
+        if tool_hints and startup_print:
+            print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
                 f"[friese-mcp] {len(tool_hints)} tool hint(s) configured "
                 "(surfaced via action='help')",
                 flush=True,

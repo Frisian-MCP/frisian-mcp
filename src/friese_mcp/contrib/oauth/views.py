@@ -86,8 +86,12 @@ def _parse_body(request: HttpRequest) -> dict[str, Any]:
             return body if isinstance(body, dict) else {}
         except (json.JSONDecodeError, ValueError):
             return {}
-    # Fall back to form-encoded (standard for OAuth token endpoint, RFC 6749)
-    return dict(request.POST)
+    # Fall back to form-encoded (standard for OAuth token endpoint, RFC 6749).
+    # QueryDict.dict() flattens multi-valued keys to their last value, matching
+    # the OAuth spec expectation that each parameter appears at most once.
+    # Using dict(request.POST) instead would expose the raw MultiValueDict
+    # internals ({key: [values]}), breaking callers that do direct str access.
+    return request.POST.dict()
 
 
 def _str_field(data: dict[str, Any], key: str) -> str:
@@ -96,6 +100,64 @@ def _str_field(data: dict[str, Any], key: str) -> str:
     if isinstance(val, list):
         return val[0] if val else ""
     return str(val) if val else ""
+
+
+def _pkce_permission_for_uri(redirect_uri: str) -> str:
+    """
+    Return the OAuth permission tier for a PKCE client by its redirect_uri.
+
+    Checks ``FRIESE_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP`` (a ``dict[str, str]``
+    mapping redirect_uri prefix → tier) and returns the first matching tier.
+    Falls back to ``FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION`` (default
+    ``"read"``) when no prefix matches.
+
+    Example::
+
+        FRIESE_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP = {
+            "https://public-client.example.com/": "read",
+            "https://internal.corp.example.com/": "read_write",
+            "com.example.admin:/": "admin",
+        }
+    """
+    tier_map: dict[str, str] = getattr(
+        settings, "FRIESE_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP", {}
+    )
+    for prefix, tier in tier_map.items():
+        if redirect_uri.startswith(prefix):
+            return tier
+    return getattr(settings, "FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read")
+
+
+_SCOPE_TO_TIER: dict[str, str] = {
+    "mcp:read": "read",
+    "mcp:read mcp:write": "read_write",
+    "mcp:read mcp:write mcp:admin": "admin",
+}
+_TIER_RANK: list[str] = ["read", "read_write", "admin"]
+
+
+def _resolve_scope_permission(requested_scope: str, client_permission: str) -> str | None:
+    """
+    Map an optional RFC 6749 scope string to a permission tier.
+
+    Returns the effective tier to use for token issuance, or ``None`` when the
+    requested scope exceeds the client's permitted tier.
+
+    * No scope requested → use the client's full tier (no change).
+    * Valid scope within client tier → downscope or match (allowed).
+    * Valid scope exceeding client tier → ``None`` (reject).
+    * Unrecognised scope string → ``None`` (reject).
+    """
+    if not requested_scope:
+        return client_permission
+    tier = _SCOPE_TO_TIER.get(requested_scope.strip())
+    if tier is None:
+        return None
+    client_rank = _TIER_RANK.index(client_permission) if client_permission in _TIER_RANK else 0
+    requested_rank = _TIER_RANK.index(tier)
+    if requested_rank > client_rank:
+        return None
+    return tier
 
 
 def _get_base_url(request: HttpRequest) -> str:
@@ -193,8 +255,41 @@ class TokenView(View):
                 status=401,
             )
 
+        # RFC 7591 §2: enforce per-client grant_types when specified.
+        allowed_grants: list[str] = list(client.grant_types or [])
+        if allowed_grants and "client_credentials" not in allowed_grants:
+            return JsonResponse(
+                {
+                    "error": "unauthorized_client",
+                    "error_description": (
+                        "This client is not authorized for the client_credentials grant."
+                    ),
+                },
+                status=400,
+            )
+
+        # RFC 6749 §4.4.2: optional scope parameter — honour downscoping.
+        # If the caller requests a scope that is within the client's permitted
+        # tier, issue a token at that (possibly lower) tier.  Requesting a
+        # scope that exceeds the client's tier is rejected.
+        requested_scope = _str_field(data, "scope")
+        effective_permission = _resolve_scope_permission(requested_scope, client.permission)
+        if effective_permission is None:
+            return JsonResponse(
+                {
+                    "error": "invalid_scope",
+                    "error_description": (
+                        f"Requested scope '{requested_scope}' exceeds this client's "
+                        f"permitted tier ('{client.permission}').  "
+                        "Valid scopes: mcp:read, mcp:read mcp:write, "
+                        "mcp:read mcp:write mcp:admin."
+                    ),
+                },
+                status=400,
+            )
+
         access_token = OAuthAccessToken.objects.create(
-            client=client, permission=client.permission
+            client=client, permission=effective_permission
         )
         expiry: int = getattr(settings, "FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS", 3600)
 
@@ -262,24 +357,36 @@ class TokenView(View):
         django_cache.delete(f"{_AUTH_CODE_CACHE_PREFIX}{code}")
 
         pkce_auto: bool = getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False)
-        default_permission: str = getattr(
-            settings, "FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read"
-        )
+        # Resolve the permission tier for this redirect_uri.  When
+        # FRIESE_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP is configured, different
+        # clients (keyed by their redirect_uri prefix) can receive different
+        # default tiers so that public-facing clients (e.g. Claude.ai) and
+        # internal privileged clients are not forced to share the same grant.
+        effective_permission: str = _pkce_permission_for_uri(redirect_uri)
         try:
             client = OAuthClient.objects.get(client_id=client_id, is_active=True)
-            # When the configured default permission has been raised (e.g. from
-            # "read" to "read_write" or "admin"), promote existing PKCE clients
-            # so reconnections pick up the new grant without requiring a DB reset.
-            if pkce_auto and client.permission != default_permission:
-                _TIER_RANK = ["read", "read_write", "admin"]
-                existing_rank = _TIER_RANK.index(client.permission) if client.permission in _TIER_RANK else 0
-                default_rank = _TIER_RANK.index(default_permission) if default_permission in _TIER_RANK else 0
-                if default_rank > existing_rank:
-                    client.permission = default_permission
+            # When the resolved permission for this redirect_uri has been raised
+            # (e.g. the tier map now grants "read_write" where "read" was issued
+            # previously), promote the existing PKCE client so reconnections pick
+            # up the new grant without requiring a DB reset.
+            if pkce_auto and client.permission != effective_permission:
+                _tier_rank = ["read", "read_write", "admin"]
+                existing_rank = (
+                    _tier_rank.index(client.permission)
+                    if client.permission in _tier_rank
+                    else 0
+                )
+                effective_rank = (
+                    _tier_rank.index(effective_permission)
+                    if effective_permission in _tier_rank
+                    else 0
+                )
+                if effective_rank > existing_rank:
+                    client.permission = effective_permission
                     client.save(update_fields=["permission"])
                     logger.info(
                         "oauth_pkce_client_permission_promoted",
-                        extra={"client_id": client_id, "new_permission": default_permission},
+                        extra={"client_id": client_id, "new_permission": effective_permission},
                     )
         except OAuthClient.DoesNotExist:
             # PKCE clients (e.g. Claude.ai, Cursor) generate their own client_id and
@@ -302,10 +409,23 @@ class TokenView(View):
             client = OAuthClient.objects.create(
                 client_id=client_id,
                 name=f"pkce-{client_id[:24]}",
-                permission=default_permission,
+                permission=effective_permission,
                 redirect_uris=[redirect_uri],
+                grant_types=["authorization_code"],
             )
             logger.info("oauth_pkce_client_auto_registered", extra={"client_id": client_id})
+        else:
+            # RFC 7591 §2: enforce per-client grant_types for pre-registered clients.
+            if client.grant_types and "authorization_code" not in client.grant_types:
+                return JsonResponse(
+                    {
+                        "error": "unauthorized_client",
+                        "error_description": (
+                            "This client is not authorized for the authorization_code grant."
+                        ),
+                    },
+                    status=400,
+                )
 
         access_token = OAuthAccessToken.objects.create(
             client=client, permission=client.permission
@@ -413,13 +533,16 @@ class RegistrationView(View):
                     status=400,
                 )
 
-        default_permission: str = getattr(
-            settings, "FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read"
-        )
+        # Resolve tier by the first registered redirect_uri so DCR clients also
+        # benefit from FRIESE_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP.  Falls back to
+        # FRIESE_MCP_OAUTH_PKCE_DEFAULT_PERMISSION when no URIs are supplied or
+        # none match the map.
+        first_uri = raw_uris[0] if raw_uris else ""
+        reg_permission: str = _pkce_permission_for_uri(first_uri)
         client = OAuthClient.objects.create(
             name=client_name.strip(),
             redirect_uris=list(raw_uris),
-            permission=default_permission,
+            permission=reg_permission,
         )
 
         logger.info(
@@ -488,12 +611,12 @@ class OAuthAuthorizationServerView(View):
             "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
         }
 
-        # Advertise registration_endpoint when DCR is enabled (default True).
-        # FRIESE_MCP_OAUTH_DCR controls advertisement independently of
-        # FRIESE_MCP_OAUTH_REGISTRATION_OPEN — DCR clients need to see the
-        # endpoint to auto-register before the authorize step.
-        dcr_enabled: bool = getattr(settings, "FRIESE_MCP_OAUTH_DCR", True)
-        if dcr_enabled or getattr(settings, "FRIESE_MCP_OAUTH_REGISTRATION_OPEN", False):
+        # Only advertise registration_endpoint when dynamic client registration
+        # is actually open (RFC 8414 §2).  Advertising the endpoint when
+        # FRIESE_MCP_OAUTH_REGISTRATION_OPEN=False is misleading — clients that
+        # discover the URL will receive a 403, violating the principle that
+        # metadata describes real server capabilities.
+        if getattr(settings, "FRIESE_MCP_OAUTH_REGISTRATION_OPEN", False):
             reg_path: str = getattr(settings, "FRIESE_MCP_OAUTH_REGISTER_PATH", "/oauth/register/")
             metadata["registration_endpoint"] = f"{base}{reg_path}"
 
@@ -746,6 +869,12 @@ class AuthorizeView(View):
         # source of truth; an empty redirect_uris list means "this client may
         # not use the authorize endpoint".  PKCE clients without a DB row are
         # accepted only when FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER is True.
+        #
+        # Enforce client_id length at the authorize step (not only at token
+        # exchange) so that unauthenticated callers cannot flood the cache
+        # with codes for arbitrarily-long synthetic client_ids.
+        if len(client_id) > 255:
+            return "invalid_request"
         try:
             client = OAuthClient.objects.get(client_id=client_id, is_active=True)
         except OAuthClient.DoesNotExist:
@@ -754,15 +883,12 @@ class AuthorizeView(View):
             return "invalid_client"
         registered: list[str] = list(client.redirect_uris or [])
         if redirect_uri not in registered:
-            # Heal clients auto-registered before the redirect_uris fix (empty list).
-            if getattr(settings, "FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER", False) and not registered:
-                client.redirect_uris = [redirect_uri]
-                client.save(update_fields=["redirect_uris"])
-                logger.info(
-                    "oauth_pkce_client_redirect_uri_healed",
-                    extra={"client_id": client_id, "redirect_uri": redirect_uri},
-                )
-                return ""
+            # Do NOT silently add the caller-supplied URI to the client's
+            # registered list ("redirect_uri healing").  An empty redirect_uris
+            # list means the client was created before redirect_uri support was
+            # added; it must be updated via Django admin or re-registered.
+            # Auto-healing lets any caller inject an arbitrary redirect target
+            # into an existing client's allowlist.
             return "invalid_redirect_uri"
         return ""
 

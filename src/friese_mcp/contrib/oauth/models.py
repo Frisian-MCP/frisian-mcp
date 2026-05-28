@@ -59,9 +59,13 @@ class OAuthClient(models.Model):
     """
     Registered OAuth 2.0 client (AI agent or programmatic MCP consumer).
 
-    ``client_id`` and ``client_secret`` are auto-generated on first save using
-    :func:`secrets.token_hex`.  Both are stored in plaintext and must be treated
-    as secrets by the host application.
+    ``client_id`` is auto-generated on first save using :func:`secrets.token_hex`
+    and stored as a plain string (it is the public identifier).  ``client_secret``
+    is auto-generated, stored as an **HMAC-SHA256 digest** keyed by
+    ``FRIESE_MCP_HMAC_KEY`` (or ``SECRET_KEY``), and must be treated as a secret
+    by the host application.  The raw secret value is exposed exactly once via
+    ``plaintext_client_secret`` on the freshly-saved instance and is never
+    persisted.
 
     Clients are created via Django admin or, when
     ``FRIESE_MCP_OAUTH_REGISTRATION_OPEN`` is ``True``, via the
@@ -72,7 +76,9 @@ class OAuthClient(models.Model):
         max_length=255,
         unique=True,
         editable=False,
-        help_text="OAuth client identifier — auto-generated (32 hex chars) or supplied by the client.",
+        help_text=(
+            "OAuth client identifier — auto-generated (32 hex chars) or supplied by the client."
+        ),
     )
     client_secret = models.CharField(
         max_length=64,
@@ -108,6 +114,18 @@ class OAuthClient(models.Model):
             "Django admin, RFC 7591 dynamic registration, or set "
             "``FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER=True`` to permit on-demand "
             "PKCE clients (HTTPS / loopback validation still applies)."
+        ),
+    )
+    grant_types = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Allowed OAuth 2.0 grant types for this client (RFC 7591 §2).  "
+            "An empty list means no restriction — all supported grant types "
+            "(``client_credentials``, ``authorization_code``) are permitted.  "
+            "Set to ``[\\\"client_credentials\\\"]`` for service-to-service clients "
+            "that should never use the PKCE flow, or ``[\\\"authorization_code\\\"]`` "
+            "for browser/native clients that should not use client_credentials."
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
