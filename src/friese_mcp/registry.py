@@ -92,6 +92,14 @@ def _resolve_tier_from_role_map(request: Any) -> str | None:
     return None
 
 
+def _apply_max_tier_cap(tier: str, request: Any) -> str:
+    """Clamp *tier* to ``request._mcp_max_tier`` when the cap is stricter."""
+    cap: str | None = getattr(request, "_mcp_max_tier", None)
+    if cap is not None and _TIER_RANK.get(tier, 0) > _TIER_RANK.get(cap, 0):
+        return cap
+    return tier
+
+
 def _resolve_request_tier(request: Any) -> str:
     """
     Return the effective MCP permission tier for *request*.
@@ -113,6 +121,12 @@ def _resolve_request_tier(request: Any) -> str:
        authenticated request with an unknown auth backend never silently
        receives a higher tier).
 
+    After resolution, the tier is clamped to ``request._mcp_max_tier`` when
+    that attribute is set (stamped by :meth:`~friese_mcp.views.McpView.post`
+    from :meth:`~friese_mcp.views.McpView._effective_max_tier`).  This applies
+    the ``FRIESE_MCP_MAX_TIER`` endpoint-level cap regardless of which
+    resolution path was taken — including hook, token permission, and role map.
+
     Defined at module level so :class:`ToolRegistry` can enforce tier at
     dispatch time without importing :mod:`friese_mcp.views` (avoiding a
     circular import).
@@ -125,27 +139,23 @@ def _resolve_request_tier(request: Any) -> str:
             logger.exception("FRIESE_MCP_RESOLVE_TIER hook raised; falling through")
             tier = None
         if tier is not None:
-            return str(tier)
+            return _apply_max_tier_cap(str(tier), request)
 
     auth_obj = getattr(request, "auth", None)
     if auth_obj is not None:
         explicit = getattr(auth_obj, "permission", None)
         if explicit is not None:
-            return str(explicit)
+            return _apply_max_tier_cap(str(explicit), request)
 
     role_tier = _resolve_tier_from_role_map(request)
     if role_tier is not None:
-        return role_tier
+        return _apply_max_tier_cap(role_tier, request)
 
     if auth_obj is None:
         tier = str(getattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER", "read"))
     else:
         tier = "read"
-
-    max_tier: str | None = getattr(request, "_mcp_max_tier", None)
-    if max_tier is not None and _TIER_RANK.get(tier, 0) > _TIER_RANK.get(max_tier, 0):
-        return max_tier
-    return tier
+    return _apply_max_tier_cap(tier, request)
 
 
 def _camel_to_snake(name: str) -> str:
