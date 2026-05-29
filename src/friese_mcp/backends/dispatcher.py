@@ -1,4 +1,5 @@
 """Runtime support for @mcp_dispatcher class-based tool dispatchers."""
+# pylint: disable=cyclic-import
 
 from __future__ import annotations
 

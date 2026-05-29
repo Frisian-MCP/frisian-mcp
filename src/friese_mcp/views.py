@@ -29,6 +29,7 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
   backwards compatibility.  Tool-level ``permission_classes`` are enforced
   separately by :data:`~friese_mcp.registry.tool_registry`.
 """
+# pylint: disable=too-many-lines
 
 import asyncio
 import base64
@@ -566,7 +567,7 @@ def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(str(offset).encode()).decode()
 
 
-def _handle_tools_list(
+def _handle_tools_list(  # pylint: disable=too-many-locals
     request_id: JsonRpcId, request: Any, params: JsonDict
 ) -> JsonResponse:
     """
@@ -633,7 +634,7 @@ def _handle_tools_list(
     return _jsonrpc_success(request_id, result)
 
 
-def _handle_tools_call(
+def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
     request: HttpRequest,
     request_id: JsonRpcId,
     params: JsonDict,
@@ -1209,11 +1210,13 @@ class McpView(APIView):
         resp["X-Accel-Buffering"] = "no"
         return resp
 
-    def post(self, request: DRFRequest, *args: Any, **kwargs: Any) -> JsonResponse | HttpResponse | StreamingHttpResponse:
+    def post(
+        self, request: DRFRequest, *args: Any, **kwargs: Any
+    ) -> JsonResponse | HttpResponse | StreamingHttpResponse:
         """Handle POST — dispatch JSON-RPC 2.0 requests."""
         # Stamp the endpoint-level tier cap so _get_token_permission can apply
         # it throughout the request without re-reading settings on each call.
-        request._mcp_max_tier = self._effective_max_tier()  # type: ignore[attr-defined]
+        request._mcp_max_tier = self._effective_max_tier()  # type: ignore[attr-defined]  # pylint: disable=protected-access
         if not getattr(settings, "FRIESE_MCP_ENABLED", True):
             return _maybe_sse(
                 JsonResponse(

@@ -34,7 +34,7 @@ except ImportError:
     _DjangoFilterBackend = None
 
 try:
-    from rest_framework.renderers import JSONRenderer as _JSONRenderer
+    from rest_framework.renderers import JSONRenderer as _JSONRenderer  # noqa: I001  # pylint: disable=ungrouped-imports
 except ImportError:  # pragma: no cover
     _JSONRenderer = None  # type: ignore[assignment,misc]
 
@@ -343,7 +343,8 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                 )
                 if not has_json:
                     logger.debug(
-                        "friese_mcp: skipping %s — no JSONRenderer in renderer_classes (UI ViewSet)",
+                        "friese_mcp: skipping %s — no JSONRenderer in "
+                        "renderer_classes (UI ViewSet)",
                         cls.__name__,
                     )
                     return

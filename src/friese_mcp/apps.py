@@ -512,7 +512,7 @@ def _find_group_members(
     return members
 
 
-def _install_dispatch_groups() -> tuple[int, int]:
+def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-locals
     """
     Build group dispatcher tools from ``settings.FRIESE_MCP_DISPATCH_GROUPS``.
 
@@ -576,7 +576,10 @@ def _install_dispatch_groups() -> tuple[int, int]:
             hint = (
                 "Did you mean:\n" + "\n".join(suggestions)
                 if suggestions
-                else f"No similar names found. Sample registered resources: {registered_resources[:8]}"
+                else (
+                    "No similar names found. "
+                    f"Sample registered resources: {registered_resources[:8]}"
+                )
             )
             logger.warning(
                 "FRIESE_MCP_DISPATCH_GROUPS: group %r has no matching resources "
@@ -801,7 +804,7 @@ class FrieseMcpConfig(AppConfig):
             dispatch_uid=_DEFERRED_DISCOVERY_UID,
         )
 
-    def _run_deferred_discovery(self) -> None:
+    def _run_deferred_discovery(self) -> None:  # pylint: disable=too-many-locals
         """
         Run URL-tree scan + tool registration + dispatch-group install.
 

@@ -195,6 +195,7 @@ class ToolInvocationError(Exception):
     """
 
     def __init__(self, content: Any) -> None:
+        """Store the raw tool error content."""
         self.content: Any = content
         super().__init__(str(content))
 

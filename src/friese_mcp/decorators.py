@@ -245,7 +245,7 @@ _NEGOTIATION_PROPERTIES: dict[str, Any] = {
     },
     "page_size": {
         "type": "integer",
-        "description": "Items per page for 'paginated' mode. Defaults to FRIESE_MCP_HEAVY_PAGE_SIZE.",  # noqa: E501
+        "description": "Items per page for 'paginated' mode. Defaults to FRIESE_MCP_HEAVY_PAGE_SIZE.",  # noqa: E501  # pylint: disable=line-too-long
     },
     "filter_keys": {
         "type": "array",
