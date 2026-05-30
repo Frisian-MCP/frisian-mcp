@@ -801,7 +801,7 @@ class TestEndpointMaxTierCap:
             pass
 
         r = _R()
-        r._mcp_max_tier = cap  # type: ignore[attr-defined]
+        r._mcp_max_tier = cap  # type: ignore[attr-defined]  # pylint: disable=protected-access
         return r
 
     def test_no_cap_returns_tier_unchanged(self) -> None:
@@ -851,7 +851,7 @@ class TestEndpointMaxTierCap:
         r = _R()
         r.auth = auth  # type: ignore[attr-defined]
         if max_tier is not None:
-            r._mcp_max_tier = max_tier  # type: ignore[attr-defined]
+            r._mcp_max_tier = max_tier  # type: ignore[attr-defined]  # pylint: disable=protected-access,attribute-defined-outside-init
         return r
 
     def test_read_write_token_capped_to_read(self) -> None:
@@ -860,17 +860,17 @@ class TestEndpointMaxTierCap:
         assert _get_token_permission(req) == "read"
 
     def test_admin_token_capped_to_read_write(self) -> None:
-        """admin token with _mcp_max_tier='read_write' resolves to 'read_write'."""
+        """Admin token with _mcp_max_tier='read_write' resolves to 'read_write'."""
         req = self._token_req("admin", max_tier="read_write")
         assert _get_token_permission(req) == "read_write"
 
     def test_admin_token_capped_to_read(self) -> None:
-        """admin token with _mcp_max_tier='read' resolves to 'read'."""
+        """Admin token with _mcp_max_tier='read' resolves to 'read'."""
         req = self._token_req("admin", max_tier="read")
         assert _get_token_permission(req) == "read"
 
     def test_cap_does_not_elevate_read_token(self) -> None:
-        """admin cap does not elevate a read token."""
+        """An admin cap does not elevate a read token."""
         req = self._token_req("read", max_tier="admin")
         assert _get_token_permission(req) == "read"
 
