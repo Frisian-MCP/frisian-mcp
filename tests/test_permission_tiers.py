@@ -10,7 +10,7 @@ import pytest
 from django.test import RequestFactory, override_settings
 
 from friese_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
-from friese_mcp.registry import ToolRegistry
+from friese_mcp.registry import ToolRegistry, _apply_max_tier_cap
 from friese_mcp.views import McpView, _get_token_permission
 
 _rf = RequestFactory()
@@ -775,3 +775,242 @@ class TestDispatcherHelpResponseTierFiltering:
         # The description must not name any specific action — must stay generic.
         assert "destroy" not in action_desc
         assert "ping" not in action_desc
+
+
+# ---------------------------------------------------------------------------
+# FRIESE_MCP_MAX_TIER endpoint-level cap
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointMaxTierCap:
+    r"""
+    FRIESE_MCP_MAX_TIER caps the effective permission tier at an endpoint.
+
+    The cap is stamped on ``request._mcp_max_tier`` by :meth:`McpView.post`
+    and applied inside ``_resolve_request_tier`` via ``_apply_max_tier_cap``.
+    A subclass can override ``_effective_max_tier`` to disable or change the
+    cap per-endpoint (the auto-registered protected endpoint does this).
+    """
+
+    # ------------------------------------------------------------------
+    # _apply_max_tier_cap — unit tests for the clamping primitive
+    # ------------------------------------------------------------------
+
+    def _req_with_cap(self, cap: str | None) -> Any:
+        class _R:
+            pass
+
+        r = _R()
+        r._mcp_max_tier = cap  # type: ignore[attr-defined]
+        return r
+
+    def test_no_cap_returns_tier_unchanged(self) -> None:
+        """_apply_max_tier_cap with cap=None is a no-op for any tier."""
+        req = self._req_with_cap(None)
+        assert _apply_max_tier_cap("admin", req) == "admin"
+        assert _apply_max_tier_cap("read_write", req) == "read_write"
+        assert _apply_max_tier_cap("read", req) == "read"
+
+    def test_cap_clamps_higher_tier_down(self) -> None:
+        """When the token tier exceeds the cap, the cap is returned."""
+        req = self._req_with_cap("read")
+        assert _apply_max_tier_cap("read_write", req) == "read"
+        assert _apply_max_tier_cap("admin", req) == "read"
+
+    def test_cap_does_not_elevate_lower_tier(self) -> None:
+        """When cap > token tier, the token tier is returned unchanged."""
+        req = self._req_with_cap("admin")
+        assert _apply_max_tier_cap("read", req) == "read"
+        assert _apply_max_tier_cap("read_write", req) == "read_write"
+
+    def test_cap_equal_to_tier_is_no_op(self) -> None:
+        """When cap == token tier, the tier is returned unchanged."""
+        req = self._req_with_cap("read_write")
+        assert _apply_max_tier_cap("read_write", req) == "read_write"
+
+    def test_read_write_cap_clamps_admin_but_not_read_write(self) -> None:
+        """read_write cap clamps admin but leaves read and read_write alone."""
+        req = self._req_with_cap("read_write")
+        assert _apply_max_tier_cap("admin", req) == "read_write"
+        assert _apply_max_tier_cap("read_write", req) == "read_write"
+        assert _apply_max_tier_cap("read", req) == "read"
+
+    # ------------------------------------------------------------------
+    # _get_token_permission — cap applied through full resolution chain
+    # ------------------------------------------------------------------
+
+    def _token_req(self, permission: str, max_tier: str | None = None) -> Any:
+        class _Auth:
+            pass
+
+        class _R:
+            pass
+
+        auth = _Auth()
+        auth.permission = permission  # type: ignore[attr-defined]
+        r = _R()
+        r.auth = auth  # type: ignore[attr-defined]
+        if max_tier is not None:
+            r._mcp_max_tier = max_tier  # type: ignore[attr-defined]
+        return r
+
+    def test_read_write_token_capped_to_read(self) -> None:
+        """read_write token with _mcp_max_tier='read' resolves to 'read'."""
+        req = self._token_req("read_write", max_tier="read")
+        assert _get_token_permission(req) == "read"
+
+    def test_admin_token_capped_to_read_write(self) -> None:
+        """admin token with _mcp_max_tier='read_write' resolves to 'read_write'."""
+        req = self._token_req("admin", max_tier="read_write")
+        assert _get_token_permission(req) == "read_write"
+
+    def test_admin_token_capped_to_read(self) -> None:
+        """admin token with _mcp_max_tier='read' resolves to 'read'."""
+        req = self._token_req("admin", max_tier="read")
+        assert _get_token_permission(req) == "read"
+
+    def test_cap_does_not_elevate_read_token(self) -> None:
+        """admin cap does not elevate a read token."""
+        req = self._token_req("read", max_tier="admin")
+        assert _get_token_permission(req) == "read"
+
+    def test_no_max_tier_attribute_returns_full_token_tier(self) -> None:
+        """Absent _mcp_max_tier attribute leaves token tier intact."""
+        req = self._token_req("read_write")
+        assert _get_token_permission(req) == "read_write"
+
+    # ------------------------------------------------------------------
+    # Via view — FRIESE_MCP_MAX_TIER setting caps tools/list response
+    # ------------------------------------------------------------------
+
+    @override_settings(
+        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
+        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRIESE_MCP_UNAUTHENTICATED_TIER="read_write",
+        FRIESE_MCP_MAX_TIER="read",
+    )
+    def test_setting_caps_read_write_caller_to_read_tools_only(self) -> None:
+        """FRIESE_MCP_MAX_TIER='read' shows only read tools even for a read_write caller."""
+        reg = _isolated_registry(
+            ("read.tool", "read"),
+            ("write.tool", "read_write"),
+            ("admin.tool", "admin"),
+        )
+        view = McpView.as_view()
+        with patch("friese_mcp.views.tool_registry", reg):
+            resp = view(_tools_list_request())
+        names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
+        assert "read.tool" in names
+        assert "write.tool" not in names
+        assert "admin.tool" not in names
+
+    @override_settings(
+        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
+        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRIESE_MCP_UNAUTHENTICATED_TIER="read_write",
+    )
+    def test_omitting_max_tier_setting_exposes_full_tier_tools(self) -> None:
+        """Without FRIESE_MCP_MAX_TIER, a read_write caller sees all read+write tools."""
+        reg = _isolated_registry(
+            ("read.tool", "read"),
+            ("write.tool", "read_write"),
+            ("admin.tool", "admin"),
+        )
+        view = McpView.as_view()
+        with patch("friese_mcp.views.tool_registry", reg):
+            resp = view(_tools_list_request())
+        names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
+        assert "read.tool" in names
+        assert "write.tool" in names
+        assert "admin.tool" not in names
+
+    @override_settings(
+        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
+        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRIESE_MCP_UNAUTHENTICATED_TIER="admin",
+        FRIESE_MCP_MAX_TIER="read_write",
+    )
+    def test_read_write_cap_on_admin_caller_shows_read_and_write_tools(self) -> None:
+        """FRIESE_MCP_MAX_TIER='read_write' clamps admin caller to read+write tools."""
+        reg = _isolated_registry(
+            ("read.tool", "read"),
+            ("write.tool", "read_write"),
+            ("admin.tool", "admin"),
+        )
+        view = McpView.as_view()
+        with patch("friese_mcp.views.tool_registry", reg):
+            resp = view(_tools_list_request())
+        names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
+        assert "read.tool" in names
+        assert "write.tool" in names
+        assert "admin.tool" not in names
+
+    @override_settings(
+        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
+        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRIESE_MCP_UNAUTHENTICATED_TIER="admin",
+        FRIESE_MCP_MAX_TIER="read",
+    )
+    def test_read_cap_on_unauthenticated_admin_tier_shows_read_only(self) -> None:
+        """FRIESE_MCP_MAX_TIER='read' caps even an unauthenticated admin-tier request."""
+        reg = _isolated_registry(
+            ("read.tool", "read"),
+            ("write.tool", "read_write"),
+            ("admin.tool", "admin"),
+        )
+        view = McpView.as_view()
+        with patch("friese_mcp.views.tool_registry", reg):
+            resp = view(_tools_list_request())
+        names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
+        assert names == {"read.tool"}
+
+    # ------------------------------------------------------------------
+    # _effective_max_tier subclass override — disables global cap
+    # ------------------------------------------------------------------
+
+    @override_settings(
+        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
+        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRIESE_MCP_UNAUTHENTICATED_TIER="read_write",
+        FRIESE_MCP_MAX_TIER="read",
+    )
+    def test_subclass_override_none_disables_global_cap(self) -> None:
+        """Subclass returning None from _effective_max_tier ignores FRIESE_MCP_MAX_TIER."""
+
+        class _NoCap(McpView):
+            def _effective_max_tier(self) -> str | None:
+                return None
+
+        reg = _isolated_registry(
+            ("read.tool", "read"),
+            ("write.tool", "read_write"),
+        )
+        view = _NoCap.as_view()
+        with patch("friese_mcp.views.tool_registry", reg):
+            resp = view(_tools_list_request())
+        names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
+        assert "read.tool" in names
+        assert "write.tool" in names  # cap was bypassed — full tier honored
+
+    @override_settings(
+        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
+        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRIESE_MCP_UNAUTHENTICATED_TIER="admin",
+    )
+    def test_subclass_override_read_cap_independent_of_setting(self) -> None:
+        """Subclass returning 'read' caps callers even when FRIESE_MCP_MAX_TIER is absent."""
+
+        class _ReadCap(McpView):
+            def _effective_max_tier(self) -> str | None:
+                return "read"
+
+        reg = _isolated_registry(
+            ("read.tool", "read"),
+            ("write.tool", "read_write"),
+            ("admin.tool", "admin"),
+        )
+        view = _ReadCap.as_view()
+        with patch("friese_mcp.views.tool_registry", reg):
+            resp = view(_tools_list_request())
+        names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
+        assert names == {"read.tool"}
