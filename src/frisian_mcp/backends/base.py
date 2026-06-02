@@ -69,6 +69,7 @@ class ToolDefinition:  # pylint: disable=too-many-instance-attributes
     is_dispatcher: bool = False
     permission_tier: str = "read"
     url_path: str = ""
+    is_write: bool = False
 
 
 @dataclasses.dataclass

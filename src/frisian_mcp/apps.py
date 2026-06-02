@@ -856,6 +856,7 @@ class FrisianMcpConfig(AppConfig):
                 input_schema=tool_def.input_schema,
                 permission_classes=list(tool_def.permission_classes),
                 permission_tier=tool_def.permission_tier,
+                is_write=tool_def.is_write,
             )
 
         load_middleware()

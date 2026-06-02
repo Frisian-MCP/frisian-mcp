@@ -778,10 +778,21 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
 
         AgentConnection.objects.filter(pk=conn.pk).update(last_seen_at=timezone.now())
 
+    # Write-path filtering: strip the `verify` negotiation flag before dispatching
+    # to the invocation backend.  The ViewSet serializer must never see it — it
+    # is a frisian-mcp protocol param, not a model field.
+    _write_entry = tool_registry.get_entry(tool_name)
+    _verify = False
+    _dispatch_arguments = arguments
+    if _write_entry is not None and _write_entry.is_write:
+        _verify = bool(arguments.get("verify", False))
+        if "verify" in arguments:
+            _dispatch_arguments = {k: v for k, v in arguments.items() if k != "verify"}
+
     try:
         result = build_middleware_chain(
             _tool_registry_dispatch, get_middleware_instances()
-        )(request, tool_name, arguments)
+        )(request, tool_name, _dispatch_arguments)
     except ToolNotFoundError as exc:
         # JSON-RPC 2.0: -32601 METHOD_NOT_FOUND is the correct code for an unknown
         # tool name.  -32602 INVALID_PARAMS is reserved for structural argument
@@ -892,6 +903,38 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 ],
                 "isError": True,
             },
+        )
+
+    # Write-path lean default: cache the full result and return a compact
+    # confirmation envelope unless the caller passed verify=True.  @mcp_heavy
+    # takes precedence when a tool is decorated with both.
+    if _write_entry is not None and _write_entry.is_write and not (
+        _write_entry is not None and _write_entry.is_heavy
+    ):
+        if _verify:
+            return _jsonrpc_success(
+                request_id,
+                {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False},
+            )
+        from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
+            _extract_lean_envelope,
+        )
+        _w_token = secrets.token_urlsafe(16)
+        _lean = _extract_lean_envelope(result, _w_token)
+        if "continuation_token" in _lean:
+            django_cache.set(
+                f"{_HEAVY_CACHE_PREFIX}{_w_token}",
+                _build_heavy_cache_entry(result, request, tool_name),
+                _HEAVY_CACHE_TTL,
+            )
+        elif _lean.get("deleted") is True:
+            # Delete: enrich with the pk from original arguments.
+            pk_val = arguments.get("pk") or arguments.get("id")
+            if pk_val is not None:
+                _lean["id"] = pk_val
+        return _jsonrpc_success(
+            request_id,
+            {"content": [{"type": "text", "text": json.dumps(_lean)}], "isError": False},
         )
 
     # @mcp_heavy tools: cache the result and return a probe envelope so the agent

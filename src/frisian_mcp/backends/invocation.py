@@ -263,6 +263,48 @@ def _action_http_method(view_class: type, action_name: str) -> str:
     return "post"
 
 
+def _extract_lean_envelope(result: Any, token: str) -> dict[str, Any]:
+    """Build the lean write-confirmation envelope from a fully-serialised result.
+
+    Single writes: id + url? + name/display? + data_size + continuation_token.
+    Bulk writes (list at top level): accepted count + data_size + continuation_token.
+    Delete (result is {"deleted": True, "status": 204}): confirmation only; no token.
+
+    The caller is responsible for caching the full result under *token* when a
+    continuation_token is present in the returned envelope.
+    """
+    if isinstance(result, dict) and result.get("deleted") is True:
+        return {"deleted": True, "status_code": result.get("status", 204)}
+
+    serialized = json.dumps(result)
+    data_size = len(serialized.encode())
+
+    if isinstance(result, list):
+        return {
+            "accepted": len(result),
+            "failed": 0,
+            "data_size": data_size,
+            "continuation_token": token,
+        }
+
+    envelope: dict[str, Any] = {}
+    if isinstance(result, dict):
+        for key in ("id", "pk"):
+            if key in result:
+                envelope["id"] = result[key]
+                break
+        if "url" in result:
+            envelope["url"] = result["url"]
+        for key in ("name", "display"):
+            if key in result:
+                envelope[key] = result[key]
+                break
+
+    envelope["data_size"] = data_size
+    envelope["continuation_token"] = token
+    return envelope
+
+
 class SyncInvocation(BaseInvocationBackend):
     """
     Default synchronous invocation backend.

@@ -209,6 +209,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         "input_schema",
         "is_dispatcher",
         "is_heavy",
+        "is_write",
         "name",
         "permission_classes",
         "permission_tier",
@@ -223,6 +224,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         permission_classes: list[type[BasePermission]],
         is_dispatcher: bool = False,
         is_heavy: bool = False,
+        is_write: bool = False,
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
         hidden: bool = False,
@@ -234,6 +236,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         self.permission_classes = permission_classes
         self.is_dispatcher = is_dispatcher
         self.is_heavy = is_heavy
+        self.is_write = is_write
         self.permission_tier = permission_tier
         # ``dispatcher_meta`` is a ``backends.dispatcher.DispatcherMeta`` for
         # tools registered via ``@mcp_dispatcher``; ``None`` for plain
@@ -270,6 +273,7 @@ class ToolRegistry:
         permission_classes: list[type[BasePermission]] | None = None,
         is_dispatcher: bool = False,
         is_heavy: bool = False,
+        is_write: bool = False,
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
         hidden: bool = False,
@@ -315,6 +319,7 @@ class ToolRegistry:
                 permission_classes=list(permission_classes or []),
                 is_dispatcher=is_dispatcher,
                 is_heavy=is_heavy,
+                is_write=is_write,
                 permission_tier=permission_tier,
                 dispatcher_meta=dispatcher_meta,
                 hidden=hidden,
