@@ -19,9 +19,9 @@ import pytest
 from django.apps import apps
 from django.test import override_settings
 
-from friese_mcp.apps import FrieseMcpConfig, _prefer_api_tool
-from friese_mcp.backends.base import ToolDefinition
-from friese_mcp.registry import ToolRegistry
+from frisian_mcp.apps import FrisianMcpConfig, _prefer_api_tool
+from frisian_mcp.backends.base import ToolDefinition
+from frisian_mcp.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -133,17 +133,17 @@ class TestPreferApiTool:
 
 @pytest.fixture()
 def fresh_app_config() -> Any:
-    """Yield FrieseMcpConfig with discovery flags reset for the test."""
+    """Yield FrisianMcpConfig with discovery flags reset for the test."""
     from django.core.signals import (  # pylint: disable=import-outside-toplevel
         request_started,
     )
 
-    from friese_mcp.apps import (  # pylint: disable=import-outside-toplevel
+    from frisian_mcp.apps import (  # pylint: disable=import-outside-toplevel
         _DEFERRED_DISCOVERY_UID,
     )
 
-    config = apps.get_app_config("friese_mcp")
-    assert isinstance(config, FrieseMcpConfig)
+    config = apps.get_app_config("frisian_mcp")
+    assert isinstance(config, FrisianMcpConfig)
     saved_ready = config._mcp_ready
     saved_discovered = config._mcp_discovered
     config._mcp_ready = False
@@ -161,7 +161,7 @@ def fresh_app_config() -> Any:
 def isolated_registry() -> Any:
     """Patch the module-level tool_registry."""
     fresh = ToolRegistry()
-    with patch("friese_mcp.registry.tool_registry", fresh):
+    with patch("frisian_mcp.registry.tool_registry", fresh):
         yield fresh
 
 
@@ -189,9 +189,9 @@ class _StubInvocation:
 class TestDiscoveryMergeApiPreference:
     """Full ready() → discovery → merge path with colliding UI + API tools."""
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=True)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=True)
     def test_ui_walked_first_api_still_wins(
-        self, fresh_app_config: FrieseMcpConfig, isolated_registry: ToolRegistry
+        self, fresh_app_config: FrisianMcpConfig, isolated_registry: ToolRegistry
     ) -> None:
         """
         When UI tool comes from discovery before API, API still wins.
@@ -221,9 +221,9 @@ class TestDiscoveryMergeApiPreference:
         backend = _StubBackend([ui_tool, api_tool])
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends", return_value=[backend]
+            "frisian_mcp.backends.get_discovery_backends", return_value=[backend]
         ), patch(
-            "friese_mcp.backends.get_invocation_backend", return_value=_StubInvocation()
+            "frisian_mcp.backends.get_invocation_backend", return_value=_StubInvocation()
         ):
             fresh_app_config.ready()
             fresh_app_config._run_deferred_discovery()
@@ -237,9 +237,9 @@ class TestDiscoveryMergeApiPreference:
         winner = _prefer_api_tool(ui_tool, api_tool)
         assert winner is api_tool
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=True)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=True)
     def test_api_walked_first_ui_does_not_clobber(
-        self, fresh_app_config: FrieseMcpConfig, isolated_registry: ToolRegistry
+        self, fresh_app_config: FrisianMcpConfig, isolated_registry: ToolRegistry
     ) -> None:
         """
         When API tool is registered first, a later UI tool with the same name does NOT replace it.
@@ -270,9 +270,9 @@ class TestDiscoveryMergeApiPreference:
         backend = _StubBackend([api_tool, ui_tool])
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends", return_value=[backend]
+            "frisian_mcp.backends.get_discovery_backends", return_value=[backend]
         ), patch(
-            "friese_mcp.backends.get_invocation_backend", return_value=_StubInvocation()
+            "frisian_mcp.backends.get_invocation_backend", return_value=_StubInvocation()
         ):
             fresh_app_config.ready()
             fresh_app_config._run_deferred_discovery()
@@ -294,7 +294,7 @@ class TestUrlPathPopulated:
     @pytest.mark.usefixtures("use_test_urls")
     def test_discovered_tools_have_non_empty_url_path(self) -> None:
         """Every auto-discovered tool carries the URL prefix it was matched at."""
-        from friese_mcp.backends.discovery import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.backends.discovery import (  # pylint: disable=import-outside-toplevel
             DRFSyncDiscovery,
         )
 
@@ -316,7 +316,7 @@ class TestUrlPathPopulated:
         a clean path so downstream prefix / equality / display logic does
         not have to special-case the regex syntax.
         """
-        from friese_mcp.backends.discovery import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.backends.discovery import (  # pylint: disable=import-outside-toplevel
             DRFSyncDiscovery,
         )
 

@@ -1,4 +1,4 @@
-"""Tests for friese_mcp.contrib.oauth — OAuth 2.0 client_credentials flow."""
+"""Tests for frisian_mcp.contrib.oauth — OAuth 2.0 client_credentials flow."""
 
 from __future__ import annotations
 
@@ -12,17 +12,17 @@ from django.test import RequestFactory
 from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 
-from friese_mcp.contrib.oauth.authentication import OAuthServicePrincipal, OAuthTokenAuthentication
-from friese_mcp.contrib.oauth.models import OAuthAccessToken, OAuthClient
-from friese_mcp.contrib.oauth.views import (
+from frisian_mcp.contrib.oauth.authentication import OAuthServicePrincipal, OAuthTokenAuthentication
+from frisian_mcp.contrib.oauth.models import OAuthAccessToken, OAuthClient
+from frisian_mcp.contrib.oauth.views import (
     OAuthAuthorizationServerView,
     OAuthProtectedResourceView,
     RegistrationView,
     TokenView,
     _get_base_url,
 )
-from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpView
+from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.views import McpView
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -173,7 +173,7 @@ class TestOAuthAccessTokenModel:
 
     def test_stored_token_is_hmac_not_plaintext(self) -> None:
         """SEC-1: token column holds the HMAC digest, not the raw value."""
-        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
             _hmac_secret,
         )
 
@@ -198,7 +198,7 @@ class TestOAuthAccessTokenModel:
             refetched, "plaintext_token", None
         ) is None
         # The stored token still matches the original raw value via HMAC.
-        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
             _hmac_secret,
         )
 
@@ -398,7 +398,7 @@ class TestTokenView:
 
     def test_access_token_persisted_in_db(self, rf: RequestFactory) -> None:
         """Token returned from the endpoint is saved to the database (as HMAC digest)."""
-        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
             _hmac_secret,
         )
 
@@ -523,8 +523,8 @@ class TestTokenView:
     def test_custom_expiry_seconds_reflected_in_response(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS is reflected in the expires_in field."""
-        settings.FRIESE_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 7200
+        """FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS is reflected in the expires_in field."""
+        settings.FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 7200
         client = OAuthClient.objects.create(name="agent")
         request = _post_token(
             rf,
@@ -556,7 +556,7 @@ class TestRegistrationView:
     """Tests for the POST /oauth/register/ endpoint."""
 
     def test_disabled_by_default_returns_403(self, rf: RequestFactory) -> None:
-        """Registration endpoint returns 403 when FRIESE_MCP_OAUTH_REGISTRATION_OPEN is False."""
+        """Registration endpoint returns 403 when FRISIAN_MCP_OAUTH_REGISTRATION_OPEN is False."""
         request = _post_register(rf, {"client_name": "new-agent"})
         response = _register_view(request)
         assert response.status_code == 403
@@ -565,7 +565,7 @@ class TestRegistrationView:
 
     def test_valid_registration_creates_client(self, rf: RequestFactory, settings: Any) -> None:
         """Valid registration creates an OAuthClient and returns credentials."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         request = _post_register(rf, {"client_name": "new-agent"})
         response = _register_view(request)
         assert response.status_code == 201
@@ -577,7 +577,7 @@ class TestRegistrationView:
 
     def test_registration_scope_string_in_response(self, rf: RequestFactory, settings: Any) -> None:
         """DCR clients without redirect_uris get the PKCE default permission tier (read)."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         request = _post_register(rf, {"client_name": "new-client"})
         response = _register_view(request)
         assert response.status_code == 201
@@ -586,7 +586,7 @@ class TestRegistrationView:
 
     def test_missing_client_name_returns_400(self, rf: RequestFactory, settings: Any) -> None:
         """Missing client_name returns 400 with invalid_client_metadata error."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         request = _post_register(rf, {"other_field": "mcp"})
         response = _register_view(request)
         assert response.status_code == 400
@@ -595,7 +595,7 @@ class TestRegistrationView:
 
     def test_invalid_json_returns_400(self, rf: RequestFactory, settings: Any) -> None:
         """Malformed JSON body returns 400."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         request = rf.post(
             "/oauth/register/",
             data="not-json",
@@ -640,8 +640,8 @@ class TestWellKnownEndpoints:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """registration_endpoint is absent when both DCR and REGISTRATION_OPEN are disabled."""
-        settings.FRIESE_MCP_OAUTH_DCR = False
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = False
+        settings.FRISIAN_MCP_OAUTH_DCR = False
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = False
         request = rf.get("/.well-known/oauth-authorization-server")
         response = _auth_server_view(request)
         data = json.loads(response.content)
@@ -650,8 +650,8 @@ class TestWellKnownEndpoints:
     def test_authorization_server_includes_registration_when_open(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """registration_endpoint is present when FRIESE_MCP_OAUTH_REGISTRATION_OPEN is True."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        """registration_endpoint is present when FRISIAN_MCP_OAUTH_REGISTRATION_OPEN is True."""
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         request = rf.get("/.well-known/oauth-authorization-server")
         response = _auth_server_view(request)
         data = json.loads(response.content)
@@ -687,10 +687,10 @@ class TestMcpViewOAuthIntegration:
 
     def _configure_auth(self, settings: Any) -> None:
         """Point the MCP gateway at OAuthTokenAuthentication + IsAuthenticated."""
-        settings.FRIESE_MCP_AUTHENTICATION_CLASSES = [
-            "friese_mcp.contrib.oauth.authentication.OAuthTokenAuthentication"
+        settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
+            "frisian_mcp.contrib.oauth.authentication.OAuthTokenAuthentication"
         ]
-        settings.FRIESE_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
 
     def test_no_token_returns_401(self, rf: RequestFactory, settings: Any) -> None:
         """Request with no Authorization header is rejected with 401."""
@@ -699,7 +699,7 @@ class TestMcpViewOAuthIntegration:
         isolated.register("ping", lambda a, r: {}, "Ping", {})
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload)
             response = _mcp_view(request)
 
@@ -711,7 +711,7 @@ class TestMcpViewOAuthIntegration:
         isolated = ToolRegistry()
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload, _bearer("invalidtoken"))
             response = _mcp_view(request)
 
@@ -727,7 +727,7 @@ class TestMcpViewOAuthIntegration:
         isolated = ToolRegistry()
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload, _bearer(access_token.plaintext_token))
             response = _mcp_view(request)
 
@@ -743,7 +743,7 @@ class TestMcpViewOAuthIntegration:
         isolated.register("ping", lambda a, r: {}, "Ping", {})
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload, _bearer(access_token.plaintext_token))
             response = _mcp_view(request)
 
@@ -761,31 +761,31 @@ class TestGetBaseUrl:
     """Tests for _get_base_url with and without reverse-proxy headers."""
 
     def test_issuer_setting_takes_priority(self, rf: RequestFactory, settings: Any) -> None:
-        """FRIESE_MCP_OAUTH_ISSUER overrides everything else."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = "https://api.example.com"
+        """FRISIAN_MCP_OAUTH_ISSUER overrides everything else."""
+        settings.FRISIAN_MCP_OAUTH_ISSUER = "https://api.example.com"
         request = rf.get("/", HTTP_X_FORWARDED_PROTO="http", HTTP_HOST="internal:8000")
         assert _get_base_url(request) == "https://api.example.com"
 
     def test_issuer_setting_trailing_slash_stripped(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """Trailing slash is stripped from FRIESE_MCP_OAUTH_ISSUER."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = "https://api.example.com/"
+        """Trailing slash is stripped from FRISIAN_MCP_OAUTH_ISSUER."""
+        settings.FRISIAN_MCP_OAUTH_ISSUER = "https://api.example.com/"
         request = rf.get("/")
         assert _get_base_url(request) == "https://api.example.com"
 
     def test_no_proxy_uses_build_absolute_uri(self, rf: RequestFactory, settings: Any) -> None:
         """Without ISSUER or proxy count, build_absolute_uri is used."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = ""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 0
+        settings.FRISIAN_MCP_OAUTH_ISSUER = ""
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 0
         request = rf.get("/")  # default SERVER_NAME = testserver
         result = _get_base_url(request)
         assert "testserver" in result
 
     def test_proxy_count_uses_xff_proto(self, rf: RequestFactory, settings: Any) -> None:
         """With proxy_count>0, X-Forwarded-Proto determines the scheme."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = ""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        settings.FRISIAN_MCP_OAUTH_ISSUER = ""
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 1
         request = rf.get(
             "/",
             HTTP_X_FORWARDED_PROTO="https",
@@ -796,8 +796,8 @@ class TestGetBaseUrl:
 
     def test_proxy_count_uses_xff_host(self, rf: RequestFactory, settings: Any) -> None:
         """With proxy_count>0, X-Forwarded-Host overrides the Host header."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = ""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        settings.FRISIAN_MCP_OAUTH_ISSUER = ""
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 1
         request = rf.get(
             "/",
             HTTP_X_FORWARDED_PROTO="https",
@@ -812,8 +812,8 @@ class TestGetBaseUrl:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """The last value of X-Forwarded-Proto is used — rightmost is set by the nearest proxy."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = ""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        settings.FRISIAN_MCP_OAUTH_ISSUER = ""
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 1
         request = rf.get(
             "/",
             HTTP_X_FORWARDED_PROTO="http, https",
@@ -826,8 +826,8 @@ class TestGetBaseUrl:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """The last value of X-Forwarded-Host is used — rightmost is set by the nearest proxy."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = ""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        settings.FRISIAN_MCP_OAUTH_ISSUER = ""
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 1
         request = rf.get(
             "/",
             HTTP_X_FORWARDED_PROTO="https",
@@ -841,8 +841,8 @@ class TestGetBaseUrl:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """Falls back to request.get_host() when X-Forwarded-Host is absent."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = ""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        settings.FRISIAN_MCP_OAUTH_ISSUER = ""
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 1
         settings.ALLOWED_HOSTS = ["testserver"]
         # No HTTP_X_FORWARDED_HOST — falls back to request.get_host() which reads Host header.
         # RequestFactory defaults SERVER_NAME to "testserver".
@@ -853,8 +853,8 @@ class TestGetBaseUrl:
 
     def test_well_known_issuer_reflects_proxy_url(self, rf: RequestFactory, settings: Any) -> None:
         """Authorization server metadata uses the proxy-resolved base URL as issuer."""
-        settings.FRIESE_MCP_OAUTH_ISSUER = ""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 1
+        settings.FRISIAN_MCP_OAUTH_ISSUER = ""
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 1
         request = rf.get(
             "/.well-known/oauth-authorization-server",
             HTTP_X_FORWARDED_PROTO="https",
@@ -876,23 +876,23 @@ class TestOAuthConfigReady:
     def _call_ready(self) -> None:
         from django.apps import apps
 
-        apps.get_app_config("friese_mcp_oauth").ready()
+        apps.get_app_config("frisian_mcp_oauth").ready()
 
     def test_valid_zero_proxy_count(self, settings: Any) -> None:
         """proxy_count=0 is valid and does not raise."""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 0
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 0
         self._call_ready()  # no exception
 
     def test_valid_positive_proxy_count(self, settings: Any) -> None:
         """proxy_count=2 is valid and does not raise."""
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = 2
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = 2
         self._call_ready()  # no exception
 
     def test_string_proxy_count_raises(self, settings: Any) -> None:
-        """A string value for FRIESE_MCP_TRUSTED_PROXY_COUNT raises ImproperlyConfigured."""
+        """A string value for FRISIAN_MCP_TRUSTED_PROXY_COUNT raises ImproperlyConfigured."""
         from django.core.exceptions import ImproperlyConfigured
 
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = "1"
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = "1"
         with pytest.raises(ImproperlyConfigured, match="must be a non-negative integer"):
             self._call_ready()
 
@@ -900,7 +900,7 @@ class TestOAuthConfigReady:
         """A bool value (subclass of int) raises ImproperlyConfigured."""
         from django.core.exceptions import ImproperlyConfigured
 
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = True
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = True
         with pytest.raises(ImproperlyConfigured, match="must be a non-negative integer"):
             self._call_ready()
 
@@ -908,7 +908,7 @@ class TestOAuthConfigReady:
         """A negative integer raises ImproperlyConfigured."""
         from django.core.exceptions import ImproperlyConfigured
 
-        settings.FRIESE_MCP_TRUSTED_PROXY_COUNT = -1
+        settings.FRISIAN_MCP_TRUSTED_PROXY_COUNT = -1
         with pytest.raises(ImproperlyConfigured, match="must be >= 0"):
             self._call_ready()
 
@@ -924,7 +924,7 @@ class TestOAuthConfigReady:
                 "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
             }
         }
-        with caplog.at_level(logging.WARNING, logger="friese_mcp.contrib.oauth.apps"):
+        with caplog.at_level(logging.WARNING, logger="frisian_mcp.contrib.oauth.apps"):
             self._call_ready()
         assert any("LocMemCache" in r.message for r in caplog.records)
         assert any("multi-worker" in r.message for r in caplog.records)
@@ -942,7 +942,7 @@ class TestOAuthConfigReady:
                 "LOCATION": "redis://127.0.0.1:6379/1",
             }
         }
-        with caplog.at_level(logging.WARNING, logger="friese_mcp.contrib.oauth.apps"):
+        with caplog.at_level(logging.WARNING, logger="frisian_mcp.contrib.oauth.apps"):
             self._call_ready()
         assert not any("LocMemCache" in r.message for r in caplog.records)
 
@@ -956,7 +956,7 @@ class TestOAuthConfigReady:
                 "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
             }
         }
-        with caplog.at_level(logging.WARNING, logger="friese_mcp.contrib.oauth.apps"):
+        with caplog.at_level(logging.WARNING, logger="frisian_mcp.contrib.oauth.apps"):
             self._call_ready()
         assert not any("LocMemCache" in r.message for r in caplog.records)
 
@@ -974,7 +974,7 @@ class TestVerifyPkce:
         import base64  # pylint: disable=import-outside-toplevel
         import hashlib  # pylint: disable=import-outside-toplevel
 
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             _verify_pkce,  # pylint: disable=import-outside-toplevel
         )
 
@@ -988,7 +988,7 @@ class TestVerifyPkce:
 
     def test_wrong_verifier_returns_false(self) -> None:
         """Wrong code_verifier does not match the challenge."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             _verify_pkce,  # pylint: disable=import-outside-toplevel
         )
 
@@ -996,7 +996,7 @@ class TestVerifyPkce:
 
     def test_empty_verifier_returns_false(self) -> None:
         """Empty code_verifier does not match a real challenge."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             _verify_pkce,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1004,32 +1004,32 @@ class TestVerifyPkce:
 
 
 # ---------------------------------------------------------------------------
-# FRIESE_MCP_HMAC_KEY switching for OAuth client secrets
+# FRISIAN_MCP_HMAC_KEY switching for OAuth client secrets
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 class TestOAuthHmacKeySwitch:
-    """FRIESE_MCP_HMAC_KEY overrides SECRET_KEY for client_secret HMAC digests."""
+    """FRISIAN_MCP_HMAC_KEY overrides SECRET_KEY for client_secret HMAC digests."""
 
     def test_custom_hmac_key_produces_different_digest(self, settings: Any) -> None:
-        """Clients created with FRIESE_MCP_HMAC_KEY use a different HMAC than SECRET_KEY."""
-        from friese_mcp.contrib.oauth.models import (
+        """Clients created with FRISIAN_MCP_HMAC_KEY use a different HMAC than SECRET_KEY."""
+        from frisian_mcp.contrib.oauth.models import (
             _hmac_secret,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
         )
 
         raw = "supersecretvalue"
-        settings.FRIESE_MCP_HMAC_KEY = ""
+        settings.FRISIAN_MCP_HMAC_KEY = ""
         digest_default = _hmac_secret(raw)
 
-        settings.FRIESE_MCP_HMAC_KEY = "dedicated-oauth-key"
+        settings.FRISIAN_MCP_HMAC_KEY = "dedicated-oauth-key"
         digest_custom = _hmac_secret(raw)
 
         assert digest_default != digest_custom
 
     def test_token_endpoint_uses_hmac_key(self, rf: RequestFactory, settings: Any) -> None:
-        """Token endpoint validates client_secret using the current FRIESE_MCP_HMAC_KEY."""
-        settings.FRIESE_MCP_HMAC_KEY = "my-oauth-hmac-key"
+        """Token endpoint validates client_secret using the current FRISIAN_MCP_HMAC_KEY."""
+        settings.FRISIAN_MCP_HMAC_KEY = "my-oauth-hmac-key"
         client = OAuthClient.objects.create(name="hmac-key-client")
         raw_secret = client.plaintext_client_secret
 
@@ -1055,7 +1055,7 @@ class TestOAuthHmacKeySwitch:
 class TestAuthorizeView:
     """Tests for GET /oauth/authorize/ and POST /oauth/authorize/."""
 
-    from friese_mcp.contrib.oauth.views import AuthorizeView
+    from frisian_mcp.contrib.oauth.views import AuthorizeView
 
     _view = AuthorizeView.as_view()
 
@@ -1085,14 +1085,14 @@ class TestAuthorizeView:
     def test_get_auto_approve_redirects_with_code(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """GET with valid params + FRIESE_MCP_OAUTH_AUTO_APPROVE=True redirects with a code."""
-        from friese_mcp.contrib.oauth.views import (
+        """GET with valid params + FRISIAN_MCP_OAUTH_AUTO_APPROVE=True redirects with a code."""
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
         # SEC-2: AUTO_APPROVE now defaults to bool(DEBUG); test_settings has
         # no DEBUG so the default is False.  Set the flag explicitly.
-        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
         client = self._make_client()
         view = AuthorizeView.as_view()
         request = rf.get("/oauth/authorize/", self._valid_params(client.client_id))
@@ -1107,11 +1107,11 @@ class TestAuthorizeView:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """GET with AUTO_APPROVE=False renders the consent HTML template."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
-        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = False
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = False
         client = self._make_client()
 
         view = AuthorizeView.as_view()
@@ -1124,7 +1124,7 @@ class TestAuthorizeView:
         self, rf: RequestFactory
     ) -> None:
         """GET with missing response_type and no redirect_uri returns 400 JSON (no redirect)."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1142,7 +1142,7 @@ class TestAuthorizeView:
         self, rf: RequestFactory
     ) -> None:
         """GET with response_type=token redirects with error=unsupported_response_type."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1158,7 +1158,7 @@ class TestAuthorizeView:
         self, rf: RequestFactory
     ) -> None:
         """GET with code_challenge_method=plain redirects with error=invalid_request."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1172,7 +1172,7 @@ class TestAuthorizeView:
 
     def test_post_allow_redirects_with_code(self, rf: RequestFactory) -> None:
         """POST allow=true issues a code and redirects."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1194,7 +1194,7 @@ class TestAuthorizeView:
 
     def test_post_deny_redirects_with_access_denied(self, rf: RequestFactory) -> None:
         """POST allow=false redirects with error=access_denied."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1244,11 +1244,11 @@ class TestAuthorizeViewSEC2:
         We MUST NOT redirect because we cannot trust an unverified
         redirect_uri to be the legitimate target.
         """
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
-        settings.FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
         view = AuthorizeView.as_view()
         request = rf.get("/oauth/authorize/", self._params("ghost-id"))
         response = view(request)
@@ -1259,11 +1259,11 @@ class TestAuthorizeViewSEC2:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """An inactive client cannot pass authorize even with a registered URI."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
-        settings.FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
         client = OAuthClient.objects.create(
             name="disabled",
             redirect_uris=["https://example.com/cb"],
@@ -1279,7 +1279,7 @@ class TestAuthorizeViewSEC2:
         self, rf: RequestFactory
     ) -> None:
         """An exact-match against client.redirect_uris is required."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1298,7 +1298,7 @@ class TestAuthorizeViewSEC2:
 
     def test_http_to_public_host_rejected(self, rf: RequestFactory) -> None:
         """Plain http:// to a non-loopback host is rejected by the scheme gate."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1317,11 +1317,11 @@ class TestAuthorizeViewSEC2:
 
     def test_http_loopback_accepted(self, rf: RequestFactory, settings: Any) -> None:
         """http://localhost is allowed (RFC 8252 §7.3 native-app loopback)."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
-        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
         client = OAuthClient.objects.create(
             name="loopback",
             redirect_uris=["http://localhost:8080/cb"],
@@ -1339,11 +1339,11 @@ class TestAuthorizeViewSEC2:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """Custom native-app scheme (e.g. ``com.example.app:/cb``) is allowed."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
-        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
         client = OAuthClient.objects.create(
             name="native",
             redirect_uris=["com.example.app:/cb"],
@@ -1358,7 +1358,7 @@ class TestAuthorizeViewSEC2:
 
     def test_javascript_scheme_rejected(self, rf: RequestFactory) -> None:
         """A javascript: URI is rejected by the scheme gate (no dot in scheme)."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1379,7 +1379,7 @@ class TestAuthorizeViewSEC2:
 
     def test_data_scheme_rejected(self, rf: RequestFactory) -> None:
         """A data: URI is also rejected by the scheme gate."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1406,12 +1406,12 @@ class TestAuthorizeViewSEC2:
         threat model isn't widened — operators who opt in have already
         accepted that any caller can hold a client_id.
         """
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
-        settings.FRIESE_MCP_OAUTH_PKCE_AUTO_REGISTER = True
-        settings.FRIESE_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
         view = AuthorizeView.as_view()
         request = rf.get("/oauth/authorize/", self._params("on-the-fly-pkce"))
         response = view(request)
@@ -1427,19 +1427,19 @@ class TestAuthorizeViewSEC2:
 
 @pytest.mark.django_db
 class TestAutoApproveDefault:
-    """SEC-2: FRIESE_MCP_OAUTH_AUTO_APPROVE defaults to bool(DEBUG)."""
+    """SEC-2: FRISIAN_MCP_OAUTH_AUTO_APPROVE defaults to bool(DEBUG)."""
 
     def test_default_is_false_outside_debug(
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """With DEBUG False (or absent) and AUTO_APPROVE absent → consent template."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
         settings.DEBUG = False
-        if hasattr(settings, "FRIESE_MCP_OAUTH_AUTO_APPROVE"):
-            del settings.FRIESE_MCP_OAUTH_AUTO_APPROVE
+        if hasattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE"):
+            del settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE
         client = OAuthClient.objects.create(
             name="prod-mode", redirect_uris=["https://example.com/cb"]
         )
@@ -1463,13 +1463,13 @@ class TestAutoApproveDefault:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """With DEBUG=True and AUTO_APPROVE absent → auto-approve redirect."""
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
         settings.DEBUG = True
-        if hasattr(settings, "FRIESE_MCP_OAUTH_AUTO_APPROVE"):
-            del settings.FRIESE_MCP_OAUTH_AUTO_APPROVE
+        if hasattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE"):
+            del settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE
         client = OAuthClient.objects.create(
             name="dev-mode", redirect_uris=["https://example.com/cb"]
         )
@@ -1517,7 +1517,7 @@ class TestRegistrationViewRedirectUris:
 
     @staticmethod
     def _post(rf: RequestFactory, body: dict[str, Any]) -> Any:
-        from friese_mcp.contrib.oauth.views import (
+        from frisian_mcp.contrib.oauth.views import (
             RegistrationView,  # pylint: disable=import-outside-toplevel
         )
 
@@ -1533,7 +1533,7 @@ class TestRegistrationViewRedirectUris:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """A registered client persists the supplied redirect_uris list."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         response = self._post(
             rf,
             {
@@ -1558,7 +1558,7 @@ class TestRegistrationViewRedirectUris:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """Registration refuses http:// URIs to non-loopback hosts."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         response = self._post(
             rf,
             {
@@ -1574,7 +1574,7 @@ class TestRegistrationViewRedirectUris:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """redirect_uris must be a list of strings, not a single string or other shape."""
-        settings.FRIESE_MCP_OAUTH_REGISTRATION_OPEN = True
+        settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         response = self._post(
             rf,
             {
@@ -1609,7 +1609,7 @@ class TestTokenViewAuthorizationCodeGrant:
 
         from django.core.cache import cache  # pylint: disable=import-outside-toplevel
 
-        from friese_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
             _AUTH_CODE_CACHE_PREFIX,
             _AUTH_CODE_TTL,
         )
@@ -1729,7 +1729,7 @@ class TestTokenViewAuthorizationCodeGrant:
         data = json.loads(response.content)
         # SEC-1: data["access_token"] is the raw bearer; storage holds the HMAC
         # digest, so look up by hashing the issued raw token.
-        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
             _hmac_secret,
         )
 
@@ -1738,7 +1738,7 @@ class TestTokenViewAuthorizationCodeGrant:
 
 
 # ---------------------------------------------------------------------------
-# Well-known: authorization_endpoint and FRIESE_MCP_OAUTH_AUTHORIZE_URL
+# Well-known: authorization_endpoint and FRISIAN_MCP_OAUTH_AUTHORIZE_URL
 # ---------------------------------------------------------------------------
 
 
@@ -1771,8 +1771,8 @@ class TestWellKnownAuthorizationEndpoint:
     def test_custom_authorize_url_override(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """FRIESE_MCP_OAUTH_AUTHORIZE_URL overrides the advertised authorization_endpoint."""
-        settings.FRIESE_MCP_OAUTH_AUTHORIZE_URL = "https://auth.example.com/authorize"
+        """FRISIAN_MCP_OAUTH_AUTHORIZE_URL overrides the advertised authorization_endpoint."""
+        settings.FRISIAN_MCP_OAUTH_AUTHORIZE_URL = "https://auth.example.com/authorize"
         request = rf.get("/.well-known/oauth-authorization-server")
         response = _auth_server_view(request)
         data = json.loads(response.content)

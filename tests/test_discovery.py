@@ -8,9 +8,9 @@ from typing import Any
 import pytest
 from rest_framework import serializers
 
-from friese_mcp.apps import _apply_tool_filters, _suppress_dispatcher_shadowed
-from friese_mcp.backends.base import ToolDefinition
-from friese_mcp.backends.discovery import (
+from frisian_mcp.apps import _apply_tool_filters, _suppress_dispatcher_shadowed
+from frisian_mcp.backends.base import ToolDefinition
+from frisian_mcp.backends.discovery import (
     DRFSyncDiscovery,
     _action_description,
     _filterset_properties,
@@ -80,7 +80,7 @@ class TestResourceFromPath:
 
 
 class TestVersionSegmentConfig:
-    """Tests for FRIESE_MCP_VERSION_SEGMENTS and FRIESE_MCP_VERSION_SEGMENT_PATTERN."""
+    """Tests for FRISIAN_MCP_VERSION_SEGMENTS and FRISIAN_MCP_VERSION_SEGMENT_PATTERN."""
 
     def test_default_segments_unchanged(self) -> None:
         """Default set covers api, rest, v1-v5; behaviour is preserved."""
@@ -92,8 +92,8 @@ class TestVersionSegmentConfig:
         assert not _is_version_segment("v6")
 
     def test_custom_list_replaces_default(self, settings: Any) -> None:
-        """FRIESE_MCP_VERSION_SEGMENTS replaces the default set entirely."""
-        settings.FRIESE_MCP_VERSION_SEGMENTS = ["api", "internal", "svc"]
+        """FRISIAN_MCP_VERSION_SEGMENTS replaces the default set entirely."""
+        settings.FRISIAN_MCP_VERSION_SEGMENTS = ["api", "internal", "svc"]
         assert _is_version_segment("api")
         assert _is_version_segment("internal")
         assert _is_version_segment("svc")
@@ -102,13 +102,13 @@ class TestVersionSegmentConfig:
 
     def test_custom_list_skips_in_path(self, settings: Any) -> None:
         """A custom list entry (e.g. 'internal') is skipped in path extraction."""
-        settings.FRIESE_MCP_VERSION_SEGMENTS = ["api", "internal"]
+        settings.FRISIAN_MCP_VERSION_SEGMENTS = ["api", "internal"]
         assert _resource_from_path("internal/users/") == "users"
         assert _resource_from_path("api/internal/widgets/") == "widgets"
 
     def test_regex_pattern_accepts_v6_through_v99(self, settings: Any) -> None:
         r"""A regex pattern like r'^v\d+$' matches v6 through v99 and beyond."""
-        settings.FRIESE_MCP_VERSION_SEGMENT_PATTERN = r"^v\d+$"
+        settings.FRISIAN_MCP_VERSION_SEGMENT_PATTERN = r"^v\d+$"
         assert _is_version_segment("v6")
         assert _is_version_segment("v10")
         assert _is_version_segment("v99")
@@ -119,15 +119,15 @@ class TestVersionSegmentConfig:
 
     def test_regex_pattern_skips_in_path(self, settings: Any) -> None:
         """Regex pattern is applied during path extraction."""
-        settings.FRIESE_MCP_VERSION_SEGMENT_PATTERN = r"^(api|rest|v\d+|\d{4}-\d{2})$"
+        settings.FRISIAN_MCP_VERSION_SEGMENT_PATTERN = r"^(api|rest|v\d+|\d{4}-\d{2})$"
         assert _resource_from_path("api/v6/orders/") == "orders"
         assert _resource_from_path("rest/v10/products/") == "products"
         assert _resource_from_path("api/2024-01/invoices/") == "invoices"
 
     def test_regex_pattern_takes_precedence_over_list(self, settings: Any) -> None:
         """When both settings are set, PATTERN takes precedence over SEGMENTS."""
-        settings.FRIESE_MCP_VERSION_SEGMENTS = ["api"]
-        settings.FRIESE_MCP_VERSION_SEGMENT_PATTERN = r"^v\d+$"
+        settings.FRISIAN_MCP_VERSION_SEGMENTS = ["api"]
+        settings.FRISIAN_MCP_VERSION_SEGMENT_PATTERN = r"^v\d+$"
         assert _is_version_segment("v6")
         assert not _is_version_segment("api")
 
@@ -541,30 +541,30 @@ class TestApplyToolFilters:
         assert _apply_tool_filters(tools) == tools
 
     def test_allowlist_keeps_only_listed_names(self, settings: Any) -> None:
-        """FRIESE_MCP_TOOL_ALLOWLIST retains only matching tool names."""
-        settings.FRIESE_MCP_TOOL_ALLOWLIST = ["a.list"]
+        """FRISIAN_MCP_TOOL_ALLOWLIST retains only matching tool names."""
+        settings.FRISIAN_MCP_TOOL_ALLOWLIST = ["a.list"]
         tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
         result = _apply_tool_filters(tools)
         assert [t.name for t in result] == ["a.list"]
 
     def test_denylist_removes_listed_names(self, settings: Any) -> None:
-        """FRIESE_MCP_TOOL_DENYLIST drops matching tool names."""
-        settings.FRIESE_MCP_TOOL_DENYLIST = ["b.create"]
+        """FRISIAN_MCP_TOOL_DENYLIST drops matching tool names."""
+        settings.FRISIAN_MCP_TOOL_DENYLIST = ["b.create"]
         tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
         result = _apply_tool_filters(tools)
         assert [t.name for t in result] == ["a.list"]
 
     def test_denylist_applied_after_allowlist(self, settings: Any) -> None:
         """A name in both allowlist and denylist is ultimately excluded."""
-        settings.FRIESE_MCP_TOOL_ALLOWLIST = ["a.list", "b.create"]
-        settings.FRIESE_MCP_TOOL_DENYLIST = ["a.list"]
+        settings.FRISIAN_MCP_TOOL_ALLOWLIST = ["a.list", "b.create"]
+        settings.FRISIAN_MCP_TOOL_DENYLIST = ["a.list"]
         tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
         result = _apply_tool_filters(tools)
         assert [t.name for t in result] == ["b.create"]
 
     def test_empty_allowlist_drops_all_tools(self, settings: Any) -> None:
         """An explicit empty ALLOWLIST removes every tool."""
-        settings.FRIESE_MCP_TOOL_ALLOWLIST = []
+        settings.FRISIAN_MCP_TOOL_ALLOWLIST = []
         tools = [_make_stub_tool("a.list"), _make_stub_tool("b.create")]
         assert _apply_tool_filters(tools) == []
 
@@ -636,7 +636,7 @@ class TestSchemaFromFilterBackends:
             ViewSet,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
         )
 
-        import friese_mcp.backends.discovery as _disc  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        import frisian_mcp.backends.discovery as _disc  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
         class _FakeBase:
             pass
@@ -857,7 +857,7 @@ class TestSuppressDispatcherShadowed:
         import logging
 
         tools = [_tool_def("records_list")]
-        with caplog.at_level(logging.INFO, logger="friese_mcp.apps"):
+        with caplog.at_level(logging.INFO, logger="frisian_mcp.apps"):
             _suppress_dispatcher_shadowed(tools, frozenset({"records"}))
         assert any("records_list" in r.message for r in caplog.records)
         assert any("records" in r.message for r in caplog.records)

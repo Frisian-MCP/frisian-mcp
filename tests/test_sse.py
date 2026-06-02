@@ -9,7 +9,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.http import JsonResponse, StreamingHttpResponse
 from django.test import RequestFactory
 
-from friese_mcp.views import McpView, _maybe_sse
+from frisian_mcp.views import McpView, _maybe_sse
 
 _view = McpView.as_view()
 _rf = RequestFactory()

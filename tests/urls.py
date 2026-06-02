@@ -12,7 +12,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.viewsets import ViewSet
 
-from friese_mcp.decorators import mcp_ignore
+from frisian_mcp.decorators import mcp_ignore
 
 # ---------------------------------------------------------------------------
 # Serializers
@@ -301,5 +301,5 @@ urlpatterns = [
     path("api/limited/", _limited_list, name="limited-list"),
     path("api/excludedestroy/", _exclude_destroy_list, name="excludedestroy-list"),
     path("api/excludedestroy/<pk>/", _exclude_destroy_detail, name="excludedestroy-detail"),
-    path("mcp/", include("friese_mcp.urls")),
+    path("mcp/", include("frisian_mcp.urls")),
 ]

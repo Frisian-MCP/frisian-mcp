@@ -1,1 +1,1 @@
-"""Test suite for friese-mcp."""
+"""Test suite for frisian-mcp."""

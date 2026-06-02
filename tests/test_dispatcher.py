@@ -10,8 +10,8 @@ import pytest
 from django.test import RequestFactory
 from rest_framework.permissions import BasePermission
 
-from friese_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
-from friese_mcp.registry import ToolInputError, ToolRegistry
+from frisian_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
+from frisian_mcp.registry import ToolInputError, ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -28,7 +28,7 @@ def rf() -> RequestFactory:
 def isolated_registry() -> ToolRegistry:
     """Return an isolated ToolRegistry with TasksDispatcher pre-registered."""
     reg = ToolRegistry()
-    with patch("friese_mcp.decorators.tool_registry", reg):
+    with patch("frisian_mcp.decorators.tool_registry", reg):
 
         @mcp_dispatcher("tasks", description="Manage tasks for testing.")
         class TasksDispatcher:
@@ -204,7 +204,7 @@ class TestDispatcherKnownAction:
         reg = ToolRegistry()
         received: list[Any] = []
 
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("probe", description="Probe dispatcher.")
             class ProbeDispatcher:  # pylint: disable=unused-variable
@@ -316,7 +316,7 @@ class TestDispatcherCoexistence:
     def test_both_registered_and_retrievable(self) -> None:
         """@mcp_tool and @mcp_dispatcher can coexist; both retrievable by name."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="plain.tool", description="A plain tool.", input_schema={})
             def _plain_tool(arguments: dict[str, Any], request: Any) -> dict[str, Any]:  # pylint: disable=unused-argument
@@ -344,7 +344,7 @@ class TestDispatcherCoexistence:
     def test_mcp_tool_is_dispatcher_false(self) -> None:
         """@mcp_tool entry has is_dispatcher=False."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="flag.tool", description="Flag test.", input_schema={})
             def _flag_tool(arguments: dict[str, Any], request: Any) -> dict[str, Any]:  # pylint: disable=unused-argument
@@ -359,7 +359,7 @@ class TestDispatcherCoexistence:
     def test_mcp_dispatcher_is_dispatcher_true(self) -> None:
         """@mcp_dispatcher entry has is_dispatcher=True."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("flag.dispatcher", description="Flag dispatcher.")
             class FlagDispatcher:
@@ -456,7 +456,7 @@ class TestDispatcherPermissionClasses:
     def test_no_permission_classes_allows_all(self) -> None:
         """Dispatcher with no permission_classes allows all callers (AllowAny default)."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("open", description="Open dispatcher.")
             class OpenDispatcher:  # pylint: disable=unused-variable
@@ -482,7 +482,7 @@ class TestDispatcherPermissionClasses:
                 return False
 
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher(
                 "guarded", description="Guarded dispatcher.", permission_classes=[AllowNone]
@@ -510,7 +510,7 @@ class TestDispatcherPermissionClasses:
                 return False
 
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher(
                 "secured", description="Secured dispatcher.", permission_classes=[DenyAll]

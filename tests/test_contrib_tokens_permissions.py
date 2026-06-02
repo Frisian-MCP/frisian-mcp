@@ -1,4 +1,4 @@
-"""Tests for friese_mcp.contrib.tokens.permissions.IsAuthenticatedOrServiceToken."""
+"""Tests for frisian_mcp.contrib.tokens.permissions.IsAuthenticatedOrServiceToken."""
 
 from __future__ import annotations
 
@@ -11,16 +11,16 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
-from friese_mcp.contrib.tokens.models import FrieseMcpToken
-from friese_mcp.contrib.tokens.permissions import IsAuthenticatedOrServiceToken
-from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpView
+from frisian_mcp.contrib.tokens.models import FrisianMcpToken
+from frisian_mcp.contrib.tokens.permissions import IsAuthenticatedOrServiceToken
+from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.views import McpView
 
 User = get_user_model()
 
 _view = McpView.as_view()
-_PERM = "friese_mcp.contrib.tokens.permissions.IsAuthenticatedOrServiceToken"
-_AUTH = "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication"
+_PERM = "frisian_mcp.contrib.tokens.permissions.IsAuthenticatedOrServiceToken"
+_AUTH = "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"
 
 
 # ---------------------------------------------------------------------------
@@ -71,30 +71,30 @@ class TestIsAuthenticatedOrServiceToken:
         assert IsAuthenticatedOrServiceToken().has_permission(req, None) is False
 
     def test_anonymous_user_with_service_token_is_allowed(self) -> None:
-        """AnonymousUser whose request.auth is an active FrieseMcpToken is allowed."""
-        token = FrieseMcpToken.__new__(FrieseMcpToken)
+        """AnonymousUser whose request.auth is an active FrisianMcpToken is allowed."""
+        token = FrisianMcpToken.__new__(FrisianMcpToken)
         token.is_active = True
         req = _make_request(user=AnonymousUser(), auth=token)
         assert IsAuthenticatedOrServiceToken().has_permission(req, None) is True
 
     def test_inactive_service_token_is_denied(self) -> None:
-        """AnonymousUser with an inactive FrieseMcpToken is denied."""
-        token = FrieseMcpToken.__new__(FrieseMcpToken)
+        """AnonymousUser with an inactive FrisianMcpToken is denied."""
+        token = FrisianMcpToken.__new__(FrisianMcpToken)
         token.is_active = False
         req = _make_request(user=AnonymousUser(), auth=token)
         assert IsAuthenticatedOrServiceToken().has_permission(req, None) is False
 
     def test_non_token_auth_object_is_denied(self) -> None:
-        """Non-FrieseMcpToken auth object does not satisfy the service-token path."""
+        """Non-FrisianMcpToken auth object does not satisfy the service-token path."""
         req = _make_request(user=AnonymousUser(), auth=object())
         assert IsAuthenticatedOrServiceToken().has_permission(req, None) is False
 
     def test_none_user_with_service_token_is_allowed(self) -> None:
-        """None user with an active FrieseMcpToken auth is allowed."""
+        """None user with an active FrisianMcpToken auth is allowed."""
 
         class _Req:
             user = None
-            auth = FrieseMcpToken.__new__(FrieseMcpToken)
+            auth = FrisianMcpToken.__new__(FrisianMcpToken)
             auth.is_active = True
 
         assert IsAuthenticatedOrServiceToken().has_permission(_Req(), None) is True
@@ -109,7 +109,7 @@ class TestIsAuthenticatedOrServiceToken:
 
 
 # ---------------------------------------------------------------------------
-# Integration: McpView + FrieseMcpTokenAuthentication
+# Integration: McpView + FrisianMcpTokenAuthentication
 # ---------------------------------------------------------------------------
 
 
@@ -119,21 +119,21 @@ class TestIsAuthenticatedOrServiceTokenIntegration:
 
     def _configure(self, settings: Any) -> None:
         """Wire token auth + IsAuthenticatedOrServiceToken into the MCP gateway."""
-        settings.FRIESE_MCP_AUTHENTICATION_CLASSES = [_AUTH]
-        settings.FRIESE_MCP_PERMISSION_CLASSES = [_PERM]
+        settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [_AUTH]
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = [_PERM]
 
     def test_user_token_allows_request(self, rf: RequestFactory, settings: Any) -> None:
         """A token linked to a Django user is allowed."""
         self._configure(settings)
         user = User.objects.create_user(username="bob", password="pw")
-        token = FrieseMcpToken.objects.create(name="bob-token", user=user)
+        token = FrisianMcpToken.objects.create(name="bob-token", user=user)
 
         isolated = ToolRegistry()
         isolated.register("ping", lambda a, r: {}, "Ping", {})
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         bearer = {"HTTP_AUTHORIZATION": f"Bearer {token.plaintext_token}"}
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload, bearer)
             response = _view(request)
 
@@ -142,14 +142,14 @@ class TestIsAuthenticatedOrServiceTokenIntegration:
     def test_service_token_allows_request(self, rf: RequestFactory, settings: Any) -> None:
         """A service token (no linked user) is allowed."""
         self._configure(settings)
-        token = FrieseMcpToken.objects.create(name="service-token")
+        token = FrisianMcpToken.objects.create(name="service-token")
 
         isolated = ToolRegistry()
         isolated.register("ping", lambda a, r: {}, "Ping", {})
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         bearer = {"HTTP_AUTHORIZATION": f"Bearer {token.plaintext_token}"}
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload, bearer)
             response = _view(request)
 
@@ -161,7 +161,7 @@ class TestIsAuthenticatedOrServiceTokenIntegration:
         isolated = ToolRegistry()
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload)
             response = _view(request)
 
@@ -173,7 +173,7 @@ class TestIsAuthenticatedOrServiceTokenIntegration:
         isolated = ToolRegistry()
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             request = _post_mcp(rf, payload, {"HTTP_AUTHORIZATION": "Bearer notavalidtoken"})
             response = _view(request)
 

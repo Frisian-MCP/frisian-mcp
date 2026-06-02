@@ -1,4 +1,4 @@
-"""Tests for friese_mcp.contrib.agents — AgentConnection model, admin, and per-agent filtering."""
+"""Tests for frisian_mcp.contrib.agents — AgentConnection model, admin, and per-agent filtering."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.test import RequestFactory
 
-from friese_mcp.contrib.agents.models import AgentConnection, validate_tool_name_list
-from friese_mcp.contrib.oauth.models import OAuthClient
-from friese_mcp.contrib.tokens.models import FrieseMcpToken
-from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpView
+from frisian_mcp.contrib.agents.models import AgentConnection, validate_tool_name_list
+from frisian_mcp.contrib.oauth.models import OAuthClient
+from frisian_mcp.contrib.tokens.models import FrisianMcpToken
+from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.views import McpView
 
 _view = McpView.as_view()
 
-_TOKEN_AUTH = "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication"
-_OAUTH_AUTH = "friese_mcp.contrib.oauth.authentication.OAuthTokenAuthentication"
+_TOKEN_AUTH = "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"
+_OAUTH_AUTH = "frisian_mcp.contrib.oauth.authentication.OAuthTokenAuthentication"
 
 
 # ---------------------------------------------------------------------------
@@ -44,15 +44,15 @@ def _isolated_registry(*tool_names: str) -> ToolRegistry:
 
 
 def _use_token_auth(settings: Any) -> None:
-    """Configure FrieseMcpTokenAuthentication with no gateway permission check."""
-    settings.FRIESE_MCP_AUTHENTICATION_CLASSES = [_TOKEN_AUTH]
-    settings.FRIESE_MCP_PERMISSION_CLASSES = []
+    """Configure FrisianMcpTokenAuthentication with no gateway permission check."""
+    settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [_TOKEN_AUTH]
+    settings.FRISIAN_MCP_PERMISSION_CLASSES = []
 
 
 def _use_oauth_auth(settings: Any) -> None:
     """Configure OAuthTokenAuthentication with no gateway permission check."""
-    settings.FRIESE_MCP_AUTHENTICATION_CLASSES = [_OAUTH_AUTH]
-    settings.FRIESE_MCP_PERMISSION_CLASSES = []
+    settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [_OAUTH_AUTH]
+    settings.FRISIAN_MCP_PERMISSION_CLASSES = []
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +95,8 @@ class TestAgentConnectionModel:
         assert conn.allowed_tools == ["users.list", "workouts.create"]
 
     def test_token_fk(self) -> None:
-        """AgentConnection can be linked to a FrieseMcpToken."""
-        token = FrieseMcpToken.objects.create(name="claude-token")
+        """AgentConnection can be linked to a FrisianMcpToken."""
+        token = FrisianMcpToken.objects.create(name="claude-token")
         conn = AgentConnection.objects.create(name="claude", token=token)
         conn.refresh_from_db()
         assert conn.token == token
@@ -109,8 +109,8 @@ class TestAgentConnectionModel:
         assert conn.oauth_client == client
 
     def test_token_deleted_nullifies_fk(self) -> None:
-        """Deleting a FrieseMcpToken sets AgentConnection.token to NULL (SET_NULL)."""
-        token = FrieseMcpToken.objects.create(name="temp-token")
+        """Deleting a FrisianMcpToken sets AgentConnection.token to NULL (SET_NULL)."""
+        token = FrisianMcpToken.objects.create(name="temp-token")
         conn = AgentConnection.objects.create(name="agent", token=token)
         token.delete()
         conn.refresh_from_db()
@@ -140,7 +140,7 @@ class TestAgentConnectionModel:
         """clean() raises ValidationError when both token and oauth_client are set."""
         from django.core.exceptions import ValidationError as DjangoValidationError  # noqa: PLC0415
 
-        token = FrieseMcpToken.objects.create(name="dual-tok")
+        token = FrisianMcpToken.objects.create(name="dual-tok")
         client = OAuthClient.objects.create(name="dual-client")
         conn = AgentConnection(name="dual", token=token, oauth_client=client)
         with pytest.raises(DjangoValidationError, match="but not both"):
@@ -148,7 +148,7 @@ class TestAgentConnectionModel:
 
     def test_clean_passes_with_only_token(self) -> None:
         """clean() raises no exception when only token is set."""
-        token = FrieseMcpToken.objects.create(name="tok-only")
+        token = FrisianMcpToken.objects.create(name="tok-only")
         conn = AgentConnection(name="tok-agent", token=token)
         conn.clean()  # must not raise
 
@@ -169,11 +169,11 @@ class TestAgentConnectionModel:
         """_get_agent_connection() via token uses select_related — FK attrs need no extra query."""
         from unittest.mock import MagicMock  # pylint: disable=import-outside-toplevel
 
-        from friese_mcp.views import (
+        from frisian_mcp.views import (
             _get_agent_connection,  # pylint: disable=import-outside-toplevel
         )
 
-        token = FrieseMcpToken.objects.create(name="sr-tok")
+        token = FrisianMcpToken.objects.create(name="sr-tok")
         AgentConnection.objects.create(name="sr-agent", token=token)
         req = MagicMock()
         req.auth = token
@@ -270,7 +270,7 @@ class TestAgentConnectionAdmin:
     def _admin(self) -> Any:
         from django.contrib.admin import site  # pylint: disable=import-outside-toplevel
 
-        from friese_mcp.contrib.agents.admin import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.agents.admin import (  # pylint: disable=import-outside-toplevel
             AgentConnectionAdmin,
         )
 
@@ -283,7 +283,7 @@ class TestAgentConnectionAdmin:
 
     def test_credential_summary_with_token(self) -> None:
         """credential_summary shows the token label when token is linked."""
-        token = FrieseMcpToken.objects.create(name="my-token")
+        token = FrisianMcpToken.objects.create(name="my-token")
         conn = AgentConnection.objects.create(name="agent", token=token)
         summary = self._admin().credential_summary(conn)
         assert "Token" in summary
@@ -329,7 +329,7 @@ class TestPerAgentToolsList:
         """POST tools/list, return the tools array from the JSON-RPC result."""
         payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
         request = _post_mcp(rf, payload, bearer=bearer)
-        with patch("friese_mcp.views.tool_registry", registry):
+        with patch("frisian_mcp.views.tool_registry", registry):
             response = _view(request)
         data = json.loads(response.content)
         return data["result"]["tools"]
@@ -346,7 +346,7 @@ class TestPerAgentToolsList:
     ) -> None:
         """AgentConnection.allowed_tools = None → all tools returned (unrestricted)."""
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="unrestricted", token=token, allowed_tools=None
         )
@@ -360,7 +360,7 @@ class TestPerAgentToolsList:
     ) -> None:
         """AgentConnection.allowed_tools = [...] → only those tools returned."""
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="restricted",
             token=token,
@@ -384,7 +384,7 @@ class TestPerAgentToolsList:
         and tools/list returns no tools.
         """
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="disabled",
             token=token,
@@ -408,7 +408,7 @@ class TestPerAgentToolsList:
         with its own allowed_tools applied.
         """
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="legacy-disabled",
             token=token,
@@ -431,7 +431,7 @@ class TestPerAgentToolsList:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """Per-agent filtering works when request.auth is an OAuthAccessToken."""
-        from friese_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
             OAuthAccessToken,
         )
 
@@ -474,7 +474,7 @@ class TestPerAgentToolsCall:
             "params": {"name": tool_name, "arguments": {}},
         }
         request = _post_mcp(rf, payload, bearer=bearer)
-        with patch("friese_mcp.views.tool_registry", registry):
+        with patch("frisian_mcp.views.tool_registry", registry):
             response = _view(request)
         return json.loads(response.content)
 
@@ -483,7 +483,7 @@ class TestPerAgentToolsCall:
     ) -> None:
         """Calling a tool not in allowed_tools returns isError=True."""
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="restricted", token=token, allowed_tools=["users.list"]
         )
@@ -498,7 +498,7 @@ class TestPerAgentToolsCall:
     ) -> None:
         """Calling a tool in allowed_tools succeeds normally."""
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="restricted", token=token, allowed_tools=["users.list"]
         )
@@ -517,7 +517,7 @@ class TestPerAgentToolsCall:
     ) -> None:
         """allowed_tools=None means no restriction; all tools are callable."""
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="unrestricted", token=token, allowed_tools=None
         )
@@ -536,7 +536,7 @@ class TestPerAgentToolsCall:
         tools, not just hide them in the listing.
         """
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="agent-token")
+        token = FrisianMcpToken.objects.create(name="agent-token")
         AgentConnection.objects.create(
             name="disabled",
             token=token,
@@ -566,7 +566,7 @@ class TestLastSeenAt:
     ) -> None:
         """AgentConnection.last_seen_at is set after a tools/call request."""
         _use_token_auth(settings)
-        token = FrieseMcpToken.objects.create(name="tracking-token")
+        token = FrisianMcpToken.objects.create(name="tracking-token")
         conn = AgentConnection.objects.create(
             name="agent",
             token=token,
@@ -582,7 +582,7 @@ class TestLastSeenAt:
             "params": {"name": "users.list", "arguments": {}},
         }
         request = _post_mcp(rf, payload, bearer=token.plaintext_token)
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             _view(request)
 
         conn.refresh_from_db()
@@ -600,7 +600,7 @@ class TestLastSeenAt:
             "params": {"name": "users.list", "arguments": {}},
         }
         request = _post_mcp(rf, payload)
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             response = _view(request)
         # No exception means this path is safe even with no connection
         data = json.loads(response.content)

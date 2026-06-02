@@ -10,7 +10,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.http import StreamingHttpResponse
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.views import McpView
+from frisian_mcp.views import McpView
 
 _view = McpView.as_view()
 _rf = RequestFactory()
@@ -49,9 +49,9 @@ class TestMcpSessionIdHeader:
         ids = {_call("initialize")["Mcp-Session-Id"] for _ in range(5)}
         assert len(ids) == 5
 
-    @override_settings(FRIESE_MCP_SESSION_ID_HEADER=False)
+    @override_settings(FRISIAN_MCP_SESSION_ID_HEADER=False)
     def test_session_id_suppressed_when_setting_false(self) -> None:
-        """Setting FRIESE_MCP_SESSION_ID_HEADER=False suppresses the header."""
+        """Setting FRISIAN_MCP_SESSION_ID_HEADER=False suppresses the header."""
         resp = _call("initialize")
         assert "Mcp-Session-Id" not in resp
 

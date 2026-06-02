@@ -10,7 +10,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ImproperlyConfigured
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.contrib.middleware import (
+from frisian_mcp.contrib.middleware import (
     AbstractRateLimitBackend,
     InMemoryRateLimitBackend,
     RateLimitMiddleware,
@@ -82,7 +82,7 @@ class TestInMemoryRateLimitBackend:
     def test_window_reset_allows_new_requests(self) -> None:
         """After the window elapses, the counter resets and requests are allowed."""
         backend = InMemoryRateLimitBackend()
-        with patch("friese_mcp.contrib.middleware.time") as mock_time:
+        with patch("frisian_mcp.contrib.middleware.time") as mock_time:
             mock_time.monotonic.return_value = 1000.0
             backend.allow_request("k", limit=1, window=1)
             assert backend.allow_request("k", limit=1, window=1) is False
@@ -126,10 +126,10 @@ class TestAbstractRateLimitBackend:
 
 
 class TestRateLimitMiddlewareBackendSetting:
-    """FRIESE_MCP_RATE_LIMIT['backend'] loads a custom backend class."""
+    """FRISIAN_MCP_RATE_LIMIT['backend'] loads a custom backend class."""
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={
+        FRISIAN_MCP_RATE_LIMIT={
             "rate": "10/s",
             "key": "user_id",
             "backend": "tests.test_rate_limit_backend._CountingBackend",
@@ -141,7 +141,7 @@ class TestRateLimitMiddlewareBackendSetting:
         assert isinstance(mw._backend, _CountingBackend)  # pylint: disable=protected-access
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={
+        FRISIAN_MCP_RATE_LIMIT={
             "rate": "10/s",
             "key": "user_id",
             "backend": "tests.test_rate_limit_backend._CountingBackend",
@@ -157,7 +157,7 @@ class TestRateLimitMiddlewareBackendSetting:
         assert len(backend.calls) == 1
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={
+        FRISIAN_MCP_RATE_LIMIT={
             "rate": "5/s",
             "key": "user_id",
             "backend": "tests.test_rate_limit_backend._BlockingBackend",
@@ -172,7 +172,7 @@ class TestRateLimitMiddlewareBackendSetting:
             mw(req, "tool", {}, _noop_next)
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={
+        FRISIAN_MCP_RATE_LIMIT={
             "rate": "5/s",
             "key": "user_id",
         }
@@ -183,7 +183,7 @@ class TestRateLimitMiddlewareBackendSetting:
         assert isinstance(mw._backend, InMemoryRateLimitBackend)  # pylint: disable=protected-access
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={
+        FRISIAN_MCP_RATE_LIMIT={
             "rate": "5/s",
             "key": "user_id",
             "backend": "not_a_valid.module.path",
@@ -195,7 +195,7 @@ class TestRateLimitMiddlewareBackendSetting:
             RateLimitMiddleware()
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={
+        FRISIAN_MCP_RATE_LIMIT={
             "rate": "5/s",
             "key": "user_id",
             "backend": "nodot",

@@ -3,7 +3,7 @@ requires = ["setuptools>=65"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "friese-mcp"
+name = "frisian-mcp"
 version = "0.9.51"
 description = "The Django MCP gateway that discovers your API automatically — zero boilerplate, auto-discovery, dispatcher pattern, OAuth 2.0"
 readme = "README.md"
@@ -50,16 +50,16 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Jeremy-Friese/friese-mcp"
-Repository = "https://github.com/Jeremy-Friese/friese-mcp"
-"Bug Tracker" = "https://github.com/Jeremy-Friese/friese-mcp/issues"
+Homepage = "https://github.com/Jeremy-Friese/frisian-mcp"
+Repository = "https://github.com/Jeremy-Friese/frisian-mcp"
+"Bug Tracker" = "https://github.com/Jeremy-Friese/frisian-mcp/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["friese_mcp*"]
+include = ["frisian_mcp*"]
 
 [tool.setuptools.package-data]
-"friese_mcp" = ["**/*.html", "**/*.txt", "**/*.css", "**/*.js"]
+"frisian_mcp" = ["**/*.html", "**/*.txt", "**/*.css", "**/*.js"]
 
 # ---------------------------------------------------------------------------
 # black
@@ -74,7 +74,7 @@ target-version = ["py311", "py312", "py313"]
 [tool.isort]
 profile = "black"
 line_length = 100
-known_first_party = ["friese_mcp"]
+known_first_party = ["frisian_mcp"]
 
 # ---------------------------------------------------------------------------
 # ruff
@@ -106,10 +106,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["friese_mcp"]
+known-first-party = ["frisian_mcp"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/friese_mcp/__init__.py" = ["D"]
+"src/frisian_mcp/__init__.py" = ["D"]
 "src/**/migrations/**" = [
     "D",       # docstrings not required in auto-generated migration files
     "E501",    # long lines in auto-generated help_text strings are acceptable
@@ -147,14 +147,14 @@ module = "tests.*"
 disallow_untyped_decorators = false
 
 [tool.django-stubs]
-django_settings_module = "friese_mcp.test_settings"
+django_settings_module = "frisian_mcp.test_settings"
 
 # ---------------------------------------------------------------------------
 # pylint
 # ---------------------------------------------------------------------------
 [tool.pylint.main]
 load-plugins = ["pylint_django"]
-django-settings-module = "friese_mcp.test_settings"
+django-settings-module = "frisian_mcp.test_settings"
 ignore-paths = ["src/.*/migrations/"]
 
 [tool.pylint.format]
@@ -177,7 +177,7 @@ disable = [
 # pytest
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "friese_mcp.test_settings"
+DJANGO_SETTINGS_MODULE = "frisian_mcp.test_settings"
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

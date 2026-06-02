@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 from rest_framework.permissions import BasePermission
 
-import friese_mcp
-from friese_mcp.registry import ToolRegistry, register, tool_registry
+import frisian_mcp
+from frisian_mcp.registry import ToolRegistry, register, tool_registry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,15 +40,15 @@ def _request() -> MagicMock:
 
 
 class TestRegisterFunction:
-    """Tests for friese_mcp.registry.register()."""
+    """Tests for frisian_mcp.registry.register()."""
 
     def test_register_is_importable_from_registry(self) -> None:
-        """Register is importable directly from friese_mcp.registry."""
+        """Register is importable directly from frisian_mcp.registry."""
         assert callable(register)
 
     def test_register_is_importable_from_package(self) -> None:
-        """Register is importable from the friese_mcp package namespace."""
-        assert callable(friese_mcp.register)
+        """Register is importable from the frisian_mcp package namespace."""
+        assert callable(frisian_mcp.register)
 
     def test_register_adds_tool_to_global_registry(self) -> None:
         """register() adds the tool to tool_registry so it appears in tools/list."""

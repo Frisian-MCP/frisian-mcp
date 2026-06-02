@@ -1,5 +1,5 @@
 """
-PKG-26 — FRIESE_MCP_TOOL_HINTS setting for dispatcher help text.
+PKG-26 — FRISIAN_MCP_TOOL_HINTS setting for dispatcher help text.
 
 Operators can specify hint strings per tool name that surface in
 group dispatcher ``action='help'`` responses, guiding agents on
@@ -15,8 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import RequestFactory
 
-from friese_mcp.backends.group_dispatcher import build_group_help, make_group_invoke
-from friese_mcp.registry import ToolRegistry
+from frisian_mcp.backends.group_dispatcher import build_group_help, make_group_invoke
+from frisian_mcp.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures (mirrors test_group_dispatcher.py conventions)
@@ -155,26 +155,26 @@ class TestBuildGroupHelpResourceScoped:
 
 
 # ---------------------------------------------------------------------------
-# make_group_invoke — FRIESE_MCP_TOOL_HINTS setting integration
+# make_group_invoke — FRISIAN_MCP_TOOL_HINTS setting integration
 # ---------------------------------------------------------------------------
 
 
 class TestMakeGroupInvokeHints:
-    """make_group_invoke reads FRIESE_MCP_TOOL_HINTS and surfaces them via help."""
+    """make_group_invoke reads FRISIAN_MCP_TOOL_HINTS and surfaces them via help."""
 
     def test_hints_from_setting_appear_in_help(
         self, registry: ToolRegistry, rf: RequestFactory
     ) -> None:
-        """FRIESE_MCP_TOOL_HINTS entries for group tools appear in help payload."""
+        """FRISIAN_MCP_TOOL_HINTS entries for group tools appear in help payload."""
         invoke = make_group_invoke(
             "svc",
             frozenset({"item_list", "item_create"}),
             registry,
         )
         hints_setting = {"item_create": "Create setup first."}
-        with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_TOOL_HINTS = hints_setting
-            mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
+        with patch("frisian_mcp.backends.group_dispatcher.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_TOOL_HINTS = hints_setting
+            mock_settings.FRISIAN_MCP_TOOL_NAME_SEPARATOR = "_"
             result = invoke({"action": "help"}, _req(rf))
         assert result["hints"]["item_create"] == "Create setup first."
 
@@ -191,9 +191,9 @@ class TestMakeGroupInvokeHints:
             "item_list": "Svc hint.",
             "prefix.create": "IPAM hint — different group.",
         }
-        with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_TOOL_HINTS = hints_setting
-            mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
+        with patch("frisian_mcp.backends.group_dispatcher.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_TOOL_HINTS = hints_setting
+            mock_settings.FRISIAN_MCP_TOOL_NAME_SEPARATOR = "_"
             result = invoke({"action": "help"}, _req(rf))
         assert "prefix.create" not in result.get("hints", {})
         assert result["hints"]["item_list"] == "Svc hint."
@@ -201,22 +201,22 @@ class TestMakeGroupInvokeHints:
     def test_no_hints_setting_produces_no_hints_key(
         self, registry: ToolRegistry, rf: RequestFactory
     ) -> None:
-        """When FRIESE_MCP_TOOL_HINTS is absent, 'hints' key is absent."""
+        """When FRISIAN_MCP_TOOL_HINTS is absent, 'hints' key is absent."""
         invoke = make_group_invoke("svc", frozenset({"item_list"}), registry)
-        with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
-            del mock_settings.FRIESE_MCP_TOOL_HINTS
-            mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
+        with patch("frisian_mcp.backends.group_dispatcher.settings") as mock_settings:
+            del mock_settings.FRISIAN_MCP_TOOL_HINTS
+            mock_settings.FRISIAN_MCP_TOOL_NAME_SEPARATOR = "_"
             result = invoke({"action": "help"}, _req(rf))
         assert "hints" not in result
 
     def test_none_hints_setting_produces_no_hints_key(
         self, registry: ToolRegistry, rf: RequestFactory
     ) -> None:
-        """FRIESE_MCP_TOOL_HINTS=None is treated as absent."""
+        """FRISIAN_MCP_TOOL_HINTS=None is treated as absent."""
         invoke = make_group_invoke("svc", frozenset({"item_list"}), registry)
-        with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_TOOL_HINTS = None
-            mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
+        with patch("frisian_mcp.backends.group_dispatcher.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_TOOL_HINTS = None
+            mock_settings.FRISIAN_MCP_TOOL_NAME_SEPARATOR = "_"
             result = invoke({"action": "help"}, _req(rf))
         assert "hints" not in result
 
@@ -230,9 +230,9 @@ class TestMakeGroupInvokeHints:
             registry,
         )
         hints_setting = {"item_create": "Needs role.", "container_list": "Check location_type."}
-        with patch("friese_mcp.backends.group_dispatcher.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_TOOL_HINTS = hints_setting
-            mock_settings.FRIESE_MCP_TOOL_NAME_SEPARATOR = "_"
+        with patch("frisian_mcp.backends.group_dispatcher.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_TOOL_HINTS = hints_setting
+            mock_settings.FRISIAN_MCP_TOOL_NAME_SEPARATOR = "_"
             result = invoke({"action": "help", "resource": "item"}, _req(rf))
         assert result["resource"] == "item"
         assert "item_create" in result["hints"]

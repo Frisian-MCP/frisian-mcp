@@ -6,7 +6,7 @@ import pytest
 from django.test import Client, override_settings
 from django.urls import URLResolver, clear_url_caches, get_resolver
 
-from friese_mcp.apps import (
+from frisian_mcp.apps import (
     _DEFAULT_HEALTHCHECK_PATHS,
     _HEALTHCHECK_AUTO_URL_ATTR,
     _MCP_AUTO_URL_ATTR,
@@ -111,13 +111,13 @@ class TestInstallMcpUrl:
         assert result is False
 
     @override_settings(ROOT_URLCONF="_test_empty_urlconf_fixture")
-    def test_skips_when_friese_mcp_urls_already_included(self, empty_urlconf: str) -> None:
-        """Returns False when friese_mcp.urls is already included (app_name match)."""
+    def test_skips_when_frisian_mcp_urls_already_included(self, empty_urlconf: str) -> None:
+        """Returns False when frisian_mcp.urls is already included (app_name match)."""
         from django.urls import include, re_path  # pylint: disable=import-outside-toplevel
 
         resolver = get_resolver()
         resolver.url_patterns.clear()
-        explicit = re_path(r"^mcp/?", include("friese_mcp.urls"))
+        explicit = re_path(r"^mcp/?", include("frisian_mcp.urls"))
         resolver.url_patterns.append(explicit)
         try:
             result = _install_mcp_url()
@@ -128,10 +128,10 @@ class TestInstallMcpUrl:
 
     @override_settings(
         ROOT_URLCONF="_test_empty_urlconf_fixture",
-        FRIESE_MCP_PATH="/api/mcp/",
+        FRISIAN_MCP_PATH="/api/mcp/",
     )
     def test_custom_path_strips_slashes(self, empty_urlconf: str) -> None:
-        """FRIESE_MCP_PATH is stripped of leading/trailing slashes before use."""
+        """FRISIAN_MCP_PATH is stripped of leading/trailing slashes before use."""
         resolver = get_resolver()
         resolver.url_patterns.clear()
         try:
@@ -205,19 +205,19 @@ class TestInstallHealthcheckUrls:
 
     @override_settings(
         ROOT_URLCONF="_test_empty_urlconf_fixture",
-        FRIESE_MCP_HEALTHCHECK_PATHS=[],
+        FRISIAN_MCP_HEALTHCHECK_PATHS=[],
     )
     def test_returns_zero_for_empty_paths(self, empty_urlconf: str) -> None:
-        """Returns 0 when FRIESE_MCP_HEALTHCHECK_PATHS is an empty list."""
+        """Returns 0 when FRISIAN_MCP_HEALTHCHECK_PATHS is an empty list."""
         result = _install_healthcheck_urls()
         assert result == 0
 
     @override_settings(
         ROOT_URLCONF="_test_empty_urlconf_fixture",
-        FRIESE_MCP_HEALTHCHECK_PATHS=["custom/health", "api/ping"],
+        FRISIAN_MCP_HEALTHCHECK_PATHS=["custom/health", "api/ping"],
     )
     def test_custom_paths_all_injected(self, empty_urlconf: str) -> None:
-        """Each path in FRIESE_MCP_HEALTHCHECK_PATHS gets its own URL pattern."""
+        """Each path in FRISIAN_MCP_HEALTHCHECK_PATHS gets its own URL pattern."""
         resolver = get_resolver()
         resolver.url_patterns.clear()
         try:

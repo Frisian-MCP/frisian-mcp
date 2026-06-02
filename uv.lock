@@ -219,7 +219,7 @@ wheels = [
 ]
 
 [[package]]
-name = "friese-mcp"
+name = "frisian-mcp"
 version = "0.9.51"
 source = { editable = "." }
 dependencies = [

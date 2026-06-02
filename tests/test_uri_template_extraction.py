@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from django.test import RequestFactory
 
-from friese_mcp.resources import (
+from frisian_mcp.resources import (
     ResourceDefinition,
     ResourceNotFoundError,
     ResourceRegistry,

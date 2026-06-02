@@ -22,8 +22,8 @@ from rest_framework import serializers, status
 from rest_framework.response import Response
 from rest_framework.viewsets import ViewSet
 
-from friese_mcp.backends.base import ToolDefinition
-from friese_mcp.backends.invocation import SyncInvocation
+from frisian_mcp.backends.base import ToolDefinition
+from frisian_mcp.backends.invocation import SyncInvocation
 
 # ---------------------------------------------------------------------------
 # In-memory store + ViewSet
@@ -472,7 +472,7 @@ class TestErrorEnvelopeHygiene:
 
     That string-in-string nesting comes from ``str()``-ing a DRF APIException
     whose ``.detail`` is itself a dict.  The fix unwraps ``.detail`` via
-    :func:`friese_mcp.backends.invocation._flatten_error_detail` so the
+    :func:`frisian_mcp.backends.invocation._flatten_error_detail` so the
     envelope carries a single flat human-readable string.
     """
 

@@ -7,12 +7,12 @@ from typing import Any
 from django.http import HttpRequest, HttpResponse
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.apps import (
+from frisian_mcp.apps import (
     COMMON_MIDDLEWARE_PATH,
     TRAILING_SLASH_MIDDLEWARE_PATH,
     _install_trailing_slash_middleware,
 )
-from friese_mcp.middleware import (
+from frisian_mcp.middleware import (
     DEFAULT_MCP_URL_PREFIX,
     McpTrailingSlashMiddleware,
     _get_mcp_url_prefix,
@@ -45,17 +45,17 @@ class TestUrlPrefixResolution:
         """Default prefix matches the documented constant."""
         assert _get_mcp_url_prefix() == DEFAULT_MCP_URL_PREFIX
 
-    @override_settings(FRIESE_MCP_URL_PREFIX="/api/mcp")
+    @override_settings(FRISIAN_MCP_URL_PREFIX="/api/mcp")
     def test_custom_prefix_normalised(self) -> None:
         """Custom prefix is returned verbatim when already normalised."""
         assert _get_mcp_url_prefix() == "/api/mcp"
 
-    @override_settings(FRIESE_MCP_URL_PREFIX="api/mcp")
+    @override_settings(FRISIAN_MCP_URL_PREFIX="api/mcp")
     def test_prefix_missing_leading_slash(self) -> None:
         """Leading slash is added when missing."""
         assert _get_mcp_url_prefix() == "/api/mcp"
 
-    @override_settings(FRIESE_MCP_URL_PREFIX="/api/mcp/")
+    @override_settings(FRISIAN_MCP_URL_PREFIX="/api/mcp/")
     def test_prefix_strips_trailing_slash(self) -> None:
         """Trailing slash is stripped for comparison stability."""
         assert _get_mcp_url_prefix() == "/api/mcp"
@@ -123,16 +123,16 @@ class TestMcpTrailingSlashMiddleware:
         assert request.path == original_path
         assert request.path_info == original_info
 
-    @override_settings(FRIESE_MCP_URL_PREFIX="/api/mcp")
+    @override_settings(FRISIAN_MCP_URL_PREFIX="/api/mcp")
     def test_respects_custom_prefix(self) -> None:
-        """A custom ``FRIESE_MCP_URL_PREFIX`` is honoured by the middleware."""
+        """A custom ``FRISIAN_MCP_URL_PREFIX`` is honoured by the middleware."""
         request = RequestFactory().post("/api/mcp/", content_type="application/json")
         middleware = _build()
         middleware(request)
         assert request.path_info == "/api/mcp"
         assert request.path == "/api/mcp"
 
-    @override_settings(FRIESE_MCP_URL_PREFIX="/api/mcp")
+    @override_settings(FRISIAN_MCP_URL_PREFIX="/api/mcp")
     def test_default_prefix_ignored_when_custom_set(self) -> None:
         """``/mcp/`` is not rewritten when the custom prefix is configured."""
         request = RequestFactory().post("/mcp/", content_type="application/json")
@@ -226,7 +226,7 @@ class TestInstallTrailingSlashMiddleware:
 
     @override_settings(
         MIDDLEWARE=[
-            "friese_mcp.middleware.McpTrailingSlashMiddleware",
+            "frisian_mcp.middleware.McpTrailingSlashMiddleware",
             "django.middleware.common.CommonMiddleware",
         ]
     )

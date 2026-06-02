@@ -10,9 +10,9 @@ from unittest.mock import patch
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.protocol import INVALID_PARAMS
-from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpView, _decode_cursor, _encode_cursor
+from frisian_mcp.protocol import INVALID_PARAMS
+from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.views import McpView, _decode_cursor, _encode_cursor
 
 _view = McpView.as_view()
 _rf = RequestFactory()
@@ -45,7 +45,7 @@ def _call(params: dict[str, Any] | None, registry: ToolRegistry) -> Any:
         content_type="application/json",
     )
     req.user = AnonymousUser()
-    with patch("friese_mcp.views.tool_registry", registry):
+    with patch("frisian_mcp.views.tool_registry", registry):
         resp = _view(req)
     return json.loads(resp.content)
 
@@ -82,7 +82,7 @@ class TestCursorHelpers:
 
 
 class TestToolsListNoPagination:
-    """Without FRIESE_MCP_TOOLS_PAGE_SIZE, existing behaviour is unchanged."""
+    """Without FRISIAN_MCP_TOOLS_PAGE_SIZE, existing behaviour is unchanged."""
 
     def test_no_page_size_returns_all_tools(self) -> None:
         """Without page size, all tools are returned."""
@@ -109,23 +109,23 @@ class TestToolsListNoPagination:
 
 
 class TestToolsListWithPagination:
-    """With FRIESE_MCP_TOOLS_PAGE_SIZE set, pagination is applied."""
+    """With FRISIAN_MCP_TOOLS_PAGE_SIZE set, pagination is applied."""
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=3)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=3)
     def test_first_page_returns_n_tools(self) -> None:
         """First page returns exactly page_size tools."""
         reg = _make_registry(7)
         data = _call({}, reg)
         assert len(data["result"]["tools"]) == 3
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=3)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=3)
     def test_first_page_includes_next_cursor(self) -> None:
         """First page includes nextCursor when more tools exist."""
         reg = _make_registry(7)
         data = _call({}, reg)
         assert "nextCursor" in data["result"]
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=3)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=3)
     def test_second_page_using_cursor(self) -> None:
         """Using nextCursor from page 1 returns the next page."""
         reg = _make_registry(7)
@@ -138,7 +138,7 @@ class TestToolsListWithPagination:
         names2 = {t["name"] for t in page2["result"]["tools"]}
         assert names1.isdisjoint(names2)
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=3)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=3)
     def test_last_page_has_no_next_cursor(self) -> None:
         """The final page does not include nextCursor."""
         reg = _make_registry(6)
@@ -147,7 +147,7 @@ class TestToolsListWithPagination:
         page2 = _call({"cursor": cursor}, reg)
         assert "nextCursor" not in page2["result"]
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=3)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=3)
     def test_all_tools_covered_across_pages(self) -> None:
         """Iterating all pages returns every tool exactly once."""
         reg = _make_registry(7)
@@ -163,7 +163,7 @@ class TestToolsListWithPagination:
         assert len(all_names) == 7
         assert len(set(all_names)) == 7
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=10)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=10)
     def test_page_size_larger_than_registry(self) -> None:
         """Page size larger than tool count returns all tools, no nextCursor."""
         reg = _make_registry(3)
@@ -171,14 +171,14 @@ class TestToolsListWithPagination:
         assert len(data["result"]["tools"]) == 3
         assert "nextCursor" not in data["result"]
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=5)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=5)
     def test_empty_registry_with_pagination(self) -> None:
         """Empty registry with pagination returns empty list, no nextCursor."""
         data = _call({}, _make_registry(0))
         assert data["result"]["tools"] == []
         assert "nextCursor" not in data["result"]
 
-    @override_settings(FRIESE_MCP_TOOLS_PAGE_SIZE=3)
+    @override_settings(FRISIAN_MCP_TOOLS_PAGE_SIZE=3)
     def test_invalid_cursor_returns_invalid_params(self) -> None:
         """An invalid cursor string returns INVALID_PARAMS error."""
         reg = _make_registry(5)

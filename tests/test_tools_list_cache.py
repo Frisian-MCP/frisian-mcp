@@ -1,4 +1,4 @@
-"""Tests for FRIESE_MCP_TOOLS_LIST_CACHE_TTL — optional tools/list caching."""
+"""Tests for FRISIAN_MCP_TOOLS_LIST_CACHE_TTL — optional tools/list caching."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
-from friese_mcp import invalidate_tools_list_cache
-from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import _TOOLS_LIST_CACHE_KEY, McpView
+from frisian_mcp import invalidate_tools_list_cache
+from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.views import _TOOLS_LIST_CACHE_KEY, McpView
 
 _rf = RequestFactory()
 _view = McpView.as_view()
@@ -45,19 +45,19 @@ def _isolated_registry(*tool_names: str) -> ToolRegistry:
 
 
 # ---------------------------------------------------------------------------
-# No-cache default behaviour (FRIESE_MCP_TOOLS_LIST_CACHE_TTL absent)
+# No-cache default behaviour (FRISIAN_MCP_TOOLS_LIST_CACHE_TTL absent)
 # ---------------------------------------------------------------------------
 
 
 class TestToolsListNoCacheDefault:
-    """Without FRIESE_MCP_TOOLS_LIST_CACHE_TTL, cache is never used."""
+    """Without FRISIAN_MCP_TOOLS_LIST_CACHE_TTL, cache is never used."""
 
     def test_no_cache_setting_does_not_call_cache_get(self) -> None:
-        """list_tools() is called directly when FRIESE_MCP_TOOLS_LIST_CACHE_TTL is absent."""
+        """list_tools() is called directly when FRISIAN_MCP_TOOLS_LIST_CACHE_TTL is absent."""
         reg = _isolated_registry("alpha.ping")
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             _view(_tools_list_request())
         mock_cache.get.assert_not_called()
@@ -65,7 +65,7 @@ class TestToolsListNoCacheDefault:
     def test_no_cache_returns_tools(self) -> None:
         """Without caching, tools are still returned correctly."""
         reg = _isolated_registry("alpha.ping")
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = _view(_tools_list_request())
         data = json.loads(resp.content)
         names = [t["name"] for t in data["result"]["tools"]]
@@ -73,20 +73,20 @@ class TestToolsListNoCacheDefault:
 
 
 # ---------------------------------------------------------------------------
-# Cache enabled — FRIESE_MCP_TOOLS_LIST_CACHE_TTL set
+# Cache enabled — FRISIAN_MCP_TOOLS_LIST_CACHE_TTL set
 # ---------------------------------------------------------------------------
 
 
 class TestToolsListCacheEnabled:
-    """FRIESE_MCP_TOOLS_LIST_CACHE_TTL enables cache read/write."""
+    """FRISIAN_MCP_TOOLS_LIST_CACHE_TTL enables cache read/write."""
 
-    @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
+    @override_settings(FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=60)
     def test_cache_miss_calls_list_tools_and_populates_cache(self) -> None:
         """On a cache miss, list_tools() is called and result stored with correct TTL."""
         reg = _isolated_registry("beta.call")
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
             _view(_tools_list_request())
@@ -96,14 +96,14 @@ class TestToolsListCacheEnabled:
         assert args[0][0] == f"{_TOOLS_LIST_CACHE_KEY}:read"
         assert args[0][2] == 60
 
-    @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
+    @override_settings(FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=60)
     def test_cache_hit_skips_list_tools(self) -> None:
         """On a cache hit, list_tools() is not called (no registry read)."""
         reg = _isolated_registry("gamma.go")
         cached_tools = [{"name": "cached.tool", "description": "From cache", "inputSchema": {}}]
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
             patch.object(reg, "list_tools") as mock_list,
         ):
             mock_cache.get.return_value = cached_tools
@@ -113,52 +113,52 @@ class TestToolsListCacheEnabled:
         names = [t["name"] for t in data["result"]["tools"]]
         assert "cached.tool" in names
 
-    @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
+    @override_settings(FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=60)
     def test_cache_key_is_correct(self) -> None:
         """Cache reads use the _TOOLS_LIST_CACHE_KEY constant."""
         reg = _isolated_registry()
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
             _view(_tools_list_request())
         mock_cache.get.assert_called_once_with(f"{_TOOLS_LIST_CACHE_KEY}:read")
 
-    @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
+    @override_settings(FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=60)
     def test_cache_ttl_matches_setting(self) -> None:
-        """Cache is set with TTL equal to FRIESE_MCP_TOOLS_LIST_CACHE_TTL."""
+        """Cache is set with TTL equal to FRISIAN_MCP_TOOLS_LIST_CACHE_TTL."""
         reg = _isolated_registry("tool.a")
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
             _view(_tools_list_request())
         _, _, ttl = mock_cache.set.call_args[0]
         assert ttl == 60
 
-    @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=300)
+    @override_settings(FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=300)
     def test_different_ttl_is_forwarded(self) -> None:
-        """A different FRIESE_MCP_TOOLS_LIST_CACHE_TTL value is forwarded to cache.set."""
+        """A different FRISIAN_MCP_TOOLS_LIST_CACHE_TTL value is forwarded to cache.set."""
         reg = _isolated_registry("tool.b")
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
             _view(_tools_list_request())
         _, _, ttl = mock_cache.set.call_args[0]
         assert ttl == 300
 
-    @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
+    @override_settings(FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=60)
     def test_cache_not_set_on_cache_hit(self) -> None:
         """cache.set is not called when cache.get returns a hit."""
         reg = _isolated_registry("tool.c")
         cached_tools = [{"name": "cached.tool", "description": "", "inputSchema": {}}]
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = cached_tools
             _view(_tools_list_request())
@@ -175,22 +175,22 @@ class TestToolsListCacheBypassForAgentFilter:
     """Cache is bypassed when per-agent allowed_tools filtering is active."""
 
     @override_settings(
-        FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60,
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[
-            "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication"
+        FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=60,
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[
+            "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"
         ],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
     )
     def test_filtered_response_does_not_read_cache(self) -> None:
         """When an AgentConnection has allowed_tools, cache.get is not called."""
-        from friese_mcp.contrib.agents.models import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.agents.models import (  # pylint: disable=import-outside-toplevel
             AgentConnection,
         )
-        from friese_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
-            FrieseMcpToken,
+        from frisian_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            FrisianMcpToken,
         )
 
-        token = FrieseMcpToken.objects.create(name="tok")
+        token = FrisianMcpToken.objects.create(name="tok")
         AgentConnection.objects.create(
             name="filtered-agent",
             token=token,
@@ -198,8 +198,8 @@ class TestToolsListCacheBypassForAgentFilter:
         )
         reg = _isolated_registry("alpha.ping", "beta.pong")
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             req = _rf.post(
                 "/mcp/",
@@ -212,17 +212,17 @@ class TestToolsListCacheBypassForAgentFilter:
             _view(req)
         mock_cache.get.assert_not_called()
 
-    @override_settings(FRIESE_MCP_TOOLS_LIST_CACHE_TTL=60)
+    @override_settings(FRISIAN_MCP_TOOLS_LIST_CACHE_TTL=60)
     def test_null_allowed_tools_uses_cache(self) -> None:
         """An AgentConnection with allowed_tools=None does not bypass the cache."""
-        from friese_mcp.contrib.agents.models import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.agents.models import (  # pylint: disable=import-outside-toplevel
             AgentConnection,
         )
-        from friese_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
-            FrieseMcpToken,
+        from frisian_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            FrisianMcpToken,
         )
 
-        token = FrieseMcpToken.objects.create(name="tok2")
+        token = FrisianMcpToken.objects.create(name="tok2")
         AgentConnection.objects.create(
             name="unrestricted-agent",
             token=token,
@@ -230,13 +230,13 @@ class TestToolsListCacheBypassForAgentFilter:
         )
         reg = _isolated_registry("alpha.ping")
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views.django_cache") as mock_cache,
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
             override_settings(
-                FRIESE_MCP_AUTHENTICATION_CLASSES=[
-                    "friese_mcp.contrib.tokens.authentication.FrieseMcpTokenAuthentication"
+                FRISIAN_MCP_AUTHENTICATION_CLASSES=[
+                    "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"
                 ],
-                FRIESE_MCP_PERMISSION_CLASSES=[],
+                FRISIAN_MCP_PERMISSION_CLASSES=[],
             ),
         ):
             mock_cache.get.return_value = None
@@ -262,7 +262,7 @@ class TestInvalidateToolsListCache:
 
     def test_calls_cache_delete_many_with_all_tier_keys(self) -> None:
         """cache.delete_many is called with all per-tier keys."""
-        with patch("friese_mcp.views.django_cache") as mock_cache:
+        with patch("frisian_mcp.views.django_cache") as mock_cache:
             invalidate_tools_list_cache()
         mock_cache.delete_many.assert_called_once()
         deleted_keys = mock_cache.delete_many.call_args[0][0]
@@ -272,7 +272,7 @@ class TestInvalidateToolsListCache:
         assert f"{_TOOLS_LIST_CACHE_KEY}:admin" in deleted_keys
 
     def test_importable_from_package_root(self) -> None:
-        """invalidate_tools_list_cache is exported from the friese_mcp package."""
-        import friese_mcp  # pylint: disable=import-outside-toplevel
+        """invalidate_tools_list_cache is exported from the frisian_mcp package."""
+        import frisian_mcp  # pylint: disable=import-outside-toplevel
 
-        assert callable(friese_mcp.invalidate_tools_list_cache)
+        assert callable(frisian_mcp.invalidate_tools_list_cache)

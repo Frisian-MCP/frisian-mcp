@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from friese_mcp.registry import ToolInputError, ToolRegistry
+from frisian_mcp.registry import ToolInputError, ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers

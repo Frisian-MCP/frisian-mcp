@@ -7,7 +7,7 @@ Covers two mechanisms:
    underlying model field is NOT NULL / no default, marking them required
    even when the DRF serializer says ``required=False``.
 
-2. ``FRIESE_MCP_REQUIRED_FIELD_OVERRIDES`` setting applied via
+2. ``FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES`` setting applied via
    ``_apply_required_overrides``: operator escape hatch for fields that
    introspection cannot detect (computed properties, GenericForeignKeys, etc.).
 """
@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 from rest_framework import serializers
 from rest_framework.relations import PrimaryKeyRelatedField, SlugRelatedField
 
-from friese_mcp.backends.discovery import (
+from frisian_mcp.backends.discovery import (
     _apply_required_overrides,
     _infer_required,
 )
@@ -150,11 +150,11 @@ class TestApplyRequiredOverrides:
     """Unit tests for _apply_required_overrides."""
 
     def test_override_adds_field_to_required(self) -> None:
-        """Field listed in FRIESE_MCP_REQUIRED_FIELD_OVERRIDES is added to required."""
+        """Field listed in FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES is added to required."""
         schema: dict[str, Any] = {"type": "object", "properties": {"status": {"type": "string"}}}
         overrides = {"devices.create": ["status"]}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = overrides
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = overrides
             _apply_required_overrides(schema, "devices.create")
         assert "status" in schema["required"]
 
@@ -162,8 +162,8 @@ class TestApplyRequiredOverrides:
         """Override for a different tool name must not affect the current tool."""
         schema: dict[str, Any] = {"type": "object", "properties": {}}
         overrides = {"devices.create": ["status"]}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = overrides
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = overrides
             _apply_required_overrides(schema, "interfaces.create")
         assert "required" not in schema
 
@@ -171,33 +171,33 @@ class TestApplyRequiredOverrides:
         """A field already in required is not duplicated by the override."""
         schema: dict[str, Any] = {"type": "object", "properties": {}, "required": ["status"]}
         overrides = {"devices.create": ["status", "name"]}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = overrides
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = overrides
             _apply_required_overrides(schema, "devices.create")
         assert schema["required"].count("status") == 1
         assert "name" in schema["required"]
 
     def test_setting_absent_is_noop(self) -> None:
-        """When FRIESE_MCP_REQUIRED_FIELD_OVERRIDES is not defined, schema is unchanged."""
+        """When FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES is not defined, schema is unchanged."""
         schema: dict[str, Any] = {"type": "object", "properties": {}}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            del mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            del mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES
             _apply_required_overrides(schema, "devices.create")
         assert "required" not in schema
 
     def test_empty_override_dict_is_noop(self) -> None:
         """An empty override dict leaves the schema unchanged."""
         schema: dict[str, Any] = {"type": "object", "properties": {}}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = {}
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = {}
             _apply_required_overrides(schema, "devices.create")
         assert "required" not in schema
 
     def test_none_setting_treated_as_empty(self) -> None:
-        """FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = None is treated as no overrides."""
+        """FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = None is treated as no overrides."""
         schema: dict[str, Any] = {"type": "object", "properties": {}}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = None
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = None
             _apply_required_overrides(schema, "devices.create")
         assert "required" not in schema
 
@@ -205,8 +205,8 @@ class TestApplyRequiredOverrides:
         """Multiple override fields are all added to required."""
         schema: dict[str, Any] = {"type": "object", "properties": {}}
         overrides = {"devices.create": ["status", "role", "location"]}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = overrides
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = overrides
             _apply_required_overrides(schema, "devices.create")
         assert set(schema["required"]) == {"status", "role", "location"}
 
@@ -214,8 +214,8 @@ class TestApplyRequiredOverrides:
         """_apply_required_overrides modifies the schema dict in place (no return value)."""
         schema: dict[str, Any] = {"type": "object", "properties": {}}
         overrides = {"devices.create": ["status"]}
-        with patch("friese_mcp.backends.discovery.settings") as mock_settings:
-            mock_settings.FRIESE_MCP_REQUIRED_FIELD_OVERRIDES = overrides
+        with patch("frisian_mcp.backends.discovery.settings") as mock_settings:
+            mock_settings.FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES = overrides
             _apply_required_overrides(schema, "devices.create")
         # Mutation is visible on the original dict; function returns None implicitly
         assert "status" in schema["required"]

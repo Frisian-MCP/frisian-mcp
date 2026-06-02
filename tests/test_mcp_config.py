@@ -38,32 +38,32 @@ class TestMcpConfigCommand:
         assert "mcpServers" in data
 
     def test_default_server_name(self) -> None:
-        """Without FRIESE_MCP_SERVER_NAME, server key defaults to 'friese-mcp'."""
+        """Without FRISIAN_MCP_SERVER_NAME, server key defaults to 'frisian-mcp'."""
         data = self._run()
-        assert "friese-mcp" in data["mcpServers"]
+        assert "frisian-mcp" in data["mcpServers"]
 
     def test_custom_server_name(self) -> None:
-        """FRIESE_MCP_SERVER_NAME is used as the server key in mcpServers."""
-        data = self._run(FRIESE_MCP_SERVER_NAME="my-app")
+        """FRISIAN_MCP_SERVER_NAME is used as the server key in mcpServers."""
+        data = self._run(FRISIAN_MCP_SERVER_NAME="my-app")
         assert "my-app" in data["mcpServers"]
-        assert "friese-mcp" not in data["mcpServers"]
+        assert "frisian-mcp" not in data["mcpServers"]
 
     def test_default_url(self) -> None:
-        """Without FRIESE_MCP_BASE_URL or --url, defaults to localhost:8000/mcp/."""
+        """Without FRISIAN_MCP_BASE_URL or --url, defaults to localhost:8000/mcp/."""
         data = self._run()
         server = next(iter(data["mcpServers"].values()))
         assert server["url"] == "http://localhost:8000/mcp/"
 
     def test_settings_url(self) -> None:
-        """FRIESE_MCP_BASE_URL setting is used when present."""
-        data = self._run(FRIESE_MCP_BASE_URL="https://api.example.com/mcp/")
+        """FRISIAN_MCP_BASE_URL setting is used when present."""
+        data = self._run(FRISIAN_MCP_BASE_URL="https://api.example.com/mcp/")
         server = next(iter(data["mcpServers"].values()))
         assert server["url"] == "https://api.example.com/mcp/"
 
     def test_url_flag_overrides_settings(self) -> None:
-        """--url CLI flag takes precedence over FRIESE_MCP_BASE_URL setting."""
+        """--url CLI flag takes precedence over FRISIAN_MCP_BASE_URL setting."""
         buf = io.StringIO()
-        with override_settings(FRIESE_MCP_BASE_URL="https://settings.example.com/mcp/"):
+        with override_settings(FRISIAN_MCP_BASE_URL="https://settings.example.com/mcp/"):
             call_command("mcp_config", "--url", "https://flag.example.com/mcp/", stdout=buf)
         data = json.loads(buf.getvalue())
         server = next(iter(data["mcpServers"].values()))
@@ -83,11 +83,11 @@ class TestMcpConfigCommand:
         """--name overrides the mcpServers entry key."""
         data = self._run("--name", "my-mcp")
         assert "my-mcp" in data["mcpServers"]
-        assert "friese-mcp" not in data["mcpServers"]
+        assert "frisian-mcp" not in data["mcpServers"]
 
     def test_name_flag_overrides_settings_name(self) -> None:
-        """--name takes precedence over FRIESE_MCP_SERVER_NAME."""
-        data = self._run("--name", "cli-name", FRIESE_MCP_SERVER_NAME="settings-name")
+        """--name takes precedence over FRISIAN_MCP_SERVER_NAME."""
+        data = self._run("--name", "cli-name", FRISIAN_MCP_SERVER_NAME="settings-name")
         assert "cli-name" in data["mcpServers"]
 
     # ------------------------------------------------------------------

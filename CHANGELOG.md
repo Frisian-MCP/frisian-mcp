@@ -13,18 +13,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`McpEndpointView` alias dropped.** The `McpEndpointView` name (a backward-compatible alias
   for `McpView` introduced during the rename) has been removed before the 1.0 release. Update
-  any imports: `from friese_mcp.views import McpView`.
+  any imports: `from frisian_mcp.views import McpView`.
 
 ### Security
 
-- **AUTH-4 — Token hashing:** `FrieseMcpToken.token` and `OAuthClient.client_secret` are
+- **AUTH-4 — Token hashing:** `FrisianMcpToken.token` and `OAuthClient.client_secret` are
   now stored as HMAC-SHA256 keyed by `SECRET_KEY` instead of plaintext.  The raw value is
   shown exactly once at creation time via the `_raw_token` / `_raw_client_secret` instance
   attribute (available immediately after `save()`, absent after a DB reload).
 
   **Migration note:** Existing tokens and OAuth clients created before this release are
   automatically invalidated — the stored plaintext no longer matches any HMAC lookup.
-  Regenerate all `FrieseMcpToken` and `OAuthClient` records after deploying this version.
+  Regenerate all `FrisianMcpToken` and `OAuthClient` records after deploying this version.
   No data migration is provided because the original plaintext values cannot be recovered
   from the database.
 

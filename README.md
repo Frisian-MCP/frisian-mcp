@@ -1,13 +1,13 @@
-# friese-mcp
+# frisian-mcp
 
 **The Django MCP gateway that discovers your API automatically.**
 
-friese-mcp turns your existing Django REST Framework ViewSets into [Model Context Protocol](https://spec.modelcontextprotocol.io/) tools with zero boilerplate. Add the package, include one URL, and every ViewSet action becomes a callable MCP tool — name, description, and input schema derived from your serializers automatically.
+frisian-mcp turns your existing Django REST Framework ViewSets into [Model Context Protocol](https://spec.modelcontextprotocol.io/) tools with zero boilerplate. Add the package, include one URL, and every ViewSet action becomes a callable MCP tool — name, description, and input schema derived from your serializers automatically.
 
 **Version:** 0.1.0 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
 
 ```bash
-pip install friese-mcp
+pip install frisian-mcp
 ```
 
 ---
@@ -22,15 +22,15 @@ pip install friese-mcp
 | **`@mcp_tool`** | Explicit single-function tool registration for custom logic |
 | **`@mcp_resource`** | Expose server-side content via `resources/list` / `resources/read` |
 | **Filter introspection** | `SearchFilter`, `OrderingFilter`, `DjangoFilterBackend` → schema properties on `list` |
-| **Allowlist / denylist** | `FRIESE_MCP_TOOL_ALLOWLIST` / `FRIESE_MCP_TOOL_DENYLIST` for surgical surface control |
-| **Dispatch groups** | `FRIESE_MCP_DISPATCH_GROUPS` — bundle N tools into 1 dispatcher; `action="help"` for discovery |
+| **Allowlist / denylist** | `FRISIAN_MCP_TOOL_ALLOWLIST` / `FRISIAN_MCP_TOOL_DENYLIST` for surgical surface control |
+| **Dispatch groups** | `FRISIAN_MCP_DISPATCH_GROUPS` — bundle N tools into 1 dispatcher; `action="help"` for discovery |
 | **Deferred discovery** | URL scan fires on first request — captures late-loading plugin ViewSets |
 | **OAuth 2.0** | `contrib.oauth` — authorization code (PKCE) + client credentials; HMAC-hashed tokens |
 | **Static tokens** | `contrib.tokens` — HMAC-hashed Bearer tokens for internal agents |
 | **Per-agent scoping** | `contrib.agents` — per-credential tool allowlists; fail-closed on inactive connections |
-| **Permission tiers** | `FRIESE_MCP_TOKEN_TIER_MAP` / `FRIESE_MCP_MAX_TIER` — map roles to read/write gates |
+| **Permission tiers** | `FRISIAN_MCP_TOKEN_TIER_MAP` / `FRISIAN_MCP_MAX_TIER` — map roles to read/write gates |
 | **Host-app scoping** | `SyncInvocation` calls `viewset.initial()` — host RBAC, queryset filtering, and throttles enforced |
-| **Tool middleware** | `FRIESE_MCP_TOOL_MIDDLEWARE` — audit logging, rate limiting, heartbeats |
+| **Tool middleware** | `FRISIAN_MCP_TOOL_MIDDLEWARE` — audit logging, rate limiting, heartbeats |
 | **Rate limiting** | `RateLimitMiddleware` — built-in sliding-window, no Redis required |
 | **Pluggable backends** | Custom discovery and invocation backends via dotted-path settings |
 | **SSE support** | `Accept: text/event-stream` wraps any response in a single SSE event |
@@ -54,7 +54,7 @@ pip install friese-mcp
 # settings.py
 INSTALLED_APPS = [
     ...
-    "friese_mcp",
+    "frisian_mcp",
 ]
 ```
 
@@ -66,7 +66,7 @@ from django.urls import include, path
 
 urlpatterns = [
     ...
-    path("mcp/", include("friese_mcp.urls")),
+    path("mcp/", include("frisian_mcp.urls")),
 ]
 ```
 
@@ -91,7 +91,7 @@ python manage.py mcp_config --token mytoken123
 ```json
 {
   "mcpServers": {
-    "friese-mcp": {
+    "frisian-mcp": {
       "url": "http://localhost:8000/mcp/",
       "transport": "http",
       "headers": { "Authorization": "Bearer mytoken123" }
@@ -112,8 +112,8 @@ MCP Client
        ▼
 ┌──────────────────────────────────────────────────┐
 │  McpView  (DRF APIView)                           │
-│  ├─ Authentication  (FRIESE_MCP_AUTHENTICATION_CLASSES) │
-│  ├─ Permissions     (FRIESE_MCP_PERMISSION_CLASSES)     │
+│  ├─ Authentication  (FRISIAN_MCP_AUTHENTICATION_CLASSES) │
+│  ├─ Permissions     (FRISIAN_MCP_PERMISSION_CLASSES)     │
 │  └─ Method dispatch                              │
 │       ├─ initialize / initialized / ping / help  │
 │       ├─ tools/list  ──────────────── ToolRegistry │
@@ -145,10 +145,10 @@ MCP Client
 
 ## Dispatcher pattern
 
-For teams building purpose-built agent tools, friese-mcp ships the **`@mcp_dispatcher`** pattern: one MCP tool name routes to many actions internally.
+For teams building purpose-built agent tools, frisian-mcp ships the **`@mcp_dispatcher`** pattern: one MCP tool name routes to many actions internally.
 
 ```python
-from friese_mcp import mcp_dispatcher, mcp_action
+from frisian_mcp import mcp_dispatcher, mcp_action
 
 @mcp_dispatcher(name="tasks", description="Manage project tasks.")
 class TasksDispatcher:
@@ -167,21 +167,21 @@ One tool in `tools/list` instead of many. Call with `action="help"` for a struct
 
 This is the pattern for agent-facing APIs where tool count matters and progressive disclosure beats a flat list.
 
-For high-volume APIs, `FRIESE_MCP_DISPATCH_GROUPS` can automatically bundle existing auto-discovered tools into dispatchers with no extra code.
+For high-volume APIs, `FRISIAN_MCP_DISPATCH_GROUPS` can automatically bundle existing auto-discovered tools into dispatchers with no extra code.
 
 ---
 
 ## Authentication
 
-friese-mcp delegates authentication to DRF — any DRF authentication class works out of the box via `FRIESE_MCP_AUTHENTICATION_CLASSES`. Three ready-to-use contrib modules cover the most common cases:
+frisian-mcp delegates authentication to DRF — any DRF authentication class works out of the box via `FRISIAN_MCP_AUTHENTICATION_CLASSES`. Three ready-to-use contrib modules cover the most common cases:
 
 | Module | What it provides |
 |---|---|
-| `friese_mcp.contrib.tokens` | HMAC-hashed static Bearer tokens for internal agents and service accounts |
-| `friese_mcp.contrib.oauth` | Full OAuth 2.0 — authorization code (PKCE) + client credentials; redirect URI allowlist |
-| `friese_mcp.contrib.agents` | Per-credential tool allowlists; connections fail-closed when the credential is deactivated |
+| `frisian_mcp.contrib.tokens` | HMAC-hashed static Bearer tokens for internal agents and service accounts |
+| `frisian_mcp.contrib.oauth` | Full OAuth 2.0 — authorization code (PKCE) + client credentials; redirect URI allowlist |
+| `frisian_mcp.contrib.agents` | Per-credential tool allowlists; connections fail-closed when the credential is deactivated |
 
-Gateway-level access is controlled by `FRIESE_MCP_PERMISSION_CLASSES`. Tool-level access is controlled by permission tiers (`read` / `write` / `admin`) mapped via `FRIESE_MCP_TOKEN_TIER_MAP`. Use `FRIESE_MCP_MAX_TIER` to cap all callers on an endpoint regardless of their credential tier.
+Gateway-level access is controlled by `FRISIAN_MCP_PERMISSION_CLASSES`. Tool-level access is controlled by permission tiers (`read` / `write` / `admin`) mapped via `FRISIAN_MCP_TOKEN_TIER_MAP`. Use `FRISIAN_MCP_MAX_TIER` to cap all callers on an endpoint regardless of their credential tier.
 
 ---
 

@@ -1,8 +1,8 @@
 """
-Tests for FRIESE_MCP_RESOLVE_TIER hook + FRIESE_MCP_TOKEN_TIER_MAP role map.
+Tests for FRISIAN_MCP_RESOLVE_TIER hook + FRISIAN_MCP_TOKEN_TIER_MAP role map.
 
 Covers PKG-15 — bridging host-app tokens (which lack ``.permission``) to a
-friese-mcp tier so authenticated users are not silently capped at ``"read"``.
+frisian-mcp tier so authenticated users are not silently capped at ``"read"``.
 """
 
 # pylint: disable=redefined-outer-name
@@ -15,8 +15,8 @@ from unittest.mock import MagicMock
 import pytest
 from django.test import RequestFactory
 
-from friese_mcp.registry import _resolve_request_tier
-from friese_mcp.views import _get_token_permission
+from frisian_mcp.registry import _resolve_request_tier
+from frisian_mcp.views import _get_token_permission
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -66,16 +66,16 @@ class TestBaselineBackwardsCompat:
     """With no PKG-15 settings configured, behaviour matches the prior contract."""
 
     def test_unauthenticated_uses_unauth_setting(self, rf: RequestFactory, settings: Any) -> None:
-        """request.auth=None falls through to FRIESE_MCP_UNAUTHENTICATED_TIER."""
-        settings.FRIESE_MCP_UNAUTHENTICATED_TIER = "read"
+        """request.auth=None falls through to FRISIAN_MCP_UNAUTHENTICATED_TIER."""
+        settings.FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
         assert _resolve_request_tier(_build_request(rf, auth=None)) == "read"
 
     def test_unauthenticated_default_when_setting_absent(
         self, rf: RequestFactory, settings: Any
     ) -> None:
-        """Default fallback is 'read' when FRIESE_MCP_UNAUTHENTICATED_TIER is unset."""
-        if hasattr(settings, "FRIESE_MCP_UNAUTHENTICATED_TIER"):
-            del settings.FRIESE_MCP_UNAUTHENTICATED_TIER
+        """Default fallback is 'read' when FRISIAN_MCP_UNAUTHENTICATED_TIER is unset."""
+        if hasattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER"):
+            del settings.FRISIAN_MCP_UNAUTHENTICATED_TIER
         assert _resolve_request_tier(_build_request(rf, auth=None)) == "read"
 
     def test_token_with_permission_attr_wins(self, rf: RequestFactory) -> None:
@@ -98,7 +98,7 @@ class TestBaselineBackwardsCompat:
 
 
 # ---------------------------------------------------------------------------
-# FRIESE_MCP_RESOLVE_TIER callable hook
+# FRISIAN_MCP_RESOLVE_TIER callable hook
 # ---------------------------------------------------------------------------
 
 
@@ -118,20 +118,20 @@ def _hook_raises(_request: Any) -> str:
 
 
 class TestResolveTierHook:
-    """settings.FRIESE_MCP_RESOLVE_TIER is the highest-priority resolver."""
+    """settings.FRISIAN_MCP_RESOLVE_TIER is the highest-priority resolver."""
 
     def test_callable_hook_wins_over_token_permission(
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """A callable hook overrides request.auth.permission."""
-        settings.FRIESE_MCP_RESOLVE_TIER = lambda request: "admin"
+        settings.FRISIAN_MCP_RESOLVE_TIER = lambda request: "admin"
         auth = MagicMock()
         auth.permission = "read"  # would lose to the hook
         assert _resolve_request_tier(_build_request(rf, auth=auth)) == "admin"
 
     def test_dotted_path_resolves(self, rf: RequestFactory, settings: Any) -> None:
         """A dotted-path string is import_string()-resolved."""
-        settings.FRIESE_MCP_RESOLVE_TIER = (
+        settings.FRISIAN_MCP_RESOLVE_TIER = (
             "tests.test_token_tier_resolution._hook_returns_admin"
         )
         assert _resolve_request_tier(_build_request(rf, auth=None)) == "admin"
@@ -140,7 +140,7 @@ class TestResolveTierHook:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """When the hook returns None, the next layer is consulted."""
-        settings.FRIESE_MCP_RESOLVE_TIER = _hook_returns_none
+        settings.FRISIAN_MCP_RESOLVE_TIER = _hook_returns_none
         auth = MagicMock()
         auth.permission = "read_write"
         assert _resolve_request_tier(_build_request(rf, auth=auth)) == "read_write"
@@ -149,20 +149,20 @@ class TestResolveTierHook:
         self, rf: RequestFactory, settings: Any, caplog: Any
     ) -> None:
         """A raising hook is logged and treated as fall-through, not 500."""
-        settings.FRIESE_MCP_RESOLVE_TIER = _hook_raises
+        settings.FRISIAN_MCP_RESOLVE_TIER = _hook_raises
         auth = MagicMock()
         auth.permission = "read"
-        with caplog.at_level(logging.ERROR, logger="friese_mcp.registry"):
+        with caplog.at_level(logging.ERROR, logger="frisian_mcp.registry"):
             tier = _resolve_request_tier(_build_request(rf, auth=auth))
         assert tier == "read"
-        assert any("FRIESE_MCP_RESOLVE_TIER hook raised" in r.message for r in caplog.records)
+        assert any("FRISIAN_MCP_RESOLVE_TIER hook raised" in r.message for r in caplog.records)
 
     def test_unimportable_dotted_path_logged_and_ignored(
         self, rf: RequestFactory, settings: Any, caplog: Any
     ) -> None:
         """A bad dotted path is logged at ERROR and the chain continues."""
-        settings.FRIESE_MCP_RESOLVE_TIER = "nonexistent.module.fn"
-        with caplog.at_level(logging.ERROR, logger="friese_mcp.registry"):
+        settings.FRISIAN_MCP_RESOLVE_TIER = "nonexistent.module.fn"
+        with caplog.at_level(logging.ERROR, logger="frisian_mcp.registry"):
             tier = _resolve_request_tier(_build_request(rf, auth=None))
         assert tier == "read"
         assert any("could not be imported" in r.message for r in caplog.records)
@@ -171,15 +171,15 @@ class TestResolveTierHook:
         self, rf: RequestFactory, settings: Any, caplog: Any
     ) -> None:
         """A bogus setting type (e.g. an int) is logged and ignored."""
-        settings.FRIESE_MCP_RESOLVE_TIER = 42
-        with caplog.at_level(logging.ERROR, logger="friese_mcp.registry"):
+        settings.FRISIAN_MCP_RESOLVE_TIER = 42
+        with caplog.at_level(logging.ERROR, logger="frisian_mcp.registry"):
             tier = _resolve_request_tier(_build_request(rf, auth=None))
         assert tier == "read"
         assert any("must be a callable or dotted-path" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
-# FRIESE_MCP_TOKEN_TIER_MAP role map
+# FRISIAN_MCP_TOKEN_TIER_MAP role map
 # ---------------------------------------------------------------------------
 
 
@@ -188,14 +188,14 @@ class TestTokenTierMap:
 
     def test_superuser_gets_mapped_tier(self, rf: RequestFactory, settings: Any) -> None:
         """is_superuser=True maps to the 'superuser' entry."""
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"superuser": "admin", "default": "read"}
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"superuser": "admin", "default": "read"}
         auth = MagicMock(spec=["__class__"])  # No .permission so role map is consulted
         req = _build_request(rf, auth=auth, user=_user(is_superuser=True))
         assert _resolve_request_tier(req) == "admin"
 
     def test_staff_gets_mapped_tier(self, rf: RequestFactory, settings: Any) -> None:
         """is_staff=True (without superuser) maps to the 'staff' entry."""
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"staff": "read_write", "default": "read"}
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"staff": "read_write", "default": "read"}
         auth = MagicMock(spec=["__class__"])
         req = _build_request(rf, auth=auth, user=_user(is_staff=True))
         assert _resolve_request_tier(req) == "read_write"
@@ -204,7 +204,7 @@ class TestTokenTierMap:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """Plain authenticated users (no superuser/staff) get the 'default' entry."""
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"default": "read_write"}
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"default": "read_write"}
         auth = MagicMock(spec=["__class__"])
         req = _build_request(rf, auth=auth, user=_user(is_authenticated=True))
         assert _resolve_request_tier(req) == "read_write"
@@ -213,8 +213,8 @@ class TestTokenTierMap:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """Unauthenticated callers must NOT receive the role-map default."""
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"default": "admin"}
-        settings.FRIESE_MCP_UNAUTHENTICATED_TIER = "read"
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"default": "admin"}
+        settings.FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
         # auth=None → unauthenticated path; default would be a security regression here.
         assert _resolve_request_tier(_build_request(rf, auth=None)) == "read"
 
@@ -222,7 +222,7 @@ class TestTokenTierMap:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """A superuser without a 'superuser' entry falls back to 'default'."""
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"default": "read"}
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"default": "read"}
         auth = MagicMock(spec=["__class__"])
         req = _build_request(rf, auth=auth, user=_user(is_superuser=True))
         assert _resolve_request_tier(req) == "read"
@@ -231,7 +231,7 @@ class TestTokenTierMap:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """An explicit token .permission wins over the role map."""
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"superuser": "admin"}
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"superuser": "admin"}
         auth = MagicMock()
         auth.permission = "read"
         req = _build_request(rf, auth=auth, user=_user(is_superuser=True))
@@ -239,7 +239,7 @@ class TestTokenTierMap:
 
     def test_empty_role_map_is_no_op(self, rf: RequestFactory, settings: Any) -> None:
         """An empty {} role map skips the lookup entirely."""
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {}
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {}
         auth = MagicMock(spec=["__class__"])
         req = _build_request(rf, auth=auth, user=_user(is_superuser=True))
         assert _resolve_request_tier(req) == "read"
@@ -255,8 +255,8 @@ class TestResolutionOrder:
 
     def test_hook_beats_role_map(self, rf: RequestFactory, settings: Any) -> None:
         """The callable hook is checked before the role map."""
-        settings.FRIESE_MCP_RESOLVE_TIER = lambda request: "admin"
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"default": "read"}
+        settings.FRISIAN_MCP_RESOLVE_TIER = lambda request: "admin"
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"default": "read"}
         auth = MagicMock(spec=["__class__"])
         req = _build_request(rf, auth=auth, user=_user(is_authenticated=True))
         assert _resolve_request_tier(req) == "admin"
@@ -265,8 +265,8 @@ class TestResolutionOrder:
         self, rf: RequestFactory, settings: Any
     ) -> None:
         """Hook returning None lets the role map resolve."""
-        settings.FRIESE_MCP_RESOLVE_TIER = _hook_returns_none
-        settings.FRIESE_MCP_TOKEN_TIER_MAP = {"superuser": "admin"}
+        settings.FRISIAN_MCP_RESOLVE_TIER = _hook_returns_none
+        settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"superuser": "admin"}
         auth = MagicMock(spec=["__class__"])
         req = _build_request(rf, auth=auth, user=_user(is_superuser=True))
         assert _resolve_request_tier(req) == "admin"
@@ -276,7 +276,7 @@ class TestResolutionOrder:
     ) -> None:
         """No hook + no token attr + no role map + no user → 'read'."""
         # Ensure no settings linger from prior tests.
-        for attr in ("FRIESE_MCP_RESOLVE_TIER", "FRIESE_MCP_TOKEN_TIER_MAP"):
+        for attr in ("FRISIAN_MCP_RESOLVE_TIER", "FRISIAN_MCP_TOKEN_TIER_MAP"):
             if hasattr(settings, attr):
                 delattr(settings, attr)
         auth = MagicMock(spec=["__class__"])

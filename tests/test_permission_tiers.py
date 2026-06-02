@@ -9,9 +9,9 @@ from unittest.mock import patch
 import pytest
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
-from friese_mcp.registry import ToolRegistry, _apply_max_tier_cap
-from friese_mcp.views import McpView, _get_token_permission
+from frisian_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
+from frisian_mcp.registry import ToolRegistry, _apply_max_tier_cap
+from frisian_mcp.views import McpView, _get_token_permission
 
 _rf = RequestFactory()
 _view = McpView.as_view()
@@ -64,7 +64,7 @@ class TestMcpActionPermissionTier:
     def test_default_action_is_read_tier(self) -> None:
         """@mcp_action with no write/admin kwargs defaults to permission_tier='read'."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("d1", description="Test dispatcher.")
             class _D:
@@ -108,7 +108,7 @@ class TestMcpToolPermissionTier:
     def test_write_true_registers_read_write_tier(self) -> None:
         """@mcp_tool(write=True) calls register with permission_tier='read_write'."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="write.tool", description="Write tool.", input_schema={}, write=True)
             def _fn(_a: Any, _r: Any) -> dict[str, Any]:
@@ -121,7 +121,7 @@ class TestMcpToolPermissionTier:
     def test_admin_true_registers_admin_tier(self) -> None:
         """@mcp_tool(admin=True) calls register with permission_tier='admin'."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="admin.tool", description="Admin tool.", input_schema={}, admin=True)
             def _fn(_a: Any, _r: Any) -> dict[str, Any]:
@@ -134,7 +134,7 @@ class TestMcpToolPermissionTier:
     def test_no_kwargs_registers_read_tier(self) -> None:
         """@mcp_tool with no write/admin defaults to permission_tier='read'."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="read.tool", description="Read tool.", input_schema={})
             def _fn(_a: Any, _r: Any) -> dict[str, Any]:
@@ -189,15 +189,15 @@ class TestToolsListTierFiltering:
         assert names == {"read.tool", "write.tool", "admin.tool"}
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
     )
     def test_view_passes_max_tier_to_list_tools(self) -> None:
         """_handle_tools_list calls list_tools with max_tier from _get_token_permission."""
         reg = self._make_registry()
         with (
-            patch("friese_mcp.views.tool_registry", reg),
-            patch("friese_mcp.views._get_token_permission", return_value="read"),
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views._get_token_permission", return_value="read"),
         ):
             resp = _view(_tools_list_request())
         data = json.loads(resp.content)
@@ -205,6 +205,37 @@ class TestToolsListTierFiltering:
         assert "read.tool" in names
         assert "write.tool" not in names
         assert "admin.tool" not in names
+
+    def test_tier_field_present_on_each_tool(self) -> None:
+        """Each tool dict returned by list_tools() includes a 'tier' key."""
+        reg = self._make_registry()
+        tools = reg.list_tools(max_tier=None)
+        for tool in tools:
+            assert "tier" in tool, f"Missing 'tier' on tool {tool['name']!r}"
+
+    def test_tier_field_matches_registered_tier(self) -> None:
+        """The 'tier' value in list_tools() matches the registered permission_tier."""
+        reg = self._make_registry()
+        by_name = {t["name"]: t for t in reg.list_tools(max_tier=None)}
+        assert by_name["read.tool"]["tier"] == "read"
+        assert by_name["write.tool"]["tier"] == "read_write"
+        assert by_name["admin.tool"]["tier"] == "admin"
+
+    @override_settings(
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+    )
+    def test_tier_field_present_in_view_response(self) -> None:
+        """tools/list HTTP response includes 'tier' on each tool."""
+        reg = self._make_registry()
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views._get_token_permission", return_value="admin"),
+        ):
+            resp = _view(_tools_list_request())
+        data = json.loads(resp.content)
+        for tool in data["result"]["tools"]:
+            assert "tier" in tool, f"Missing 'tier' on tool {tool['name']!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -251,16 +282,16 @@ class TestGetTokenPermission:
         req = self._req(_fake_auth("admin"))
         assert _get_token_permission(req) == "admin"
 
-    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="admin")
     def test_unauthenticated_tier_setting_overrides_default(self) -> None:
-        """FRIESE_MCP_UNAUTHENTICATED_TIER overrides the 'read' default for anon requests."""
+        """FRISIAN_MCP_UNAUTHENTICATED_TIER overrides the 'read' default for anon requests."""
         req = self._req()
         req.auth = None  # type: ignore[attr-defined]
         assert _get_token_permission(req) == "admin"
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
     )
     def test_unauthenticated_view_request_defaults_to_read_tier(self) -> None:
         """Unauthenticated tools/list only returns read-tier tools by default."""
@@ -269,7 +300,7 @@ class TestGetTokenPermission:
             ("write.tool", "read_write"),
             ("admin.tool", "admin"),
         )
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = _view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert "read.tool" in names
@@ -277,18 +308,18 @@ class TestGetTokenPermission:
         assert "admin.tool" not in names
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
-        FRIESE_MCP_UNAUTHENTICATED_TIER="admin",
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_UNAUTHENTICATED_TIER="admin",
     )
     def test_unauthenticated_tier_admin_setting_exposes_all_tools(self) -> None:
-        """FRIESE_MCP_UNAUTHENTICATED_TIER='admin' makes all tools visible unauthenticated."""
+        """FRISIAN_MCP_UNAUTHENTICATED_TIER='admin' makes all tools visible unauthenticated."""
         reg = _isolated_registry(
             ("read.tool", "read"),
             ("write.tool", "read_write"),
             ("admin.tool", "admin"),
         )
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = _view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert names == {"read.tool", "write.tool", "admin.tool"}
@@ -304,7 +335,7 @@ class TestDispatcherActionPermissionTier:
 
     def _build_registry_with_dispatcher(self) -> ToolRegistry:
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("tools", description="Mixed-tier dispatcher.")
             class _Tools:
@@ -393,18 +424,18 @@ class TestDispatcherActionPermissionTier:
         with pytest.raises(PermissionError, match="read_write"):
             reg.dispatch(request, "tools", {"action": "delete"})
 
-    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="admin")
     def test_unauthenticated_tier_admin_setting_allows_write_action(self) -> None:
-        """FRIESE_MCP_UNAUTHENTICATED_TIER='admin' lifts the unauthenticated tier ceiling."""
+        """FRISIAN_MCP_UNAUTHENTICATED_TIER='admin' lifts the unauthenticated tier ceiling."""
         reg = self._build_registry_with_dispatcher()
         request = _rf.get("/")
         request.auth = None  # type: ignore[attr-defined]
         assert reg.dispatch(request, "tools", {"action": "delete"}) == {"deleted": True}
         assert reg.dispatch(request, "tools", {"action": "nuke"}) == {"nuked": True}
 
-    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="read_write")
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="read_write")
     def test_unauthenticated_tier_read_write_allows_write_blocks_admin(self) -> None:
-        """FRIESE_MCP_UNAUTHENTICATED_TIER='read_write' allows write but not admin."""
+        """FRISIAN_MCP_UNAUTHENTICATED_TIER='read_write' allows write but not admin."""
         reg = self._build_registry_with_dispatcher()
         request = _rf.get("/")
         request.auth = None  # type: ignore[attr-defined]
@@ -430,7 +461,7 @@ class TestPlainToolExecutionTierEnforcement:
 
     def _build_registry(self) -> ToolRegistry:
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="things.read", description="Read.", input_schema={"type": "object"})
             def _r(_a: Any, _r2: Any) -> dict[str, Any]:
@@ -509,9 +540,9 @@ class TestPlainToolExecutionTierEnforcement:
         request.auth = _fake_auth("admin")  # type: ignore[attr-defined]
         assert reg.dispatch(request, "things.admin", {}) == {"ok": "admin"}
 
-    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="admin")
     def test_unauthenticated_tier_admin_lifts_block(self) -> None:
-        """FRIESE_MCP_UNAUTHENTICATED_TIER='admin' allows unauthenticated write/admin calls."""
+        """FRISIAN_MCP_UNAUTHENTICATED_TIER='admin' allows unauthenticated write/admin calls."""
         reg = self._build_registry()
         request = _rf.get("/")
         request.auth = None  # type: ignore[attr-defined]
@@ -529,7 +560,7 @@ class TestDispatcherInputSchemaTierFiltering:
 
     def _build_registry_with_mixed_dispatcher(self) -> ToolRegistry:
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("ops", description="Mixed-tier ops dispatcher.")
             class _Ops:
@@ -587,7 +618,7 @@ class TestDispatcherInputSchemaTierFiltering:
     ) -> None:
         """A dispatcher whose every action is admin-only is hidden from read callers."""
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("admin_only", description="Admin-only navigation.")
             class _AdminOnly:
@@ -623,7 +654,7 @@ class TestDispatcherHelpResponseTierFiltering:
 
     def _build_registry_with_dispatcher(self) -> ToolRegistry:
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("widgets", description="Widget operations.")
             class _Widgets:
@@ -668,9 +699,9 @@ class TestDispatcherHelpResponseTierFiltering:
         names = self._help_action_names(reg, auth=_fake_auth("admin"))
         assert names == {"get", "update", "delete_all"}
 
-    @override_settings(FRIESE_MCP_UNAUTHENTICATED_TIER="admin")
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="admin")
     def test_unauthenticated_tier_setting_overrides_help_filter(self) -> None:
-        """FRIESE_MCP_UNAUTHENTICATED_TIER='admin' exposes all actions in help."""
+        """FRISIAN_MCP_UNAUTHENTICATED_TIER='admin' exposes all actions in help."""
         reg = self._build_registry_with_dispatcher()
         names = self._help_action_names(reg, auth=None)
         assert names == {"get", "update", "delete_all"}
@@ -693,7 +724,7 @@ class TestDispatcherHelpResponseTierFiltering:
         field in the response (name, description, params, or input_schema).
         """
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("ops", description="Mixed-tier operations.")
             class _Ops:  # pylint: disable=unused-variable
@@ -751,7 +782,7 @@ class TestDispatcherHelpResponseTierFiltering:
         include action examples, this test fails.
         """
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_dispatcher("svc", description="Service operations.")
             class _Svc:  # pylint: disable=unused-variable
@@ -778,13 +809,13 @@ class TestDispatcherHelpResponseTierFiltering:
 
 
 # ---------------------------------------------------------------------------
-# FRIESE_MCP_MAX_TIER endpoint-level cap
+# FRISIAN_MCP_MAX_TIER endpoint-level cap
 # ---------------------------------------------------------------------------
 
 
 class TestEndpointMaxTierCap:
     r"""
-    FRIESE_MCP_MAX_TIER caps the effective permission tier at an endpoint.
+    FRISIAN_MCP_MAX_TIER caps the effective permission tier at an endpoint.
 
     The cap is stamped on ``request._mcp_max_tier`` by :meth:`McpView.post`
     and applied inside ``_resolve_request_tier`` via ``_apply_max_tier_cap``.
@@ -880,24 +911,24 @@ class TestEndpointMaxTierCap:
         assert _get_token_permission(req) == "read_write"
 
     # ------------------------------------------------------------------
-    # Via view — FRIESE_MCP_MAX_TIER setting caps tools/list response
+    # Via view — FRISIAN_MCP_MAX_TIER setting caps tools/list response
     # ------------------------------------------------------------------
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
-        FRIESE_MCP_UNAUTHENTICATED_TIER="read_write",
-        FRIESE_MCP_MAX_TIER="read",
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_UNAUTHENTICATED_TIER="read_write",
+        FRISIAN_MCP_MAX_TIER="read",
     )
     def test_setting_caps_read_write_caller_to_read_tools_only(self) -> None:
-        """FRIESE_MCP_MAX_TIER='read' shows only read tools even for a read_write caller."""
+        """FRISIAN_MCP_MAX_TIER='read' shows only read tools even for a read_write caller."""
         reg = _isolated_registry(
             ("read.tool", "read"),
             ("write.tool", "read_write"),
             ("admin.tool", "admin"),
         )
         view = McpView.as_view()
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert "read.tool" in names
@@ -905,19 +936,19 @@ class TestEndpointMaxTierCap:
         assert "admin.tool" not in names
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
-        FRIESE_MCP_UNAUTHENTICATED_TIER="read_write",
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_UNAUTHENTICATED_TIER="read_write",
     )
     def test_omitting_max_tier_setting_exposes_full_tier_tools(self) -> None:
-        """Without FRIESE_MCP_MAX_TIER, a read_write caller sees all read+write tools."""
+        """Without FRISIAN_MCP_MAX_TIER, a read_write caller sees all read+write tools."""
         reg = _isolated_registry(
             ("read.tool", "read"),
             ("write.tool", "read_write"),
             ("admin.tool", "admin"),
         )
         view = McpView.as_view()
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert "read.tool" in names
@@ -925,20 +956,20 @@ class TestEndpointMaxTierCap:
         assert "admin.tool" not in names
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
-        FRIESE_MCP_UNAUTHENTICATED_TIER="admin",
-        FRIESE_MCP_MAX_TIER="read_write",
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_UNAUTHENTICATED_TIER="admin",
+        FRISIAN_MCP_MAX_TIER="read_write",
     )
     def test_read_write_cap_on_admin_caller_shows_read_and_write_tools(self) -> None:
-        """FRIESE_MCP_MAX_TIER='read_write' clamps admin caller to read+write tools."""
+        """FRISIAN_MCP_MAX_TIER='read_write' clamps admin caller to read+write tools."""
         reg = _isolated_registry(
             ("read.tool", "read"),
             ("write.tool", "read_write"),
             ("admin.tool", "admin"),
         )
         view = McpView.as_view()
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert "read.tool" in names
@@ -946,20 +977,20 @@ class TestEndpointMaxTierCap:
         assert "admin.tool" not in names
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
-        FRIESE_MCP_UNAUTHENTICATED_TIER="admin",
-        FRIESE_MCP_MAX_TIER="read",
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_UNAUTHENTICATED_TIER="admin",
+        FRISIAN_MCP_MAX_TIER="read",
     )
     def test_read_cap_on_unauthenticated_admin_tier_shows_read_only(self) -> None:
-        """FRIESE_MCP_MAX_TIER='read' caps even an unauthenticated admin-tier request."""
+        """FRISIAN_MCP_MAX_TIER='read' caps even an unauthenticated admin-tier request."""
         reg = _isolated_registry(
             ("read.tool", "read"),
             ("write.tool", "read_write"),
             ("admin.tool", "admin"),
         )
         view = McpView.as_view()
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert names == {"read.tool"}
@@ -969,13 +1000,13 @@ class TestEndpointMaxTierCap:
     # ------------------------------------------------------------------
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
-        FRIESE_MCP_UNAUTHENTICATED_TIER="read_write",
-        FRIESE_MCP_MAX_TIER="read",
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_UNAUTHENTICATED_TIER="read_write",
+        FRISIAN_MCP_MAX_TIER="read",
     )
     def test_subclass_override_none_disables_global_cap(self) -> None:
-        """Subclass returning None from _effective_max_tier ignores FRIESE_MCP_MAX_TIER."""
+        """Subclass returning None from _effective_max_tier ignores FRISIAN_MCP_MAX_TIER."""
 
         class _NoCap(McpView):
             def _effective_max_tier(self) -> str | None:
@@ -986,19 +1017,19 @@ class TestEndpointMaxTierCap:
             ("write.tool", "read_write"),
         )
         view = _NoCap.as_view()
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert "read.tool" in names
         assert "write.tool" in names  # cap was bypassed — full tier honored
 
     @override_settings(
-        FRIESE_MCP_AUTHENTICATION_CLASSES=[],
-        FRIESE_MCP_PERMISSION_CLASSES=[],
-        FRIESE_MCP_UNAUTHENTICATED_TIER="admin",
+        FRISIAN_MCP_AUTHENTICATION_CLASSES=[],
+        FRISIAN_MCP_PERMISSION_CLASSES=[],
+        FRISIAN_MCP_UNAUTHENTICATED_TIER="admin",
     )
     def test_subclass_override_read_cap_independent_of_setting(self) -> None:
-        """Subclass returning 'read' caps callers even when FRIESE_MCP_MAX_TIER is absent."""
+        """Subclass returning 'read' caps callers even when FRISIAN_MCP_MAX_TIER is absent."""
 
         class _ReadCap(McpView):
             def _effective_max_tier(self) -> str | None:
@@ -1010,7 +1041,7 @@ class TestEndpointMaxTierCap:
             ("admin.tool", "admin"),
         )
         view = _ReadCap.as_view()
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = view(_tools_list_request())
         names = {t["name"] for t in json.loads(resp.content)["result"]["tools"]}
         assert names == {"read.tool"}

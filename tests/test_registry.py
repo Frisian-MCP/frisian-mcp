@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from rest_framework.permissions import BasePermission
 
-from friese_mcp.registry import ToolInputError, ToolNotFoundError, ToolRegistry
+from frisian_mcp.registry import ToolInputError, ToolNotFoundError, ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -291,8 +291,8 @@ class TestCamelCaseNormalization:
         assert captured == [{"muscle_groups": ["Back"]}]
 
     def test_normalisation_disabled_by_setting(self, registry: ToolRegistry, settings: Any) -> None:
-        """When FRIESE_MCP_NORMALIZE_INPUT_CASE=False, camelCase keys reach the handler as-is."""
-        settings.FRIESE_MCP_NORMALIZE_INPUT_CASE = False
+        """When FRISIAN_MCP_NORMALIZE_INPUT_CASE=False, camelCase keys reach the handler as-is."""
+        settings.FRISIAN_MCP_NORMALIZE_INPUT_CASE = False
         captured: list[dict] = []
 
         def _capture(arguments: dict, _request: Any) -> None:

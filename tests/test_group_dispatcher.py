@@ -1,4 +1,4 @@
-"""Tests for FRIESE_MCP_DISPATCH_GROUPS group dispatcher."""
+"""Tests for FRISIAN_MCP_DISPATCH_GROUPS group dispatcher."""
 
 # pylint: disable=redefined-outer-name,protected-access
 from __future__ import annotations
@@ -9,13 +9,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import RequestFactory
 
-from friese_mcp.apps import _install_dispatch_groups
-from friese_mcp.backends.group_dispatcher import (
+from frisian_mcp.apps import _install_dispatch_groups
+from frisian_mcp.backends.group_dispatcher import (
     build_group_help,
     build_group_input_schema,
     make_group_invoke,
 )
-from friese_mcp.registry import ToolRegistry
+from frisian_mcp.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -251,17 +251,17 @@ class TestMakeGroupInvoke:
 
 
 class TestInstallDispatchGroups:
-    """End-to-end behaviour when FRIESE_MCP_DISPATCH_GROUPS is set."""
+    """End-to-end behaviour when FRISIAN_MCP_DISPATCH_GROUPS is set."""
 
     def test_no_setting_is_noop(
         self, populated_registry: ToolRegistry, settings: Any
     ) -> None:
         """Without the setting the registry is left untouched."""
-        if hasattr(settings, "FRIESE_MCP_DISPATCH_GROUPS"):
-            del settings.FRIESE_MCP_DISPATCH_GROUPS
-        with patch("friese_mcp.apps.tool_registry", populated_registry, create=True), \
+        if hasattr(settings, "FRISIAN_MCP_DISPATCH_GROUPS"):
+            del settings.FRISIAN_MCP_DISPATCH_GROUPS
+        with patch("frisian_mcp.apps.tool_registry", populated_registry, create=True), \
              patch(
-                 "friese_mcp.registry.tool_registry", populated_registry
+                 "frisian_mcp.registry.tool_registry", populated_registry
              ):
             group_count, bundled_count = _install_dispatch_groups()
         assert group_count == 0
@@ -271,11 +271,11 @@ class TestInstallDispatchGroups:
         self, populated_registry: ToolRegistry, settings: Any
     ) -> None:
         """A two-group setting yields two new dispatcher tools."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {
             "svc": ["item", "container", "endpoint"],
             "ipam": ["ipaddress", "prefix"],
         }
-        with patch("friese_mcp.registry.tool_registry", populated_registry):
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
             group_count, bundled_count = _install_dispatch_groups()
         assert group_count == 2
         # bundled_count should equal the number of distinct flat tools matched
@@ -290,10 +290,10 @@ class TestInstallDispatchGroups:
         self, populated_registry: ToolRegistry, settings: Any
     ) -> None:
         """Tools bundled under a group disappear from list_tools()."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {
             "svc": ["item", "container", "endpoint"],
         }
-        with patch("friese_mcp.registry.tool_registry", populated_registry):
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         names = {t["name"] for t in populated_registry.list_tools()}
         assert "item_list" not in names
@@ -304,10 +304,10 @@ class TestInstallDispatchGroups:
         self, populated_registry: ToolRegistry, settings: Any
     ) -> None:
         """Resources not in any group keep appearing as flat tools."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {
             "svc": ["item", "container", "endpoint"],
         }
-        with patch("friese_mcp.registry.tool_registry", populated_registry):
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         names = {t["name"] for t in populated_registry.list_tools()}
         assert "user_list" in names  # user is ungrouped
@@ -318,8 +318,8 @@ class TestInstallDispatchGroups:
         self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
     ) -> None:
         """Hidden tools remain reachable through registry.dispatch()."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
-        with patch("friese_mcp.registry.tool_registry", populated_registry):
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         result = populated_registry.dispatch(
             _request(rf, permission="read"), "item_list", {}
@@ -335,9 +335,9 @@ class TestInstallDispatchGroups:
         """A group whose prefixes match no tools is skipped with a warning."""
         import logging
 
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"empty": ["doesnotexist"]}
-        with patch("friese_mcp.registry.tool_registry", populated_registry), \
-             caplog.at_level(logging.WARNING, logger="friese_mcp.apps"):
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {"empty": ["doesnotexist"]}
+        with patch("frisian_mcp.registry.tool_registry", populated_registry), \
+             caplog.at_level(logging.WARNING, logger="frisian_mcp.apps"):
             group_count, bundled_count = _install_dispatch_groups()
         assert group_count == 0
         assert bundled_count == 0
@@ -351,8 +351,8 @@ class TestInstallDispatchGroups:
         rf: RequestFactory,
     ) -> None:
         """End-to-end: register the group, then dispatch through it."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
-        with patch("friese_mcp.registry.tool_registry", populated_registry):
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         result = populated_registry.dispatch(
             _request(rf, permission="read"),
@@ -377,8 +377,8 @@ class TestGroupDispatcherTierEnforcement:
         rf: RequestFactory,
     ) -> None:
         """A 'read' caller cannot route to a 'read_write' tool through the group."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
-        with patch("friese_mcp.registry.tool_registry", populated_registry):
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         with pytest.raises(PermissionError):
             populated_registry.dispatch(
@@ -394,8 +394,8 @@ class TestGroupDispatcherTierEnforcement:
         rf: RequestFactory,
     ) -> None:
         """A 'read_write' caller can route to a 'read_write' tool."""
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
-        with patch("friese_mcp.registry.tool_registry", populated_registry):
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
         result = populated_registry.dispatch(
             _request(rf, permission="read_write"),

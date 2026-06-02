@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from rest_framework.permissions import IsAuthenticated
 
-from friese_mcp.decorators import mcp_ignore, mcp_tool
-from friese_mcp.registry import ToolRegistry, tool_registry
+from frisian_mcp.decorators import mcp_ignore, mcp_tool
+from frisian_mcp.registry import ToolRegistry, tool_registry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,7 +52,7 @@ class TestMcpTool:
         """@mcp_tool returns the original function unmodified."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_tool(name="ret.test", description="Return test", input_schema={})
             def _fn(_arguments: dict[str, Any], _request: Any) -> str:
@@ -64,7 +64,7 @@ class TestMcpTool:
     def test_with_permission_classes(self) -> None:
         """@mcp_tool forwards permission_classes to the registry."""
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_tool(
                 name="perm.test",
@@ -83,7 +83,7 @@ class TestMcpTool:
         """A tool registered via @mcp_tool can be dispatched successfully."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_tool(name="dispatch.test", description="Dispatch", input_schema={})
             def _ret(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:

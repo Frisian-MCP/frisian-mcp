@@ -11,8 +11,8 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
-from friese_mcp.registry import ToolInputError, ToolNotFoundError, ToolRegistry
-from friese_mcp.views import McpView
+from frisian_mcp.registry import ToolInputError, ToolNotFoundError, ToolRegistry
+from frisian_mcp.views import McpView
 
 _rf = RequestFactory()
 _view = McpView.as_view()
@@ -174,7 +174,7 @@ class TestAsyncHandlerViaView:
             {"type": "object", "properties": {"name": {"type": "string"}}},
         )
 
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = _view(_tools_call_request("greet.async", {"name": "pytest"}))
 
         data = json.loads(resp.content)
@@ -189,7 +189,7 @@ class TestAsyncHandlerViaView:
 
         reg.register("fail.async", _fail, "Fail", {})
 
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             resp = _view(_tools_call_request("fail.async", {}))
 
         data = json.loads(resp.content)

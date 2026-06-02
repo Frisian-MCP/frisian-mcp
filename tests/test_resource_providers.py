@@ -9,12 +9,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import RequestFactory
 
-from friese_mcp.resources import (
+from frisian_mcp.resources import (
     ResourceDefinition,
     ResourceNotFoundError,
     ResourceRegistry,
 )
-from friese_mcp.views import McpView
+from frisian_mcp.views import McpView
 
 _view = McpView.as_view()
 _rf = RequestFactory()
@@ -226,7 +226,7 @@ class TestResourcesListIntegration:
             ),
             content_type="application/json",
         )
-        with patch("friese_mcp.views.resource_registry", reg):
+        with patch("frisian_mcp.views.resource_registry", reg):
             resp = _view(req)
         return json.loads(resp.content)
 

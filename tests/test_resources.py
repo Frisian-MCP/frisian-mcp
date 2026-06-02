@@ -10,12 +10,12 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
-from friese_mcp.resources import (
+from frisian_mcp.resources import (
     ResourceDefinition,
     ResourceNotFoundError,
     ResourceRegistry,
 )
-from friese_mcp.views import McpView
+from frisian_mcp.views import McpView
 
 _view = McpView.as_view()
 
@@ -198,8 +198,8 @@ class TestMcpResourceDecorator:
     def test_decorator_registers_resource(self) -> None:
         """@mcp_resource registers the function in the resource_registry."""
         isolated = ResourceRegistry()
-        with patch("friese_mcp.decorators.resource_registry", isolated):
-            from friese_mcp.decorators import mcp_resource
+        with patch("frisian_mcp.decorators.resource_registry", isolated):
+            from frisian_mcp.decorators import mcp_resource
 
             @mcp_resource(uri_template="rag://test", name="Test")
             def my_resource(uri: str, request: Any) -> str:
@@ -213,8 +213,8 @@ class TestMcpResourceDecorator:
     def test_decorator_returns_function_unchanged(self) -> None:
         """@mcp_resource returns the original function."""
         isolated = ResourceRegistry()
-        with patch("friese_mcp.decorators.resource_registry", isolated):
-            from friese_mcp.decorators import mcp_resource
+        with patch("frisian_mcp.decorators.resource_registry", isolated):
+            from frisian_mcp.decorators import mcp_resource
 
             @mcp_resource(uri_template="rag://test", name="Test")
             def my_resource(uri: str, request: Any) -> str:
@@ -225,8 +225,8 @@ class TestMcpResourceDecorator:
     def test_decorator_with_description_and_mime_type(self) -> None:
         """@mcp_resource passes description and mime_type to the definition."""
         isolated = ResourceRegistry()
-        with patch("friese_mcp.decorators.resource_registry", isolated):
-            from friese_mcp.decorators import mcp_resource
+        with patch("frisian_mcp.decorators.resource_registry", isolated):
+            from frisian_mcp.decorators import mcp_resource
 
             @mcp_resource(
                 uri_template="rag://json",
@@ -252,7 +252,7 @@ class TestResourcesListView:
 
     def _call(self, registry: ResourceRegistry) -> Any:
         req = _post_rpc("resources/list")
-        with patch("friese_mcp.views.resource_registry", registry):
+        with patch("frisian_mcp.views.resource_registry", registry):
             resp = _view(req)
         return json.loads(resp.content)
 
@@ -293,7 +293,7 @@ class TestResourcesReadView:
 
     def _call(self, params: dict[str, Any], registry: ResourceRegistry) -> Any:
         req = _post_rpc("resources/read", params)
-        with patch("friese_mcp.views.resource_registry", registry):
+        with patch("frisian_mcp.views.resource_registry", registry):
             resp = _view(req)
         return json.loads(resp.content)
 

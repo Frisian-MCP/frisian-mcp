@@ -1,7 +1,7 @@
 """
-Tests for the always-on startup summary printed by ``FrieseMcpConfig.ready()``.
+Tests for the always-on startup summary printed by ``FrisianMcpConfig.ready()``.
 
-PKG-9: host apps that don't explicitly configure a ``friese_mcp`` logger handler
+PKG-9: host apps that don't explicitly configure a ``frisian_mcp`` logger handler
 silently drop the package's INFO-level startup messages, so operators cannot
 tell whether the package loaded.  ``ready()`` must therefore emit the key
 summary lines via ``print()`` in addition to the existing ``logger.info``
@@ -21,8 +21,8 @@ from django.apps import apps
 from django.test import override_settings
 from django.urls import clear_url_caches, get_resolver
 
-from friese_mcp.apps import FrieseMcpConfig
-from friese_mcp.registry import ToolRegistry
+from frisian_mcp.apps import FrisianMcpConfig
+from frisian_mcp.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Stubs
@@ -52,9 +52,9 @@ class _StubInvocation:
 
 
 @pytest.fixture()
-def fresh_app_config() -> Generator[FrieseMcpConfig, None, None]:
+def fresh_app_config() -> Generator[FrisianMcpConfig, None, None]:
     """
-    Yield the live FrieseMcpConfig with both idempotency flags reset.
+    Yield the live FrisianMcpConfig with both idempotency flags reset.
 
     AppConfig.ready() is called once at Django startup; the ``_mcp_ready``
     flag prevents subsequent invocations from re-running its body, and
@@ -68,10 +68,10 @@ def fresh_app_config() -> Generator[FrieseMcpConfig, None, None]:
     """
     from django.core.signals import request_started
 
-    from friese_mcp.apps import _DEFERRED_DISCOVERY_UID
+    from frisian_mcp.apps import _DEFERRED_DISCOVERY_UID
 
-    config = apps.get_app_config("friese_mcp")
-    assert isinstance(config, FrieseMcpConfig)
+    config = apps.get_app_config("frisian_mcp")
+    assert isinstance(config, FrisianMcpConfig)
     original_ready = config._mcp_ready
     original_discovered = config._mcp_discovered
     config._mcp_ready = False
@@ -90,13 +90,13 @@ def isolated_registry() -> Generator[ToolRegistry, None, None]:
     """
     Patch the module-level ``tool_registry`` with a fresh instance.
 
-    ``ready()`` writes into ``friese_mcp.registry.tool_registry`` directly;
+    ``ready()`` writes into ``frisian_mcp.registry.tool_registry`` directly;
     swapping it with a fresh registry isolates each test from process-wide
     side effects (other tests, or a previous ``ready()`` call, may have
     populated the real registry).
     """
     fresh = ToolRegistry()
-    with patch("friese_mcp.registry.tool_registry", fresh):
+    with patch("frisian_mcp.registry.tool_registry", fresh):
         yield fresh
 
 
@@ -152,13 +152,13 @@ class TestStartupSummaryPrint:
     """ready() must print the tools-registered summary regardless of log config."""
 
     @override_settings(
-        FRIESE_MCP_ENABLED=True,
-        FRIESE_MCP_AUTODISCOVER=True,
-        FRIESE_MCP_PATH="mcp",
+        FRISIAN_MCP_ENABLED=True,
+        FRISIAN_MCP_AUTODISCOVER=True,
+        FRISIAN_MCP_PATH="mcp",
     )
     def test_summary_printed_with_zero_tools(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,  # noqa: ARG002
         reset_resolver: None,  # noqa: ARG002
         capsys: pytest.CaptureFixture[str],
@@ -167,9 +167,9 @@ class TestStartupSummaryPrint:
         # Patch discovery to return zero tools so we exercise the 0-tool branch
         # without depending on the test URLconf to expose anything.
         with patch(
-            "friese_mcp.backends.get_discovery_backends", return_value=[]
+            "frisian_mcp.backends.get_discovery_backends", return_value=[]
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -177,23 +177,23 @@ class TestStartupSummaryPrint:
             fresh_app_config._run_deferred_discovery()
         captured = capsys.readouterr()
         combined = captured.out + captured.err
-        assert "[friese-mcp]" in combined
+        assert "[frisian-mcp]" in combined
         assert "registered 0 tools at /mcp/" in combined
 
     @override_settings(
-        FRIESE_MCP_ENABLED=True,
-        FRIESE_MCP_AUTODISCOVER=True,
-        FRIESE_MCP_PATH="mcp",
+        FRISIAN_MCP_ENABLED=True,
+        FRISIAN_MCP_AUTODISCOVER=True,
+        FRISIAN_MCP_PATH="mcp",
     )
     def test_summary_printed_with_discovered_tools(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,  # noqa: ARG002
         reset_resolver: None,  # noqa: ARG002
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """When discovery finds tools, the count appears in the printed line."""
-        from friese_mcp.backends.base import ToolDefinition
+        from frisian_mcp.backends.base import ToolDefinition
 
         fake_tool = ToolDefinition(
             name="widget.list",
@@ -209,9 +209,9 @@ class TestStartupSummaryPrint:
                 return [fake_tool]
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]
+            "frisian_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -220,25 +220,25 @@ class TestStartupSummaryPrint:
 
         captured = capsys.readouterr()
         combined = captured.out + captured.err
-        assert "[friese-mcp] registered 1 tools at /mcp/" in combined
+        assert "[frisian-mcp] registered 1 tools at /mcp/" in combined
 
     @override_settings(
-        FRIESE_MCP_ENABLED=True,
-        FRIESE_MCP_AUTODISCOVER=True,
-        FRIESE_MCP_PATH="api/mcp",
+        FRISIAN_MCP_ENABLED=True,
+        FRISIAN_MCP_AUTODISCOVER=True,
+        FRISIAN_MCP_PATH="api/mcp",
     )
     def test_summary_uses_custom_mcp_path(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,  # noqa: ARG002
         reset_resolver: None,  # noqa: ARG002
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """The printed path reflects FRIESE_MCP_PATH after slash stripping."""
+        """The printed path reflects FRISIAN_MCP_PATH after slash stripping."""
         with patch(
-            "friese_mcp.backends.get_discovery_backends", return_value=[]
+            "frisian_mcp.backends.get_discovery_backends", return_value=[]
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -255,16 +255,16 @@ class TestStartupSummaryPrint:
 
 
 class TestStartupSummaryLoggerIndependence:
-    """The summary must appear even when the friese_mcp logger drops INFO."""
+    """The summary must appear even when the frisian_mcp logger drops INFO."""
 
     @override_settings(
-        FRIESE_MCP_ENABLED=True,
-        FRIESE_MCP_AUTODISCOVER=True,
-        FRIESE_MCP_PATH="mcp",
+        FRISIAN_MCP_ENABLED=True,
+        FRISIAN_MCP_AUTODISCOVER=True,
+        FRISIAN_MCP_PATH="mcp",
     )
     def test_summary_visible_when_logger_level_is_warning(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,  # noqa: ARG002
         reset_resolver: None,  # noqa: ARG002
         capsys: pytest.CaptureFixture[str],
@@ -272,18 +272,18 @@ class TestStartupSummaryLoggerIndependence:
         """Raising the logger level above INFO must not silence the summary."""
         import logging
 
-        friese_logger = logging.getLogger("friese_mcp.apps")
-        original_level = friese_logger.level
-        original_handlers = list(friese_logger.handlers)
-        friese_logger.setLevel(logging.WARNING)
+        frisian_logger = logging.getLogger("frisian_mcp.apps")
+        original_level = frisian_logger.level
+        original_handlers = list(frisian_logger.handlers)
+        frisian_logger.setLevel(logging.WARNING)
         # Strip every handler so logger.info() really does end up dropped.
         for handler in original_handlers:
-            friese_logger.removeHandler(handler)
+            frisian_logger.removeHandler(handler)
         try:
             with patch(
-                "friese_mcp.backends.get_discovery_backends", return_value=[]
+                "frisian_mcp.backends.get_discovery_backends", return_value=[]
             ), patch(
-                "friese_mcp.backends.get_invocation_backend",
+                "frisian_mcp.backends.get_invocation_backend",
                 return_value=_StubInvocation(),
             ):
                 fresh_app_config.ready()
@@ -291,12 +291,12 @@ class TestStartupSummaryLoggerIndependence:
                 fresh_app_config._run_deferred_discovery()
             captured = capsys.readouterr()
             combined = captured.out + captured.err
-            assert "[friese-mcp]" in combined
+            assert "[frisian-mcp]" in combined
             assert "registered 0 tools at /mcp/" in combined
         finally:
-            friese_logger.setLevel(original_level)
+            frisian_logger.setLevel(original_level)
             for handler in original_handlers:
-                friese_logger.addHandler(handler)
+                frisian_logger.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -308,20 +308,20 @@ class TestDispatchGroupSummary:
     """When dispatch groups are configured, the summary line is also printed."""
 
     @override_settings(
-        FRIESE_MCP_ENABLED=True,
-        FRIESE_MCP_AUTODISCOVER=True,
-        FRIESE_MCP_PATH="mcp",
-        FRIESE_MCP_DISPATCH_GROUPS={"widgets": ["widget"]},
+        FRISIAN_MCP_ENABLED=True,
+        FRISIAN_MCP_AUTODISCOVER=True,
+        FRISIAN_MCP_PATH="mcp",
+        FRISIAN_MCP_DISPATCH_GROUPS={"widgets": ["widget"]},
     )
     def test_group_summary_printed_when_groups_configured(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,
         reset_resolver: None,  # noqa: ARG002
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A configured group with at least one matching resource is summarised."""
-        from friese_mcp.backends.base import ToolDefinition
+        from frisian_mcp.backends.base import ToolDefinition
 
         # Two flat tools that both match the widget prefix; they will be
         # bundled into the single 'widgets' group dispatcher.
@@ -348,13 +348,13 @@ class TestDispatchGroupSummary:
             def discover_tools(self) -> list[ToolDefinition]:
                 return defs
 
-        # _install_dispatch_groups reads from friese_mcp.registry.tool_registry,
+        # _install_dispatch_groups reads from frisian_mcp.registry.tool_registry,
         # so the isolated_registry fixture (which patches that name) is what
         # the dispatcher will inspect after ready() registers the flat tools.
         with patch(
-            "friese_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]
+            "frisian_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -363,27 +363,27 @@ class TestDispatchGroupSummary:
 
         captured = capsys.readouterr()
         combined = captured.out + captured.err
-        assert "[friese-mcp] 1 dispatch group(s) bundling 2 tools" in combined
+        assert "[frisian-mcp] 1 dispatch group(s) bundling 2 tools" in combined
         # And we still expect the auto-discovery summary line above it.
-        assert "[friese-mcp] registered 2 tools at /mcp/" in combined
+        assert "[frisian-mcp] registered 2 tools at /mcp/" in combined
 
     @override_settings(
-        FRIESE_MCP_ENABLED=True,
-        FRIESE_MCP_AUTODISCOVER=True,
-        FRIESE_MCP_PATH="mcp",
+        FRISIAN_MCP_ENABLED=True,
+        FRISIAN_MCP_AUTODISCOVER=True,
+        FRISIAN_MCP_PATH="mcp",
     )
     def test_no_group_summary_when_setting_absent(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,  # noqa: ARG002
         reset_resolver: None,  # noqa: ARG002
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Without FRIESE_MCP_DISPATCH_GROUPS no group summary line is emitted."""
+        """Without FRISIAN_MCP_DISPATCH_GROUPS no group summary line is emitted."""
         with patch(
-            "friese_mcp.backends.get_discovery_backends", return_value=[]
+            "frisian_mcp.backends.get_discovery_backends", return_value=[]
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -404,20 +404,20 @@ class TestInstallDispatchGroupsReturn:
 
     def test_returns_zero_zero_when_setting_absent(self, settings: Any) -> None:
         """Without the setting both elements of the tuple are zero."""
-        from friese_mcp.apps import _install_dispatch_groups
+        from frisian_mcp.apps import _install_dispatch_groups
 
-        if hasattr(settings, "FRIESE_MCP_DISPATCH_GROUPS"):
-            del settings.FRIESE_MCP_DISPATCH_GROUPS
+        if hasattr(settings, "FRISIAN_MCP_DISPATCH_GROUPS"):
+            del settings.FRISIAN_MCP_DISPATCH_GROUPS
         result = _install_dispatch_groups()
         assert result == (0, 0)
 
     def test_returns_zero_zero_when_no_resources_match(self, settings: Any) -> None:
         """A group whose prefixes match nothing yields (0, 0)."""
-        from friese_mcp.apps import _install_dispatch_groups
+        from frisian_mcp.apps import _install_dispatch_groups
 
-        settings.FRIESE_MCP_DISPATCH_GROUPS = {"empty": ["doesnotexist"]}
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {"empty": ["doesnotexist"]}
         # Use a fresh isolated registry so the result is deterministic.
         fresh = ToolRegistry()
-        with patch("friese_mcp.registry.tool_registry", fresh):
+        with patch("frisian_mcp.registry.tool_registry", fresh):
             result = _install_dispatch_groups()
         assert result == (0, 0)

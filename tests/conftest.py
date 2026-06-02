@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the friese-mcp test suite."""
+"""Shared pytest fixtures for the frisian-mcp test suite."""
 
 # pylint: disable=redefined-outer-name
 from __future__ import annotations
@@ -11,7 +11,7 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
-from friese_mcp.registry import ToolRegistry
+from frisian_mcp.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Registry fixture

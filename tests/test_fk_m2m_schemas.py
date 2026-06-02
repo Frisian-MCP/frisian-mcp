@@ -16,12 +16,12 @@ import jsonschema
 import pytest
 from rest_framework import serializers
 
-from friese_mcp.backends.discovery import (
+from frisian_mcp.backends.discovery import (
     _FK_ITEM_SCHEMA,
     _field_to_schema,
     _schema_from_serializer,
 )
-from friese_mcp.backends.invocation import (
+from frisian_mcp.backends.invocation import (
     _extract_list_body,
     _is_fk_property,
     _normalize_fk_arguments,
@@ -523,7 +523,7 @@ class TestRegistryDispatchListBodyBypass:
         """
         from django.http import HttpRequest
 
-        from friese_mcp.registry import ToolRegistry, ToolInputError
+        from frisian_mcp.registry import ToolRegistry, ToolInputError
 
         reg = ToolRegistry()
         results = []
@@ -562,7 +562,7 @@ class TestRegistryDispatchListBodyBypass:
         """
         from django.http import HttpRequest
 
-        from friese_mcp.registry import ToolRegistry
+        from frisian_mcp.registry import ToolRegistry
 
         reg = ToolRegistry()
         results = []
@@ -598,7 +598,7 @@ class TestRegistryDispatchListBodyBypass:
         """
         from django.http import HttpRequest
 
-        from friese_mcp.registry import ToolInputError, ToolRegistry
+        from frisian_mcp.registry import ToolInputError, ToolRegistry
 
         reg = ToolRegistry()
 

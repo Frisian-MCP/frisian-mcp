@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from rest_framework.permissions import BasePermission
 
-from friese_mcp.registry import ToolRegistry
+from frisian_mcp.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Reusable permission classes

@@ -1,4 +1,4 @@
-"""Tests for friese_mcp.contrib.middleware.RateLimitMiddleware."""
+"""Tests for frisian_mcp.contrib.middleware.RateLimitMiddleware."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ImproperlyConfigured
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.contrib.middleware import RateLimitMiddleware
+from frisian_mcp.contrib.middleware import RateLimitMiddleware
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,9 +49,9 @@ def _noop_next(request: Any, tool_name: str, arguments: dict[str, Any]) -> dict[
 
 
 class TestRateLimitMiddlewareNotConfigured:
-    """When FRIESE_MCP_RATE_LIMIT is absent, the middleware is a no-op."""
+    """When FRISIAN_MCP_RATE_LIMIT is absent, the middleware is a no-op."""
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT=None)
+    @override_settings(FRISIAN_MCP_RATE_LIMIT=None)
     def test_no_config_passes_through(self) -> None:
         """Unconfigured middleware calls call_next unconditionally."""
         mw = RateLimitMiddleware()
@@ -59,7 +59,7 @@ class TestRateLimitMiddlewareNotConfigured:
         assert result == {"called": True}
 
     def test_missing_setting_passes_through(self) -> None:
-        """Missing FRIESE_MCP_RATE_LIMIT setting calls call_next unconditionally."""
+        """Missing FRISIAN_MCP_RATE_LIMIT setting calls call_next unconditionally."""
         with patch.object(
             type(RateLimitMiddleware()), "__init__", RateLimitMiddleware.__init__
         ):
@@ -78,39 +78,39 @@ class TestRateLimitMiddlewareNotConfigured:
 class TestRateLimitMiddlewareConfiguration:
     """Settings parsing and validation."""
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "bad", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "bad", "key": "user_id"})
     def test_invalid_rate_raises_improperly_configured(self) -> None:
         """An unrecognised rate string raises ImproperlyConfigured at init."""
         with pytest.raises(ImproperlyConfigured, match="invalid rate"):
             RateLimitMiddleware()
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "10", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "10", "key": "user_id"})
     def test_rate_without_period_raises(self) -> None:
         """A rate with no period separator raises ImproperlyConfigured."""
         with pytest.raises(ImproperlyConfigured, match="invalid rate"):
             RateLimitMiddleware()
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "10/x", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "10/x", "key": "user_id"})
     def test_unknown_period_character_raises(self) -> None:
         """An unknown period character raises ImproperlyConfigured."""
         with pytest.raises(ImproperlyConfigured, match="invalid rate"):
             RateLimitMiddleware()
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "user_id"})
     def test_valid_seconds_rate_accepted(self) -> None:
         """A valid per-second rate is accepted without error."""
         mw = RateLimitMiddleware()
         assert mw._limit == 5  # pylint: disable=protected-access
         assert mw._window == 1  # pylint: disable=protected-access
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "100/m", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "100/m", "key": "user_id"})
     def test_valid_minutes_rate_accepted(self) -> None:
         """A valid per-minute rate is parsed correctly."""
         mw = RateLimitMiddleware()
         assert mw._limit == 100  # pylint: disable=protected-access
         assert mw._window == 60  # pylint: disable=protected-access
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "1000/h", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "1000/h", "key": "user_id"})
     def test_valid_hours_rate_accepted(self) -> None:
         """A valid per-hour rate is parsed correctly."""
         mw = RateLimitMiddleware()
@@ -126,7 +126,7 @@ class TestRateLimitMiddlewareConfiguration:
 class TestRateLimitMiddlewareEnforcement:
     """Core rate-limiting behaviour."""
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "3/s", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "3/s", "key": "user_id"})
     def test_within_limit_calls_next(self) -> None:
         """Requests within the limit pass through to call_next."""
         mw = RateLimitMiddleware()
@@ -135,7 +135,7 @@ class TestRateLimitMiddlewareEnforcement:
             result = mw(req, "tool", {}, _noop_next)
             assert result == {"called": True}
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "2/s", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "2/s", "key": "user_id"})
     def test_exceeding_limit_raises_permission_error(self) -> None:
         """The (limit+1)th request raises PermissionError."""
         mw = RateLimitMiddleware()
@@ -145,7 +145,7 @@ class TestRateLimitMiddlewareEnforcement:
         with pytest.raises(PermissionError, match="Rate limit exceeded"):
             mw(req, "tool", {}, _noop_next)
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "1/s", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "1/s", "key": "user_id"})
     def test_different_keys_tracked_independently(self) -> None:
         """User A being throttled does not affect user B."""
         mw = RateLimitMiddleware()
@@ -159,14 +159,14 @@ class TestRateLimitMiddlewareEnforcement:
         result = mw(req_b, "tool", {}, _noop_next)
         assert result == {"called": True}
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "1/s", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "1/s", "key": "user_id"})
     def test_window_resets_after_period_expires(self) -> None:
         """After the window expires, the counter resets and requests are allowed."""
         mw = RateLimitMiddleware()
         req = _make_request()
 
         t0 = 1000.0
-        with patch("friese_mcp.contrib.middleware.time") as mock_time:
+        with patch("frisian_mcp.contrib.middleware.time") as mock_time:
             mock_time.monotonic.return_value = t0
             mw(req, "tool", {}, _noop_next)
             with pytest.raises(PermissionError):
@@ -186,42 +186,42 @@ class TestRateLimitMiddlewareEnforcement:
 class TestRateLimitMiddlewareKeyResolvers:
     """Key resolution strategies."""
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "user_id"})
     def test_user_id_key_authenticated(self) -> None:
         """Authenticated users are keyed by str(user.pk)."""
         mw = RateLimitMiddleware()
         req = _make_request(user=_make_user(pk=42))
         assert mw._resolve_key(req) == "42"  # pylint: disable=protected-access
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "user_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "user_id"})
     def test_user_id_key_anonymous(self) -> None:
         """Anonymous users resolve to 'anonymous'."""
         mw = RateLimitMiddleware()
         req = _make_request(user=AnonymousUser())
         assert mw._resolve_key(req) == "anonymous"  # pylint: disable=protected-access
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "tenant_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "tenant_id"})
     def test_tenant_id_key_uses_tenant(self) -> None:
         """tenant_id key uses user.tenant_id when available."""
         mw = RateLimitMiddleware()
         req = _make_request(user=_make_user(pk=1, tenant_id=99))
         assert mw._resolve_key(req) == "99"  # pylint: disable=protected-access
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "tenant_id"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "tenant_id"})
     def test_tenant_id_key_falls_back_to_user_id(self) -> None:
         """tenant_id key falls back to user.pk when tenant_id is absent."""
         mw = RateLimitMiddleware()
         req = _make_request(user=_make_user(pk=7))
         assert mw._resolve_key(req) == "7"  # pylint: disable=protected-access
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"})
     def test_ip_key_uses_remote_addr(self) -> None:
         """The ip key uses REMOTE_ADDR from request.META."""
         mw = RateLimitMiddleware()
         req = _make_request(remote_addr="203.0.113.5")
         assert mw._resolve_key(req) == "203.0.113.5"  # pylint: disable=protected-access
 
-    @override_settings(FRIESE_MCP_RATE_LIMIT={"rate": "1/s", "key": "ip"})
+    @override_settings(FRISIAN_MCP_RATE_LIMIT={"rate": "1/s", "key": "ip"})
     def test_ip_key_throttles_by_address(self) -> None:
         """Two different IPs are throttled independently."""
         mw = RateLimitMiddleware()
@@ -236,8 +236,8 @@ class TestRateLimitMiddlewareKeyResolvers:
         assert result == {"called": True}
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
-        FRIESE_MCP_TRUSTED_PROXY_COUNT=0,
+        FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRISIAN_MCP_TRUSTED_PROXY_COUNT=0,
     )
     def test_ip_key_proxy_count_zero_uses_remote_addr(self) -> None:
         """When proxy_count=0 (default), REMOTE_ADDR is used regardless of XFF."""
@@ -250,8 +250,8 @@ class TestRateLimitMiddlewareKeyResolvers:
         assert mw._resolve_key(req) == "10.0.0.1"  # pylint: disable=protected-access
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
-        FRIESE_MCP_TRUSTED_PROXY_COUNT=1,
+        FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRISIAN_MCP_TRUSTED_PROXY_COUNT=1,
     )
     def test_ip_key_proxy_count_one_extracts_client_ip(self) -> None:
         """With proxy_count=1, the single XFF entry (set by the trusted proxy) is the client IP."""
@@ -264,8 +264,8 @@ class TestRateLimitMiddlewareKeyResolvers:
         assert mw._resolve_key(req) == "203.0.113.5"  # pylint: disable=protected-access
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
-        FRIESE_MCP_TRUSTED_PROXY_COUNT=2,
+        FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRISIAN_MCP_TRUSTED_PROXY_COUNT=2,
     )
     def test_ip_key_proxy_count_two_extracts_client_ip(self) -> None:
         """With proxy_count=2, two trusted proxies each appended one XFF entry; client is first."""
@@ -278,8 +278,8 @@ class TestRateLimitMiddlewareKeyResolvers:
         assert mw._resolve_key(req) == "203.0.113.5"  # pylint: disable=protected-access
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
-        FRIESE_MCP_TRUSTED_PROXY_COUNT=3,
+        FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRISIAN_MCP_TRUSTED_PROXY_COUNT=3,
     )
     def test_ip_key_xff_too_short_falls_back_to_remote_addr(self) -> None:
         """Falls back to REMOTE_ADDR when XFF has fewer entries than proxy_count."""
@@ -292,8 +292,8 @@ class TestRateLimitMiddlewareKeyResolvers:
         assert mw._resolve_key(req) == "10.0.0.1"  # pylint: disable=protected-access
 
     @override_settings(
-        FRIESE_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
-        FRIESE_MCP_TRUSTED_PROXY_COUNT=1,
+        FRISIAN_MCP_RATE_LIMIT={"rate": "5/s", "key": "ip"},
+        FRISIAN_MCP_TRUSTED_PROXY_COUNT=1,
     )
     def test_ip_key_no_xff_header_falls_back_to_remote_addr(self) -> None:
         """Falls back to REMOTE_ADDR when no X-Forwarded-For header is present."""

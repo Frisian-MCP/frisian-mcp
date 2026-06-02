@@ -26,8 +26,8 @@ from rest_framework.permissions import BasePermission, DjangoObjectPermissions, 
 from rest_framework.response import Response
 from rest_framework.viewsets import ViewSet
 
-from friese_mcp.backends.base import ToolDefinition
-from friese_mcp.backends.invocation import SyncInvocation
+from frisian_mcp.backends.base import ToolDefinition
+from frisian_mcp.backends.invocation import SyncInvocation
 
 # ---------------------------------------------------------------------------
 # Helpers

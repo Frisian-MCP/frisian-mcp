@@ -1,4 +1,4 @@
-"""Tests for the FRIESE_MCP_TOOL_MIDDLEWARE system."""
+"""Tests for the FRISIAN_MCP_TOOL_MIDDLEWARE system."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.middleware import build_middleware_chain, load_middleware
+from frisian_mcp.middleware import build_middleware_chain, load_middleware
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -152,20 +152,20 @@ class TestBuildMiddlewareChain:
 class TestLoadMiddleware:
     """Tests for load_middleware."""
 
-    @override_settings(FRIESE_MCP_TOOL_MIDDLEWARE=[])
+    @override_settings(FRISIAN_MCP_TOOL_MIDDLEWARE=[])
     def test_empty_setting_returns_empty_list(self) -> None:
-        """FRIESE_MCP_TOOL_MIDDLEWARE=[] → empty instances list."""
+        """FRISIAN_MCP_TOOL_MIDDLEWARE=[] → empty instances list."""
         result = load_middleware()
         assert not result
 
-    @override_settings(FRIESE_MCP_TOOL_MIDDLEWARE=["NoModuleHere"])
+    @override_settings(FRISIAN_MCP_TOOL_MIDDLEWARE=["NoModuleHere"])
     def test_invalid_dotted_path_raises(self) -> None:
         """A path with no module component raises ImproperlyConfigured."""
         with pytest.raises(ImproperlyConfigured, match="valid dotted"):
             load_middleware()
 
     @override_settings(
-        FRIESE_MCP_TOOL_MIDDLEWARE=["friese_mcp.nonexistent_module.SomeClass"]
+        FRISIAN_MCP_TOOL_MIDDLEWARE=["frisian_mcp.nonexistent_module.SomeClass"]
     )
     def test_nonexistent_module_raises(self) -> None:
         """An import-error path raises ImproperlyConfigured."""
@@ -173,7 +173,7 @@ class TestLoadMiddleware:
             load_middleware()
 
     @override_settings(
-        FRIESE_MCP_TOOL_MIDDLEWARE=[f"{__name__}._SampleMiddleware"]
+        FRISIAN_MCP_TOOL_MIDDLEWARE=[f"{__name__}._SampleMiddleware"]
     )
     def test_valid_path_instantiates_class(self) -> None:
         """A valid dotted path is imported and the class is instantiated."""

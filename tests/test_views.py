@@ -16,17 +16,17 @@ from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.viewsets import ViewSet
 
-from friese_mcp.backends.base import ToolDefinition
-from friese_mcp.backends.invocation import SyncInvocation
-from friese_mcp.protocol import (
+from frisian_mcp.backends.base import ToolDefinition
+from frisian_mcp.backends.invocation import SyncInvocation
+from frisian_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     MCP_PROTOCOL_VERSION,
     METHOD_NOT_FOUND,
 )
-from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import McpView
+from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.views import McpView
 
 _view = McpView.as_view()
 
@@ -181,8 +181,8 @@ class TestHttpGuards:
         assert data["error"]["code"] == METHOD_NOT_FOUND
 
     def test_disabled_returns_503(self, rf: RequestFactory, settings: Any) -> None:
-        """When FRIESE_MCP_ENABLED=False the endpoint returns 503."""
-        settings.FRIESE_MCP_ENABLED = False
+        """When FRISIAN_MCP_ENABLED=False the endpoint returns 503."""
+        settings.FRISIAN_MCP_ENABLED = False
         request = _post(rf, _jsonrpc("ping"))
         request.user = _anon_user()
         response = _view(request)
@@ -190,7 +190,7 @@ class TestHttpGuards:
 
     def test_disabled_body_is_json_rpc_error(self, rf: RequestFactory, settings: Any) -> None:
         """A 503 response has a JSON-RPC error body with INTERNAL_ERROR code."""
-        settings.FRIESE_MCP_ENABLED = False
+        settings.FRISIAN_MCP_ENABLED = False
         request = _post(rf, _jsonrpc("ping"))
         request.user = _anon_user()
         data = _response_data(_view(request))
@@ -264,15 +264,15 @@ class TestMethodHandlers:
         assert "capabilities" in result
 
     def test_initialize_server_name_from_settings(self, rf: RequestFactory, settings: Any) -> None:
-        """Initialize uses FRIESE_MCP_SERVER_NAME when set."""
-        settings.FRIESE_MCP_SERVER_NAME = "my-gateway"
+        """Initialize uses FRISIAN_MCP_SERVER_NAME when set."""
+        settings.FRISIAN_MCP_SERVER_NAME = "my-gateway"
         data = _response_data(_call(rf, "initialize", {}))
         assert data["result"]["serverInfo"]["name"] == "my-gateway"
 
     def test_initialize_server_name_default(self, rf: RequestFactory) -> None:
-        """Initialize serverInfo.name defaults to 'friese-mcp'."""
+        """Initialize serverInfo.name defaults to 'frisian-mcp'."""
         data = _response_data(_call(rf, "initialize", {}))
-        assert data["result"]["serverInfo"]["name"] == "friese-mcp"
+        assert data["result"]["serverInfo"]["name"] == "frisian-mcp"
 
     def test_initialize_server_version_present(self, rf: RequestFactory) -> None:
         """Initialize serverInfo.version is present and non-empty."""
@@ -302,7 +302,7 @@ class TestMethodHandlers:
             description="",
             input_schema={"type": "object", "properties": {}},
         )
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             v1 = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
             v2 = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
         assert v1 == v2
@@ -323,9 +323,9 @@ class TestMethodHandlers:
             description="",
             input_schema={"type": "object", "properties": {}},
         )
-        with patch("friese_mcp.views.tool_registry", reg_a):
+        with patch("frisian_mcp.views.tool_registry", reg_a):
             v_a = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
-        with patch("friese_mcp.views.tool_registry", reg_b):
+        with patch("frisian_mcp.views.tool_registry", reg_b):
             v_b = _response_data(_call(rf, "initialize", {}))["result"]["toolsVersion"]
         assert v_a != v_b
 
@@ -382,7 +382,7 @@ class TestToolsList:
         isolated = ToolRegistry()
         isolated.register("test.tool", lambda a, r: None, "Test", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/list"))
 
         assert len(data["result"]["tools"]) == 1
@@ -392,7 +392,7 @@ class TestToolsList:
         """tools/list returns an empty list when no tools are registered."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/list"))
 
         assert data["result"]["tools"] == []
@@ -411,7 +411,7 @@ class TestToolsCall:
         isolated = ToolRegistry()
         isolated.register("echo", lambda a, r: {"ok": True}, "Echo", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "echo", "arguments": {}}))
 
         assert data["result"]["isError"] is False
@@ -422,7 +422,7 @@ class TestToolsCall:
         """tools/call with an unknown tool name returns METHOD_NOT_FOUND."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
@@ -433,7 +433,7 @@ class TestToolsCall:
         """tools/call -32601 error data includes the tools/list refresh hint."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
@@ -452,7 +452,7 @@ class TestToolsCall:
                 input_schema={"type": "object", "properties": {}},
             )
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
@@ -470,7 +470,7 @@ class TestToolsCall:
                 input_schema={"type": "object", "properties": {}},
             )
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
@@ -481,7 +481,7 @@ class TestToolsCall:
         """Available tools section is present even when registry is empty."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
@@ -492,7 +492,7 @@ class TestToolsCall:
         """tools/call without a 'name' field returns INVALID_PARAMS."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"arguments": {}}))
 
         assert data["error"]["code"] == INVALID_PARAMS
@@ -501,7 +501,7 @@ class TestToolsCall:
         """tools/call with non-object 'arguments' returns INVALID_PARAMS."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "x", "arguments": "bad"}))
 
         assert data["error"]["code"] == INVALID_PARAMS
@@ -517,7 +517,7 @@ class TestToolsCall:
         isolated = ToolRegistry()
         isolated.register("locked", lambda a, r: None, "Locked", {}, [_DenyAll])
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "locked", "arguments": {}}))
 
         # Permission denial is a tool-level error, not a protocol-level error.
@@ -536,7 +536,7 @@ class TestToolsCall:
         isolated = ToolRegistry()
         isolated.register("bad", _raiser, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad", "arguments": {}}))
 
         assert data["result"]["isError"] is True
@@ -557,7 +557,7 @@ class TestToolsCall:
             },
         )
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             # Pass a string where an integer is required — should fail schema validation.
             data = _response_data(
                 _call(
@@ -582,7 +582,7 @@ class TestToolsCall:
 
         isolated.register("cap", _capture, "Cap", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             _call(rf, "tools/call", {"name": "cap", "arguments": None})
 
         assert captured == [{}]
@@ -606,7 +606,7 @@ class TestValueErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.uuid", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.uuid", "arguments": {}}))
 
         assert data["result"]["isError"] is True
@@ -621,7 +621,7 @@ class TestValueErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.uuid", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.uuid", "arguments": {}}))
 
         content = json.loads(data["result"]["content"][0]["text"])
@@ -637,7 +637,7 @@ class TestValueErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("boom", _boom, "Boom", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
 
         assert data["result"]["isError"] is True
@@ -646,12 +646,12 @@ class TestValueErrorSurfacing:
 
 
 # ---------------------------------------------------------------------------
-# FRIESE_MCP_EXPOSE_ERRORS — configurable exception verbosity
+# FRISIAN_MCP_EXPOSE_ERRORS — configurable exception verbosity
 # ---------------------------------------------------------------------------
 
 
 class TestExposeErrors:
-    """FRIESE_MCP_EXPOSE_ERRORS: configurable exception verbosity."""
+    """FRISIAN_MCP_EXPOSE_ERRORS: configurable exception verbosity."""
 
     def _register_boom(self, msg: str) -> ToolRegistry:
         def _boom(arguments: dict[str, Any], request: Any) -> None:
@@ -664,25 +664,25 @@ class TestExposeErrors:
     def test_default_returns_generic_message(self, rf: RequestFactory) -> None:
         """Without the setting (and DEBUG=False), returns 'Internal tool error'."""
         reg = self._register_boom("secret detail")
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
         content = json.loads(data["result"]["content"][0]["text"])
         assert content["error"] == "Internal tool error"
 
-    @override_settings(FRIESE_MCP_EXPOSE_ERRORS=True)
+    @override_settings(FRISIAN_MCP_EXPOSE_ERRORS=True)
     def test_expose_true_returns_exception_message(self, rf: RequestFactory) -> None:
-        """FRIESE_MCP_EXPOSE_ERRORS=True surfaces str(exc)."""
+        """FRISIAN_MCP_EXPOSE_ERRORS=True surfaces str(exc)."""
         reg = self._register_boom("very secret detail")
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
         content = json.loads(data["result"]["content"][0]["text"])
         assert content["error"] == "very secret detail"
 
-    @override_settings(FRIESE_MCP_EXPOSE_ERRORS=False, DEBUG=True)
+    @override_settings(FRISIAN_MCP_EXPOSE_ERRORS=False, DEBUG=True)
     def test_expose_false_overrides_debug(self, rf: RequestFactory) -> None:
-        """FRIESE_MCP_EXPOSE_ERRORS=False suppresses detail even when DEBUG=True."""
+        """FRISIAN_MCP_EXPOSE_ERRORS=False suppresses detail even when DEBUG=True."""
         reg = self._register_boom("secret detail")
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
         content = json.loads(data["result"]["content"][0]["text"])
         assert content["error"] == "Internal tool error"
@@ -691,7 +691,7 @@ class TestExposeErrors:
     def test_debug_true_without_setting_exposes_detail(self, rf: RequestFactory) -> None:
         """DEBUG=True without explicit setting surfaces str(exc)."""
         reg = self._register_boom("debug detail")
-        with patch("friese_mcp.views.tool_registry", reg):
+        with patch("frisian_mcp.views.tool_registry", reg):
             data = _response_data(_call(rf, "tools/call", {"name": "boom", "arguments": {}}))
         content = json.loads(data["result"]["content"][0]["text"])
         assert content["error"] == "debug detail"
@@ -715,7 +715,7 @@ class TestDRFValidationErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.drf", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.drf", "arguments": {}}))
 
         assert data["result"]["isError"] is True
@@ -730,7 +730,7 @@ class TestDRFValidationErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.email", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.email", "arguments": {}}))
 
         content = json.loads(data["result"]["content"][0]["text"])
@@ -748,7 +748,7 @@ class TestDRFValidationErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.nonfield", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "bad.nonfield", "arguments": {}})
             )
@@ -767,7 +767,7 @@ class TestDRFValidationErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.title", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.title", "arguments": {}}))
 
         # Must be a result (isError=True), NOT a JSON-RPC error response.
@@ -793,7 +793,7 @@ class TestSyncInvocationValidationSurfacing:
         isolated = ToolRegistry()
         isolated.register("auto.create", _bad, "Create", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "auto.create", "arguments": {}}))
 
         # Must NOT be "Internal tool error" — must be the structured validation detail.
@@ -849,7 +849,7 @@ class TestUnknownToolCode:
         """Finding 3: An unknown tool name returns -32601 METHOD_NOT_FOUND."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
@@ -860,7 +860,7 @@ class TestUnknownToolCode:
         """Finding 3: An unknown tool name does NOT use INVALID_PARAMS (-32602)."""
         isolated = ToolRegistry()
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
@@ -904,8 +904,8 @@ class TestHelpMethod:
         assert "errors" in hints
 
     def test_help_server_name_from_settings(self, rf: RequestFactory, settings: Any) -> None:
-        """Help uses FRIESE_MCP_SERVER_NAME when configured."""
-        settings.FRIESE_MCP_SERVER_NAME = "my-server"
+        """Help uses FRISIAN_MCP_SERVER_NAME when configured."""
+        settings.FRISIAN_MCP_SERVER_NAME = "my-server"
         data = _response_data(_call(rf, "help"))
         assert data["result"]["server"] == "my-server"
 
@@ -923,7 +923,7 @@ class TestToolNotFoundSuggestions:
         isolated = ToolRegistry()
         isolated.register("users.create", lambda a, r: None, "Create", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "users.creat", "arguments": {}}))
 
         assert data["error"]["code"] == METHOD_NOT_FOUND
@@ -934,7 +934,7 @@ class TestToolNotFoundSuggestions:
         isolated = ToolRegistry()
         isolated.register("users.create", lambda a, r: None, "Create", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "zzz.qqq.xxx", "arguments": {}}))
 
         assert data["error"]["code"] == METHOD_NOT_FOUND
@@ -960,7 +960,7 @@ class TestDjangoValidationErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.django", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.django", "arguments": {}}))
 
         assert data["result"]["isError"] is True
@@ -975,7 +975,7 @@ class TestDjangoValidationErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.django2", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.django2", "arguments": {}}))
 
         content = json.loads(data["result"]["content"][0]["text"])
@@ -991,7 +991,7 @@ class TestDjangoValidationErrorSurfacing:
         isolated = ToolRegistry()
         isolated.register("bad.django3", _bad, "Bad", {})
 
-        with patch("friese_mcp.views.tool_registry", isolated):
+        with patch("frisian_mcp.views.tool_registry", isolated):
             data = _response_data(_call(rf, "tools/call", {"name": "bad.django3", "arguments": {}}))
 
         assert "result" in data

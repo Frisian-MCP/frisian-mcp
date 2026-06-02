@@ -1,8 +1,8 @@
 """
 PKG-21 — auto-discovery deferred until after all AppConfig.ready() hooks complete.
 
-Django's INSTALLED_APPS ordering means a plugin appended after friese_mcp
-runs its own ``ready()`` (and registers URL patterns) AFTER friese_mcp's
+Django's INSTALLED_APPS ordering means a plugin appended after frisian_mcp
+runs its own ``ready()`` (and registers URL patterns) AFTER frisian_mcp's
 ``ready()`` has already scanned the URL tree.  PKG-21 moves the scan into a
 one-shot ``request_started`` signal handler so plugin URL patterns are
 visible by the time discovery runs.
@@ -21,8 +21,8 @@ from django.apps import apps
 from django.core.signals import request_started
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.apps import FrieseMcpConfig
-from friese_mcp.registry import ToolRegistry
+from frisian_mcp.apps import FrisianMcpConfig
+from frisian_mcp.registry import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Stubs and fixtures
@@ -40,9 +40,9 @@ class _StubInvocation:
 
 
 @pytest.fixture()
-def fresh_app_config() -> Generator[FrieseMcpConfig, None, None]:
+def fresh_app_config() -> Generator[FrisianMcpConfig, None, None]:
     """
-    Yield FrieseMcpConfig with both idempotency flags reset for the test.
+    Yield FrisianMcpConfig with both idempotency flags reset for the test.
 
     Also disconnects any deferred-discovery handler at setup AND teardown
     via the stable ``_DEFERRED_DISCOVERY_UID``.  Without this, a handler
@@ -50,10 +50,10 @@ def fresh_app_config() -> Generator[FrieseMcpConfig, None, None]:
     ``request_started.send()`` calls from subsequent tests, polluting the
     registry and call counters.
     """
-    from friese_mcp.apps import _DEFERRED_DISCOVERY_UID
+    from frisian_mcp.apps import _DEFERRED_DISCOVERY_UID
 
-    config = apps.get_app_config("friese_mcp")
-    assert isinstance(config, FrieseMcpConfig)
+    config = apps.get_app_config("frisian_mcp")
+    assert isinstance(config, FrisianMcpConfig)
     original_ready = config._mcp_ready
     original_discovered = config._mcp_discovered
     config._mcp_ready = False
@@ -71,23 +71,23 @@ def fresh_app_config() -> Generator[FrieseMcpConfig, None, None]:
 def isolated_registry() -> Generator[ToolRegistry, None, None]:
     """Patch the module-level tool_registry so each test starts clean."""
     fresh = ToolRegistry()
-    with patch("friese_mcp.registry.tool_registry", fresh):
+    with patch("frisian_mcp.registry.tool_registry", fresh):
         yield fresh
 
 
 def _fire_deferred_only() -> None:
     """
-    Fire ``request_started`` to only the friese-mcp deferred-discovery handler.
+    Fire ``request_started`` to only the frisian-mcp deferred-discovery handler.
 
     Django ships built-in ``request_started`` receivers (e.g.
     ``close_old_connections``) that may fail on test DB state when triggered
     outside a real request lifecycle.  These tests only care that the
-    friese-mcp handler runs, so we temporarily filter the receiver list to
+    frisian-mcp handler runs, so we temporarily filter the receiver list to
     just the one identified by :data:`_DEFERRED_DISCOVERY_UID`, fire, and
     restore.  This keeps the test focused on PKG-21's behaviour without
     dragging unrelated Django machinery in.
     """
-    from friese_mcp.apps import _DEFERRED_DISCOVERY_UID
+    from frisian_mcp.apps import _DEFERRED_DISCOVERY_UID
 
     saved = list(request_started.receivers)
     # Django stores ``connect(dispatch_uid=X)`` with lookup_key
@@ -114,14 +114,14 @@ def _fire_deferred_only() -> None:
 class TestDiscoveryDeferredFromReady:
     """ready() must not scan the URL tree — that work is now deferred."""
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=True)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=True)
     def test_ready_does_not_invoke_discovery_backends(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,
     ) -> None:
         """No discover_tools() call should fire during ready() itself."""
-        from friese_mcp.backends.base import ToolDefinition
+        from frisian_mcp.backends.base import ToolDefinition
 
         calls: list[str] = []
 
@@ -132,10 +132,10 @@ class TestDiscoveryDeferredFromReady:
                 return []
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends",
+            "frisian_mcp.backends.get_discovery_backends",
             return_value=[_TrackingBackend()],
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -145,15 +145,15 @@ class TestDiscoveryDeferredFromReady:
         # The registry must therefore still be empty.
         assert len(isolated_registry.list_names()) == 0
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=True)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=True)
     def test_first_request_runs_discovery(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,
         rf: RequestFactory,
     ) -> None:
         """A request_started signal triggers the deferred discovery exactly once."""
-        from friese_mcp.backends.base import ToolDefinition
+        from frisian_mcp.backends.base import ToolDefinition
 
         calls: list[str] = []
 
@@ -173,10 +173,10 @@ class TestDiscoveryDeferredFromReady:
                 ]
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends",
+            "frisian_mcp.backends.get_discovery_backends",
             return_value=[_TrackingBackend()],
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -187,15 +187,15 @@ class TestDiscoveryDeferredFromReady:
         names = {t["name"] for t in isolated_registry.list_tools()}
         assert "late.list" in names
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=True)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=True)
     def test_subsequent_requests_do_not_redrive_discovery(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,
         rf: RequestFactory,
     ) -> None:
         """The signal handler disconnects after firing — only the first request scans."""
-        from friese_mcp.backends.base import ToolDefinition
+        from frisian_mcp.backends.base import ToolDefinition
 
         calls: list[str] = []
 
@@ -206,10 +206,10 @@ class TestDiscoveryDeferredFromReady:
                 return []
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends",
+            "frisian_mcp.backends.get_discovery_backends",
             return_value=[_TrackingBackend()],
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -228,25 +228,25 @@ class TestDiscoveryDeferredFromReady:
 
 class TestLateRegisteredUrlsDiscovered:
     """
-    The exact symptom PKG-21 fixes: a plugin appended after friese_mcp.
+    The exact symptom PKG-21 fixes: a plugin appended after frisian_mcp.
 
     In production this is any host plugin loader that appends to
     INSTALLED_APPS after the host's settings module has appended
-    friese_mcp.  Plugin AppConfig.ready() runs AFTER ours and registers
+    frisian_mcp.  Plugin AppConfig.ready() runs AFTER ours and registers
     URL patterns there.  Pre-PKG-21, those URLs were not in the resolver
     tree when our scan ran, so the tools were silently absent from
     tools/list.
     """
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=True)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=True)
     def test_url_pattern_added_after_ready_is_discovered_on_first_request(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,
         rf: RequestFactory,
     ) -> None:
-        """Simulate a plugin registering tools AFTER friese_mcp.ready() has run."""
-        from friese_mcp.backends.base import ToolDefinition
+        """Simulate a plugin registering tools AFTER frisian_mcp.ready() has run."""
+        from frisian_mcp.backends.base import ToolDefinition
 
         # Stage 1: at ready() time, no plugin tools are visible.
         plugin_tools: list[ToolDefinition] = []
@@ -259,10 +259,10 @@ class TestLateRegisteredUrlsDiscovered:
                 return list(plugin_tools)
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends",
+            "frisian_mcp.backends.get_discovery_backends",
             return_value=[_LateBindingBackend()],
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -297,14 +297,14 @@ class TestLateRegisteredUrlsDiscovered:
 class TestDeferredDiscoveryIdempotency:
     """_run_deferred_discovery() and the signal handler must be idempotent."""
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=True)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=True)
     def test_direct_call_to_run_deferred_discovery_is_idempotent(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,
     ) -> None:
         """Calling _run_deferred_discovery() twice does not duplicate work."""
-        from friese_mcp.backends.base import ToolDefinition
+        from frisian_mcp.backends.base import ToolDefinition
 
         calls: list[str] = []
 
@@ -315,10 +315,10 @@ class TestDeferredDiscoveryIdempotency:
                 return []
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends",
+            "frisian_mcp.backends.get_discovery_backends",
             return_value=[_TrackingBackend()],
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()
@@ -335,17 +335,17 @@ class TestDeferredDiscoveryIdempotency:
 
 
 class TestAutodiscoverDisabled:
-    """When FRIESE_MCP_AUTODISCOVER is False, no signal handler is connected."""
+    """When FRISIAN_MCP_AUTODISCOVER is False, no signal handler is connected."""
 
-    @override_settings(FRIESE_MCP_ENABLED=True, FRIESE_MCP_AUTODISCOVER=False)
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=False)
     def test_no_discovery_when_autodiscover_disabled(
         self,
-        fresh_app_config: FrieseMcpConfig,
+        fresh_app_config: FrisianMcpConfig,
         isolated_registry: ToolRegistry,
         rf: RequestFactory,
     ) -> None:
         """A request must NOT trigger discovery when AUTODISCOVER is disabled."""
-        from friese_mcp.backends.base import ToolDefinition
+        from frisian_mcp.backends.base import ToolDefinition
 
         calls: list[str] = []
 
@@ -356,10 +356,10 @@ class TestAutodiscoverDisabled:
                 return []
 
         with patch(
-            "friese_mcp.backends.get_discovery_backends",
+            "frisian_mcp.backends.get_discovery_backends",
             return_value=[_TrackingBackend()],
         ), patch(
-            "friese_mcp.backends.get_invocation_backend",
+            "frisian_mcp.backends.get_invocation_backend",
             return_value=_StubInvocation(),
         ):
             fresh_app_config.ready()

@@ -10,9 +10,9 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
-from friese_mcp.decorators import _merge_negotiation_schema, mcp_heavy
-from friese_mcp.registry import ToolRegistry
-from friese_mcp.views import (
+from frisian_mcp.decorators import _merge_negotiation_schema, mcp_heavy
+from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.views import (
     McpView,
     _build_probe_envelope,
     _serve_heavy_mode,
@@ -132,7 +132,7 @@ class TestMcpHeavyDecorator:
     def test_registers_with_is_heavy_true(self) -> None:
         """@mcp_heavy registers the tool with is_heavy=True."""
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_heavy(
                 name="heavy.test",
@@ -149,7 +149,7 @@ class TestMcpHeavyDecorator:
     def test_returns_original_callable_unchanged(self) -> None:
         """@mcp_heavy returns the original function unmodified."""
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_heavy(
                 name="heavy.ret",
@@ -164,7 +164,7 @@ class TestMcpHeavyDecorator:
     def test_schema_has_negotiation_fields(self) -> None:
         """The registered schema includes the merged negotiation fields."""
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_heavy(
                 name="heavy.schema",
@@ -181,10 +181,10 @@ class TestMcpHeavyDecorator:
 
     def test_non_heavy_tool_has_is_heavy_false(self) -> None:
         """@mcp_tool registers with is_heavy=False by default."""
-        from friese_mcp.decorators import mcp_tool
+        from frisian_mcp.decorators import mcp_tool
 
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_tool(name="light.test", description="Light test", input_schema={})
             def _fn(_arguments: dict[str, Any], _request: Any) -> None:
@@ -336,8 +336,8 @@ class TestMcpHeavyIntegration:
     def test_call1_returns_probe_envelope(self, rf: RequestFactory) -> None:
         """Call 1 (no continuation_token) returns a probe envelope."""
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated), patch(
-            "friese_mcp.views.tool_registry", isolated
+        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
+            "frisian_mcp.views.tool_registry", isolated
         ):
 
             @mcp_heavy(
@@ -348,7 +348,7 @@ class TestMcpHeavyIntegration:
             def _big_tool(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
                 return {"data": list(range(50))}
 
-            with patch("friese_mcp.views.django_cache") as mock_cache:
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
                 mock_cache.get.return_value = None
                 response = _call_tool(rf, "int.heavy1", {})
 
@@ -360,7 +360,7 @@ class TestMcpHeavyIntegration:
 
     def test_call2_full_mode_returns_original(self, rf: RequestFactory) -> None:
         """Call 2 with mode=full returns the complete cached result."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
@@ -368,8 +368,8 @@ class TestMcpHeavyIntegration:
         token = "testtoken123"
 
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated), patch(
-            "friese_mcp.views.tool_registry", isolated
+        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
+            "frisian_mcp.views.tool_registry", isolated
         ):
 
             @mcp_heavy(
@@ -380,7 +380,7 @@ class TestMcpHeavyIntegration:
             def _big2(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
                 return stored
 
-            with patch("friese_mcp.views.django_cache") as mock_cache:
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
                 # SEC-3: cache entries are now {result, owner_key, tool_name}.
                 # The test request is anonymous so the owner_key for call 1
                 # and call 2 are identical — derive it from the same request
@@ -402,7 +402,7 @@ class TestMcpHeavyIntegration:
 
     def test_call2_summary_mode(self, rf: RequestFactory) -> None:
         """Call 2 with mode=summary returns a condensed result."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
@@ -410,8 +410,8 @@ class TestMcpHeavyIntegration:
         token = "sumtoken"
 
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated), patch(
-            "friese_mcp.views.tool_registry", isolated
+        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
+            "frisian_mcp.views.tool_registry", isolated
         ):
 
             @mcp_heavy(
@@ -422,7 +422,7 @@ class TestMcpHeavyIntegration:
             def _big3(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
                 return stored
 
-            with patch("friese_mcp.views.django_cache") as mock_cache:
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
                 expected_owner = _heavy_owner_key(
                     _build_call_tool_request(rf, "int.heavy3", {}), "int.heavy3"
                 )
@@ -443,8 +443,8 @@ class TestMcpHeavyIntegration:
     def test_expired_token_returns_error(self, rf: RequestFactory) -> None:
         """An expired or unknown continuation_token returns isError=True."""
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated), patch(
-            "friese_mcp.views.tool_registry", isolated
+        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
+            "frisian_mcp.views.tool_registry", isolated
         ):
 
             @mcp_heavy(
@@ -455,7 +455,7 @@ class TestMcpHeavyIntegration:
             def _big4(_arguments: dict[str, Any], _request: Any) -> None:
                 pass
 
-            with patch("friese_mcp.views.django_cache") as mock_cache:
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
                 mock_cache.get.return_value = None  # cache miss — token expired
                 response = _call_tool(
                     rf, "int.heavy4", {"continuation_token": "deadtoken", "mode": "full"}
@@ -466,14 +466,14 @@ class TestMcpHeavyIntegration:
         text = json.loads(data["result"]["content"][0]["text"])
         assert "expired" in text["error"].lower() or "not found" in text["error"].lower()
 
-    @override_settings(FRIESE_MCP_AUTO_NEGOTIATE_THRESHOLD=50)
+    @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=50)
     def test_threshold_backstop_wraps_large_response(self, rf: RequestFactory) -> None:
-        """FRIESE_MCP_AUTO_NEGOTIATE_THRESHOLD wraps large non-heavy tool responses."""
-        from friese_mcp.decorators import mcp_tool
+        """FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD wraps large non-heavy tool responses."""
+        from frisian_mcp.decorators import mcp_tool
 
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated), patch(
-            "friese_mcp.views.tool_registry", isolated
+        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
+            "frisian_mcp.views.tool_registry", isolated
         ):
 
             @mcp_tool(
@@ -484,7 +484,7 @@ class TestMcpHeavyIntegration:
             def _light(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
                 return {"data": "x" * 1000}  # ~1 KB > 50-byte threshold
 
-            with patch("friese_mcp.views.django_cache") as mock_cache:
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
                 mock_cache.get.return_value = None
                 mock_cache.set = MagicMock()
                 response = _call_tool(rf, "int.light", {})
@@ -492,14 +492,14 @@ class TestMcpHeavyIntegration:
         result = _tool_result(response)
         assert "continuation_token" in result, "Expected probe envelope from threshold backstop"
 
-    @override_settings(FRIESE_MCP_AUTO_NEGOTIATE_THRESHOLD=100000)
+    @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=100000)
     def test_threshold_backstop_passthrough_for_small_response(self, rf: RequestFactory) -> None:
         """A small response below the threshold passes through unchanged."""
-        from friese_mcp.decorators import mcp_tool
+        from frisian_mcp.decorators import mcp_tool
 
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated), patch(
-            "friese_mcp.views.tool_registry", isolated
+        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
+            "frisian_mcp.views.tool_registry", isolated
         ):
 
             @mcp_tool(
@@ -510,7 +510,7 @@ class TestMcpHeavyIntegration:
             def _small(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
                 return {"ok": True}
 
-            with patch("friese_mcp.views.django_cache") as mock_cache:
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
                 mock_cache.get.return_value = None
                 response = _call_tool(rf, "int.small", {})
 
@@ -531,7 +531,7 @@ class TestHeavyContinuationOwnerBinding:
     def _isolated_registry_with_heavy(name: str, payload: Any) -> ToolRegistry:
         """Register a single ``@mcp_heavy`` tool that returns *payload*."""
         isolated = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", isolated):
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
 
             @mcp_heavy(
                 name=name,
@@ -547,15 +547,15 @@ class TestHeavyContinuationOwnerBinding:
 
     def test_call1_writes_owner_bound_cache_entry(self, rf: RequestFactory) -> None:
         """Call 1 stores ``{result, owner_key, tool_name}`` (not the raw result)."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
         payload = {"big": list(range(20))}
         reg = self._isolated_registry_with_heavy("sec3.heavy1", payload)
 
-        with patch("friese_mcp.views.tool_registry", reg), patch(
-            "friese_mcp.views.django_cache"
+        with patch("frisian_mcp.views.tool_registry", reg), patch(
+            "frisian_mcp.views.django_cache"
         ) as mock_cache:
             mock_cache.get.return_value = None
             _call_tool(rf, "sec3.heavy1", {})
@@ -580,8 +580,8 @@ class TestHeavyContinuationOwnerBinding:
         """
         reg = self._isolated_registry_with_heavy("sec3.heavy2", {"x": 1})
 
-        with patch("friese_mcp.views.tool_registry", reg), patch(
-            "friese_mcp.views.django_cache"
+        with patch("frisian_mcp.views.tool_registry", reg), patch(
+            "frisian_mcp.views.django_cache"
         ) as mock_cache:
             mock_cache.get.return_value = {
                 "result": {"x": 1},
@@ -609,12 +609,12 @@ class TestHeavyContinuationOwnerBinding:
         tool yields a different key than the one stored at issuance, so
         the gate refuses.
         """
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
         reg = ToolRegistry()
-        with patch("friese_mcp.decorators.tool_registry", reg):
+        with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_heavy(
                 name="sec3.heavy3",
@@ -641,8 +641,8 @@ class TestHeavyContinuationOwnerBinding:
             _build_call_tool_request(rf, "sec3.heavy3", {}), "sec3.heavy3"
         )
 
-        with patch("friese_mcp.views.tool_registry", reg), patch(
-            "friese_mcp.views.django_cache"
+        with patch("frisian_mcp.views.tool_registry", reg), patch(
+            "frisian_mcp.views.django_cache"
         ) as mock_cache:
             mock_cache.get.return_value = {
                 "result": {"sensitive": "data"},
@@ -673,8 +673,8 @@ class TestHeavyContinuationOwnerBinding:
         """
         reg = self._isolated_registry_with_heavy("sec3.heavy4", {"legacy": True})
 
-        with patch("friese_mcp.views.tool_registry", reg), patch(
-            "friese_mcp.views.django_cache"
+        with patch("frisian_mcp.views.tool_registry", reg), patch(
+            "frisian_mcp.views.django_cache"
         ) as mock_cache:
             # Legacy shape: raw result, no wrapper.
             mock_cache.get.return_value = {"legacy": True}
@@ -692,7 +692,7 @@ class TestHeavyContinuationOwnerBinding:
         self, rf: RequestFactory
     ) -> None:
         """The happy path: matching owner_key → cached result is served."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
@@ -701,8 +701,8 @@ class TestHeavyContinuationOwnerBinding:
             _build_call_tool_request(rf, "sec3.heavy5", {}), "sec3.heavy5"
         )
 
-        with patch("friese_mcp.views.tool_registry", reg), patch(
-            "friese_mcp.views.django_cache"
+        with patch("frisian_mcp.views.tool_registry", reg), patch(
+            "frisian_mcp.views.django_cache"
         ) as mock_cache:
             mock_cache.get.return_value = {
                 "result": {"ok": True},
@@ -733,7 +733,7 @@ class TestHeavyOwnerKey:
 
     def test_anonymous_request_includes_anon_marker(self, rf: RequestFactory) -> None:
         """An unauthenticated request renders auth=anon in the owner key."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
@@ -743,7 +743,7 @@ class TestHeavyOwnerKey:
 
     def test_different_tools_produce_different_keys(self, rf: RequestFactory) -> None:
         """Tool name is part of the key; two tools yield different bindings."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
@@ -753,7 +753,7 @@ class TestHeavyOwnerKey:
 
     def test_session_id_header_appears_in_key(self, rf: RequestFactory) -> None:
         """A request carrying MCP-Session-ID has the session bound into the key."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
@@ -764,7 +764,7 @@ class TestHeavyOwnerKey:
 
     def test_tier_change_changes_the_key(self, rf: RequestFactory) -> None:
         """A token whose tier later downgrades produces a different owner key."""
-        from friese_mcp.views import (  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
