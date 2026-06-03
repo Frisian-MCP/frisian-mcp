@@ -157,11 +157,11 @@ class TestExtractLeanEnvelope:
         envelope = _extract_lean_envelope(result, "tok")
         assert envelope["accepted"] == 60
 
-    def test_bulk_result_failed_zero(self) -> None:
-        """Bulk result: failed is 0 (all accepted)."""
+    def test_bulk_result_no_failed_key(self) -> None:
+        """Bulk result: failed is not present (bulk creates are atomic; no partial counts)."""
         result = [{"id": str(i)} for i in range(10)]
         envelope = _extract_lean_envelope(result, "tok")
-        assert envelope["failed"] == 0
+        assert "failed" not in envelope
 
     def test_bulk_result_has_data_size(self) -> None:
         """Bulk result: data_size reflects the full JSON byte count of all objects."""
@@ -461,7 +461,7 @@ class TestWritePathBulkCreate:
 
         # Must be a compact summary.
         assert result["accepted"] == 60
-        assert result["failed"] == 0
+        assert "failed" not in result
         assert "data_size" in result
         assert "continuation_token" in result
         assert result["status_code"] == 200

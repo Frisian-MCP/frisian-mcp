@@ -656,7 +656,9 @@ def _make_invocation_fn(
         result = invocation.invoke(tool_def, arguments, request)
         if result.is_error:
             raise ToolInvocationError(result.content)
-        return result.content
+        # Return the full ToolResult so views.py can read http_status for the
+        # lean envelope.  views.py unwraps .content after checking isinstance.
+        return result
 
     return _invoke
 

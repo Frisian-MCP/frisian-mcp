@@ -82,11 +82,16 @@ class ToolResult:
         is_error: ``True`` when the tool execution itself failed (as opposed
             to a protocol-level error).  The gateway wraps this in a
             ``tools/call`` response with ``"isError": true``.
+        http_status: The HTTP status code from the underlying DRF response
+            (e.g. 201 for creates, 204 for deletes, 200 for reads/updates).
+            Used by the write-path lean envelope to populate ``status_code``.
+            Defaults to 200 for backends that do not capture HTTP status.
 
     """
 
     content: Any
     is_error: bool = False
+    http_status: int = 200
 
 
 # ---------------------------------------------------------------------------

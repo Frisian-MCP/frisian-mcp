@@ -263,7 +263,9 @@ def _action_http_method(view_class: type, action_name: str) -> str:
     return "post"
 
 
-def _extract_lean_envelope(result: Any, token: str) -> dict[str, Any]:
+def _extract_lean_envelope(
+    result: Any, token: str, http_status: int = 200
+) -> dict[str, Any]:
     """
     Build the lean write-confirmation envelope from a fully-serialised result.
 
@@ -271,24 +273,25 @@ def _extract_lean_envelope(result: Any, token: str) -> dict[str, Any]:
     Bulk writes (list at top level): accepted count + status_code + data_size + continuation_token.
     Delete (result is {"deleted": True, "status": 204}): confirmation only; no token.
 
-    ``status_code`` is extracted from a bare integer ``"status"`` key when
-    present on the result dict (set by ``_extract_data`` for 204 deletes and
-    no-body 2xx responses).  String or dict values for ``"status"`` — common
-    application-level fields (e.g. ``{"status": "active"}``) — are ignored and
-    the code falls back to 200.  Typical create/update responses where the HTTP
-    status is not embedded in the serialiser data also fall back to 200.
+    ``http_status`` is the HTTP status code from the DRF response (201 for creates,
+    204 for deletes, 200 for reads/updates).  When called directly (e.g. from tests
+    without a live DRF response), it defaults to 200.
+
+    For delete results the ``"status"`` key embedded by ``_extract_data`` is used
+    directly; it is always a bare integer (204) so no ambiguity with application-
+    level status fields.
 
     The caller is responsible for caching the full result under *token* when a
     continuation_token is present in the returned envelope.
     """
     if isinstance(result, dict) and result.get("deleted") is True:
-        return {"deleted": True, "status_code": result.get("status", 204)}
+        # _extract_data embeds "status": 204; use it directly for backward compat
+        # with direct callers that do not supply http_status.
+        _raw = result.get("status")
+        return {"deleted": True, "status_code": _raw if isinstance(_raw, int) else http_status}
 
-    # Read HTTP status only when "status" is a bare integer on the result dict.
-    # Application-level status fields (strings, dicts) must not be mistaken for
-    # HTTP status codes.  For typical creates/updates the code falls back to 200.
-    _raw_status = result.get("status") if isinstance(result, dict) else None
-    status_code: int = _raw_status if isinstance(_raw_status, int) else 200
+    # Use the passed-in HTTP status for all non-delete shapes (creates, updates, bulk).
+    status_code = http_status
 
     serialized = json.dumps(result)
     data_size = len(serialized.encode())
@@ -296,7 +299,6 @@ def _extract_lean_envelope(result: Any, token: str) -> dict[str, Any]:
     if isinstance(result, list):
         return {
             "accepted": len(result),
-            "failed": 0,
             "status_code": status_code,
             "data_size": data_size,
             "continuation_token": token,
@@ -491,7 +493,7 @@ class SyncInvocation(BaseInvocationBackend):
         # a structured tool-level error instead of a 500 from the JSON-RPC
         # envelope encoder upstream.
         try:
-            content = self._extract_data(response)
+            content, http_status = self._extract_data(response)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.exception(
                 "SyncInvocation response normalisation failed",
@@ -502,7 +504,7 @@ class SyncInvocation(BaseInvocationBackend):
                 is_error=True,
             )
 
-        return ToolResult(content=content)
+        return ToolResult(content=content, http_status=http_status)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -602,9 +604,13 @@ class SyncInvocation(BaseInvocationBackend):
         return req
 
     @staticmethod
-    def _extract_data(response: Any) -> Any:
+    def _extract_data(response: Any) -> tuple[Any, int]:
         """
         Extract JSON-safe data from a DRF or Django response object.
+
+        Returns a ``(data, http_status)`` tuple so the HTTP status code is
+        available to the lean-envelope builder even after the response object
+        is discarded.
 
         Handles four shapes:
 
@@ -630,10 +636,11 @@ class SyncInvocation(BaseInvocationBackend):
         fields would otherwise crash the JSON-RPC envelope encoder.
         """
         status_code = getattr(response, "status_code", None)
+        _http: int = status_code if isinstance(status_code, int) else 200
 
         # 204 No Content — structured success envelope, never None.
         if status_code == 204:
-            return {"deleted": True, "status": 204}
+            return {"deleted": True, "status": 204}, 204
 
         if hasattr(response, "data"):
             data = response.data
@@ -641,15 +648,15 @@ class SyncInvocation(BaseInvocationBackend):
                 # Some custom actions return Response(status=2xx) with no body.
                 # Surface a non-empty envelope rather than None so callers and
                 # MCP clients can render the result without a fake error wrap.
-                return {"status": status_code} if status_code is not None else {}
+                return ({"status": status_code} if status_code is not None else {}), _http
             rendered = JSONRenderer().render(data)
             if not rendered or rendered == b"null":
-                return None
-            return json.loads(rendered)
+                return None, _http
+            return json.loads(rendered), _http
 
         if hasattr(response, "content"):
             try:
-                return json.loads(response.content)
+                return json.loads(response.content), _http
             except (json.JSONDecodeError, AttributeError):
-                return str(response.content)
-        return str(response)
+                return str(response.content), _http
+        return str(response), _http
