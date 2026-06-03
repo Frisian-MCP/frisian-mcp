@@ -264,17 +264,31 @@ def _action_http_method(view_class: type, action_name: str) -> str:
 
 
 def _extract_lean_envelope(result: Any, token: str) -> dict[str, Any]:
-    """Build the lean write-confirmation envelope from a fully-serialised result.
+    """
+    Build the lean write-confirmation envelope from a fully-serialised result.
 
-    Single writes: id + url? + name/display? + data_size + continuation_token.
-    Bulk writes (list at top level): accepted count + data_size + continuation_token.
+    Single writes: id + url? + name/display? + status_code + data_size + continuation_token.
+    Bulk writes (list at top level): accepted count + status_code + data_size + continuation_token.
     Delete (result is {"deleted": True, "status": 204}): confirmation only; no token.
+
+    ``status_code`` is extracted from a bare integer ``"status"`` key when
+    present on the result dict (set by ``_extract_data`` for 204 deletes and
+    no-body 2xx responses).  String or dict values for ``"status"`` — common
+    application-level fields (e.g. ``{"status": "active"}``) — are ignored and
+    the code falls back to 200.  Typical create/update responses where the HTTP
+    status is not embedded in the serialiser data also fall back to 200.
 
     The caller is responsible for caching the full result under *token* when a
     continuation_token is present in the returned envelope.
     """
     if isinstance(result, dict) and result.get("deleted") is True:
         return {"deleted": True, "status_code": result.get("status", 204)}
+
+    # Read HTTP status only when "status" is a bare integer on the result dict.
+    # Application-level status fields (strings, dicts) must not be mistaken for
+    # HTTP status codes.  For typical creates/updates the code falls back to 200.
+    _raw_status = result.get("status") if isinstance(result, dict) else None
+    status_code: int = _raw_status if isinstance(_raw_status, int) else 200
 
     serialized = json.dumps(result)
     data_size = len(serialized.encode())
@@ -283,6 +297,7 @@ def _extract_lean_envelope(result: Any, token: str) -> dict[str, Any]:
         return {
             "accepted": len(result),
             "failed": 0,
+            "status_code": status_code,
             "data_size": data_size,
             "continuation_token": token,
         }
@@ -300,6 +315,7 @@ def _extract_lean_envelope(result: Any, token: str) -> dict[str, Any]:
                 envelope[key] = result[key]
                 break
 
+    envelope["status_code"] = status_code
     envelope["data_size"] = data_size
     envelope["continuation_token"] = token
     return envelope

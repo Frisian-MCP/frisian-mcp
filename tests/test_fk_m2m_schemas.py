@@ -102,9 +102,11 @@ class ContentTypeField(serializers.RelatedField):  # type: ignore[type-arg]
     """Stub with the canonical name; treated as a bare-string field."""
 
     def to_representation(self, value: Any) -> Any:  # pragma: no cover
+        """Return value as a string."""
         return str(value)
 
     def to_internal_value(self, data: Any) -> Any:  # pragma: no cover
+        """Return data unchanged."""
         return data
 
 
@@ -463,21 +465,26 @@ class TestExtractListBody:
     """_extract_list_body detects the bulk-create list convention."""
 
     def test_objects_key_returns_list(self) -> None:
+        """The 'objects' key returns the wrapped list."""
         assert _extract_list_body({"objects": [{"name": "a"}, {"name": "b"}]}) == [
             {"name": "a"},
             {"name": "b"},
         ]
 
     def test_data_key_returns_list(self) -> None:
+        """The 'data' key returns the wrapped list."""
         assert _extract_list_body({"data": [{"id": 1}]}) == [{"id": 1}]
 
     def test_items_key_returns_list(self) -> None:
+        """The 'items' key returns the wrapped list."""
         assert _extract_list_body({"items": [{"x": 1}]}) == [{"x": 1}]
 
     def test_underscore_items_key_returns_list(self) -> None:
+        """The '_items' key returns the wrapped list."""
         assert _extract_list_body({"_items": [{"x": 1}]}) == [{"x": 1}]
 
     def test_unknown_key_returns_none(self) -> None:
+        """An unrecognised key returns None."""
         assert _extract_list_body({"records": [{"name": "a"}]}) is None
 
     def test_two_keys_returns_none(self) -> None:
@@ -485,6 +492,7 @@ class TestExtractListBody:
         assert _extract_list_body({"objects": [{"name": "a"}], "extra": 1}) is None
 
     def test_value_not_list_returns_none(self) -> None:
+        """When the value is not a list, returns None."""
         assert _extract_list_body({"objects": {"name": "a"}}) is None
 
     def test_empty_list_is_detected(self) -> None:
@@ -510,20 +518,21 @@ class TestExtractListBody:
 
 class TestRegistryDispatchListBodyBypass:
     """
-    registry.dispatch skips required-field schema validation when arguments
-    look like a bulk list body ({objects: [...]} etc.), allowing bulk creates
-    to reach the invocation backend without being rejected by the single-item
-    schema (which has required fields like 'location' for devices).
+    registry.dispatch skips required-field schema validation for bulk list bodies.
+
+    Allows bulk creates to reach the invocation backend without being rejected
+    by the single-item schema (which has required fields like 'location' for devices).
     """
 
     def test_list_body_bypasses_required_field_validation(self) -> None:
         """
-        A tool with required fields should not reject {objects: [...]} —
-        the list is the body, not a single-item create.
+        A tool with required fields should not reject {objects: [...]}.
+
+        The list is the body, not a single-item create.
         """
         from django.http import HttpRequest
 
-        from frisian_mcp.registry import ToolRegistry, ToolInputError
+        from frisian_mcp.registry import ToolRegistry
 
         reg = ToolRegistry()
         results = []
@@ -557,8 +566,9 @@ class TestRegistryDispatchListBodyBypass:
 
     def test_list_body_missing_required_does_not_raise(self) -> None:
         """
-        Even if individual items lack required fields, the schema layer should
-        not reject them — the host serializer is responsible for per-item validation.
+        Even if individual items lack required fields, the schema layer does not reject them.
+
+        The host serializer is responsible for per-item validation.
         """
         from django.http import HttpRequest
 
@@ -593,8 +603,9 @@ class TestRegistryDispatchListBodyBypass:
 
     def test_normal_create_still_validates_required_fields(self) -> None:
         """
-        A regular single-create call that is missing a required field still
-        raises ToolInputError — the bypass is list-body-only.
+        A regular single-create call missing a required field still raises ToolInputError.
+
+        The bypass is list-body-only.
         """
         from django.http import HttpRequest
 

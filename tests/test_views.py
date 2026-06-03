@@ -102,7 +102,8 @@ class TestHttpGuards:
         assert json.loads(response.content) == {}
 
     def test_get_returns_200_sse_in_wsgi(self, rf: RequestFactory) -> None:
-        """GET returns 200 SSE stream in a WSGI context via sync generator.
+        """
+        GET returns 200 SSE stream in a WSGI context via sync generator.
 
         Some clients (e.g. Cursor) do not fall back to POST-only on 405 and
         instead treat it as a hard connection failure. A sync generator keeps

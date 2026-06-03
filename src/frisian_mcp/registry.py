@@ -293,6 +293,8 @@ class ToolRegistry:
                 ``@mcp_dispatcher``.
             is_heavy: ``True`` when the tool was registered via ``@mcp_heavy``
                 and uses the two-call response-negotiation protocol.
+            is_write: ``True`` when the tool mutates state (create/update/delete).
+                Enables the lean-envelope write-path filtering in ``views.py``.
             permission_tier: Minimum token permission required to see this tool
                 in ``tools/list``.  One of ``"read"``, ``"read_write"``, or
                 ``"admin"``.  Dispatcher tools always use ``"read"`` so they

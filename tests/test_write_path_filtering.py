@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 from django.contrib.auth.models import AnonymousUser
-from django.test import RequestFactory, override_settings
+from django.test import RequestFactory
 
 from frisian_mcp.backends.invocation import _extract_lean_envelope
 from frisian_mcp.registry import ToolRegistry
@@ -70,7 +69,8 @@ def _build_write_registry(
     handler: Any,
     is_heavy: bool = False,
 ) -> ToolRegistry:
-    """Return an isolated registry with a single write-marked tool.
+    """
+    Return an isolated registry with a single write-marked tool.
 
     Uses permission_tier='read' so tests work with the default anonymous
     unauthenticated tier — this isolates write-path filtering behaviour
@@ -126,7 +126,7 @@ class TestExtractLeanEnvelope:
         assert envelope["name"] == "router-1"
 
     def test_single_object_includes_url_when_present(self) -> None:
-        """url is included in the lean envelope when the serializer exposes it."""
+        """Url is included in the lean envelope when the serializer exposes it."""
         result = {"id": "abc-123", "url": "https://host/api/devices/abc-123/", "name": "r1"}
         envelope = _extract_lean_envelope(result, "tok")
         assert envelope["url"] == "https://host/api/devices/abc-123/"
@@ -199,6 +199,30 @@ class TestExtractLeanEnvelope:
         envelope = _extract_lean_envelope(result, "tok")
         assert envelope["display"] == "Router A"
 
+    def test_single_object_has_status_code(self) -> None:
+        """Single create result: status_code is present in the lean envelope."""
+        result = {"id": "abc-123", "name": "router-1"}
+        envelope = _extract_lean_envelope(result, "tok")
+        assert "status_code" in envelope
+        assert envelope["status_code"] == 200
+
+    def test_single_object_app_status_field_does_not_override_status_code(self) -> None:
+        """Application-level 'status' string/dict must not be treated as an HTTP code."""
+        # String status (e.g. Nautobot device status field)
+        result_str = {"id": "1", "name": "x", "status": "active"}
+        assert _extract_lean_envelope(result_str, "tok")["status_code"] == 200
+
+        # Dict status (e.g. Nautobot nested status object)
+        result_dict = {"id": "2", "name": "y", "status": {"value": "active", "label": "Active"}}
+        assert _extract_lean_envelope(result_dict, "tok")["status_code"] == 200
+
+    def test_bulk_result_has_status_code(self) -> None:
+        """Bulk (list) result: status_code is present in the lean envelope."""
+        result = [{"id": str(i), "name": f"device-{i}"} for i in range(5)]
+        envelope = _extract_lean_envelope(result, "tok")
+        assert "status_code" in envelope
+        assert envelope["status_code"] == 200
+
 
 # ---------------------------------------------------------------------------
 # Views-layer write-path filtering tests
@@ -235,10 +259,11 @@ class TestWritePathDefaultLean:
         result = _tool_result(response)
         assert not _is_error(response)
 
-        # Lean envelope MUST contain the id and continuation_token.
+        # Lean envelope MUST contain the id, continuation_token, and status_code.
         assert result["id"] == "device-uuid-1"
         assert "continuation_token" in result
         assert "data_size" in result
+        assert result["status_code"] == 200
 
         # The full object's payload fields must NOT be present.
         assert "device_type" not in result
@@ -428,7 +453,8 @@ class TestWritePathBulkCreate:
             "frisian_mcp.views.django_cache"
         ) as mock_cache:
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "devices.bulk_create", {"objects": [{"name": f"spine-{i}"} for i in range(60)]})
+            objects = [{"name": f"spine-{i}"} for i in range(60)]
+            response = _call_tool(rf, "devices.bulk_create", {"objects": objects})
 
         result = _tool_result(response)
         assert not _is_error(response)
@@ -438,6 +464,7 @@ class TestWritePathBulkCreate:
         assert result["failed"] == 0
         assert "data_size" in result
         assert "continuation_token" in result
+        assert result["status_code"] == 200
 
         # Must NOT contain any individual device objects.
         assert "id" not in result
@@ -464,7 +491,8 @@ class TestWritePathBulkCreate:
             "frisian_mcp.views.django_cache"
         ) as mock_cache:
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "devices.bulk_create", {"objects": [{"name": f"spine-{i}"} for i in range(60)]})
+            objects = [{"name": f"spine-{i}"} for i in range(60)]
+            response = _call_tool(rf, "devices.bulk_create", {"objects": objects})
 
         lean_result = _tool_result(response)
         lean_json = json.dumps(lean_result)
@@ -610,7 +638,9 @@ class TestContinuationTokenRetrieval:
         ) as mock_cache:
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp_cont = _call_tool(rf, "router.create", {"continuation_token": token, "mode": "full"})
+            resp_cont = _call_tool(
+                rf, "router.create", {"continuation_token": token, "mode": "full"}
+            )
 
         verify_result = _tool_result(resp_verify)
         cont_result = _tool_result(resp_cont)
@@ -627,7 +657,7 @@ class TestMcpHeavyPrecedence:
     """@mcp_heavy response negotiation is used when a tool has both is_heavy and is_write."""
 
     def test_heavy_probe_returned_not_lean_envelope(self, rf: RequestFactory) -> None:
-        """A tool with is_heavy=True and is_write=True returns the @mcp_heavy probe, not a lean envelope."""
+        """A tool with is_heavy=True and is_write=True returns the @mcp_heavy probe, not lean."""
         full_object = {"id": "uuid-h", "name": "heavy-write", "data": list(range(100))}
 
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
@@ -715,7 +745,7 @@ class TestReadPathUnaffected:
     def test_write_lean_filtering_does_not_affect_mcp_heavy_read(
         self, rf: RequestFactory
     ) -> None:
-        """A read-only @mcp_heavy tool still returns a probe envelope (not a lean write envelope)."""
+        """A read-only @mcp_heavy tool still returns a probe envelope, not a lean write envelope."""
         from frisian_mcp.decorators import mcp_heavy  # pylint: disable=import-outside-toplevel
 
         isolated = ToolRegistry()
@@ -775,6 +805,7 @@ class TestDispatcherGroupWritePath:
         The dispatcher tool is registered with is_dispatcher=True so that
         views.py's dispatcher lean-envelope block (``_write_entry.is_dispatcher``)
         fires correctly.
+
         """
         from frisian_mcp.backends.group_dispatcher import (  # noqa: PLC0415
             build_group_input_schema,
@@ -833,15 +864,18 @@ class TestDispatcherGroupWritePath:
         ) as mock_cache:
             mock_cache.get.return_value = None
             response = _call_tool(
-                rf, "dcim", {"resource": "device", "action": "create", "params": {"name": "spine-01"}}
+                rf,
+                "dcim",
+                {"resource": "device", "action": "create", "params": {"name": "spine-01"}},
             )
 
         result = _tool_result(response)
         assert not _is_error(response)
 
-        # Lean envelope must include id and accepted, not full body.
+        # Lean envelope must include id, status_code, and continuation_token; not full body.
         assert result.get("id") == "device-uuid-11"
         assert "accepted" in result or "continuation_token" in result
+        assert result["status_code"] == 200
         assert "device_type" not in result
         assert "extra" not in result
 
@@ -867,7 +901,11 @@ class TestDispatcherGroupWritePath:
             response = _call_tool(
                 rf,
                 "dcim",
-                {"resource": "device", "action": "create", "params": {"name": "spine-02", "verify": True}},
+                {
+                    "resource": "device",
+                    "action": "create",
+                    "params": {"name": "spine-02", "verify": True},
+                },
             )
 
         result = _tool_result(response)
@@ -877,7 +915,7 @@ class TestDispatcherGroupWritePath:
     # ------------------------------------------------------------------ verify stripping
 
     def test_dispatcher_verify_stripped_from_params_before_tool(self, rf: RequestFactory) -> None:
-        """verify is stripped from params by the dispatcher before the underlying tool sees them."""
+        """Verify is stripped from params by the dispatcher before the underlying tool sees them."""
         received_params: dict[str, Any] = {}
 
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
@@ -893,7 +931,11 @@ class TestDispatcherGroupWritePath:
             _call_tool(
                 rf,
                 "dcim",
-                {"resource": "device", "action": "create", "params": {"name": "spine-03", "verify": True}},
+                {
+                    "resource": "device",
+                    "action": "create",
+                    "params": {"name": "spine-03", "verify": True},
+                },
             )
 
         assert "verify" not in received_params
@@ -940,7 +982,9 @@ class TestDispatcherGroupWritePath:
             "frisian_mcp.views.django_cache"
         ) as mock_cache:
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "dcim", {"resource": "device", "action": "list", "params": {}})
+            response = _call_tool(
+                rf, "dcim", {"resource": "device", "action": "list", "params": {}}
+            )
 
         result = _tool_result(response)
         assert not _is_error(response)
