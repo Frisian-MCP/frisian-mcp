@@ -292,6 +292,13 @@ def make_group_invoke(
                 f"Unknown tool {target_name!r} in group {group_name!r}.{hint}"
             )
 
+        # Strip the `verify` flag before the underlying write tool sees params.
+        # `verify` is a frisian-mcp protocol param; DRF serializers may reject
+        # unknown fields.  views.py reads verify from the original arguments.
+        _target_entry = registry.get_entry(target_name)
+        if _target_entry is not None and _target_entry.is_write and "verify" in params:
+            params = {k: v for k, v in params.items() if k != "verify"}
+
         return registry.dispatch(request, target_name, params)
 
     return invoke

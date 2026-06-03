@@ -398,11 +398,29 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
 
             seen.add((cls, action_name))
             _write_http = {"post", "put", "patch", "delete"}
-            permission_tier = "read_write" if http_method in _write_http else "read"
+            is_write = http_method in _write_http
+            permission_tier = "read_write" if is_write else "read"
 
             tool_name = f"{resource}{_tool_name_separator()}{action_name}"
             input_schema = self.get_input_schema(cls, action_name)
             _apply_required_overrides(input_schema, tool_name)
+
+            if is_write:
+                input_schema = {
+                    **input_schema,
+                    "properties": {
+                        **input_schema.get("properties", {}),
+                        "verify": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Return the full serialised response instead of the lean "
+                                "confirmation envelope. High token cost — use only for "
+                                "field-level verification after a write."
+                            ),
+                        },
+                    },
+                }
 
             tools.append(
                 ToolDefinition(
@@ -415,6 +433,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     action=action_name,
                     permission_tier=permission_tier,
                     url_path=full_path,
+                    is_write=is_write,
                 )
             )
             logger.debug("frisian_mcp discovered tool %s.%s", resource, action_name)

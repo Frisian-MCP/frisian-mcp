@@ -55,6 +55,7 @@ from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.request import Request as DRFRequest
 from rest_framework.views import APIView
 
+from frisian_mcp.backends.base import ToolResult
 from frisian_mcp.middleware import build_middleware_chain, get_middleware_instances
 from frisian_mcp.protocol import (
     INTERNAL_ERROR,
@@ -307,13 +308,20 @@ def _build_drf_error_content(exc: DRFValidationError) -> dict[str, Any]:
     """
     Convert a DRF ``ValidationError`` into a structured tool-error dict.
 
-    * Field errors (dict detail) → ``{"error": "Validation failed", "detail": {field: [msgs]}}``
-    * Non-field errors (list detail) → ``{"error": "<joined messages>"}``
-    * Scalar detail → ``{"error": "<string>"}``
+    * Field errors (dict detail) →
+      ``{"error": "Validation failed", "detail": {field: [msgs]}, "status_code": 422}``
+    * Bulk errors (list of dicts) →
+      ``{"error": "Validation failed", "detail": ["row 0: …", …], "status_code": 422}``
+    * Non-field errors (flat list) → ``{"error": "<joined messages>", "status_code": 422}``
+    * Scalar detail → ``{"error": "<string>", "status_code": 422}``
 
     The result is safe to JSON-serialise and return to the MCP caller inside
     an ``isError=True`` content block.
     """
+    from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
+        _flatten_error_detail,
+    )
+
     detail = exc.detail
     if isinstance(detail, dict):
         return {
@@ -322,10 +330,25 @@ def _build_drf_error_content(exc: DRFValidationError) -> dict[str, Any]:
                 field: [str(e) for e in (errors if isinstance(errors, list) else [errors])]
                 for field, errors in detail.items()
             },
+            "status_code": 422,
         }
     if isinstance(detail, list):
-        return {"error": "; ".join(str(e) for e in detail)}
-    return {"error": str(detail)}
+        if detail and isinstance(detail[0], (dict, list)):
+            # Bulk validation: detail is a list of per-row error dicts.
+            # Flatten each row using _flatten_error_detail to avoid Python repr()
+            # of ErrorDetail objects (e.g. "{'field': [ErrorDetail(...)]}").
+            rows: list[str] = []
+            for i, row_err in enumerate(detail):
+                msg = _flatten_error_detail(row_err)
+                if msg:
+                    rows.append(f"row {i}: {msg}")
+            return {
+                "error": "Validation failed",
+                "detail": rows if rows else ["unknown error"],
+                "status_code": 422,
+            }
+        return {"error": "; ".join(str(e) for e in detail), "status_code": 422}
+    return {"error": str(detail), "status_code": 422}
 
 
 # ---------------------------------------------------------------------------
@@ -778,10 +801,21 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
 
         AgentConnection.objects.filter(pk=conn.pk).update(last_seen_at=timezone.now())
 
+    # Write-path filtering: strip the `verify` negotiation flag before dispatching
+    # to the invocation backend.  The ViewSet serializer must never see it — it
+    # is a frisian-mcp protocol param, not a model field.
+    _write_entry = tool_registry.get_entry(tool_name)
+    _verify = False
+    _dispatch_arguments = arguments
+    if _write_entry is not None and _write_entry.is_write:
+        _verify = bool(arguments.get("verify", False))
+        if "verify" in arguments:
+            _dispatch_arguments = {k: v for k, v in arguments.items() if k != "verify"}
+
     try:
         result = build_middleware_chain(
             _tool_registry_dispatch, get_middleware_instances()
-        )(request, tool_name, arguments)
+        )(request, tool_name, _dispatch_arguments)
     except ToolNotFoundError as exc:
         # JSON-RPC 2.0: -32601 METHOD_NOT_FOUND is the correct code for an unknown
         # tool name.  -32602 INVALID_PARAMS is reserved for structural argument
@@ -808,7 +842,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         return _jsonrpc_success(
             request_id,
             {
-                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                "content": [
+                    {"type": "text", "text": json.dumps({"error": str(exc), "status_code": 404})}
+                ],
                 "isError": True,
             },
         )
@@ -819,6 +855,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # Forward the actual error content so the agent receives actionable feedback
         # instead of the generic "Internal tool error" fallback.
         content = exc.content if isinstance(exc.content, dict) else {"error": str(exc.content)}
+        if "status_code" not in content:
+            content = {**content, "status_code": 500}
         return _jsonrpc_success(
             request_id,
             {
@@ -833,7 +871,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         return _jsonrpc_success(
             request_id,
             {
-                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                "content": [
+                    {"type": "text", "text": json.dumps({"error": str(exc), "status_code": 403})}
+                ],
                 "isError": True,
             },
         )
@@ -855,7 +895,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         return _jsonrpc_success(
             request_id,
             {
-                "content": [{"type": "text", "text": json.dumps({"error": msg})}],
+                "content": [
+                    {"type": "text", "text": json.dumps({"error": msg, "status_code": 400})}
+                ],
                 "isError": True,
             },
         )
@@ -867,7 +909,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         return _jsonrpc_success(
             request_id,
             {
-                "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                "content": [
+                    {"type": "text", "text": json.dumps({"error": str(exc), "status_code": 400})}
+                ],
                 "isError": True,
             },
         )
@@ -885,7 +929,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                                     str(exc)
                                     if getattr(settings, "FRISIAN_MCP_EXPOSE_ERRORS", settings.DEBUG)  # noqa: E501  # pylint: disable=line-too-long
                                     else "Internal tool error"
-                                )
+                                ),
+                                "status_code": 500,
                             }
                         ),
                     }
@@ -893,6 +938,85 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 "isError": True,
             },
         )
+
+    # Unwrap ToolResult from DRF-backed tools so the write-path lean envelope
+    # can access the actual HTTP status (201 for creates, 204 for deletes, etc.).
+    # Custom @mcp_tool callables return plain Python objects, not ToolResult, so
+    # the isinstance check is a no-op for those paths.
+    _http_status: int = 200
+    if isinstance(result, ToolResult):
+        _http_status = result.http_status
+        result = result.content
+
+    # Write-path lean default: cache the full result and return a compact
+    # confirmation envelope unless the caller passed verify=True.  @mcp_heavy
+    # takes precedence when a tool is decorated with both.
+    if _write_entry is not None and _write_entry.is_write and not (
+        _write_entry is not None and _write_entry.is_heavy
+    ):
+        if _verify:
+            return _jsonrpc_success(
+                request_id,
+                {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False},
+            )
+        from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
+            _extract_lean_envelope,
+        )
+        _w_token = secrets.token_urlsafe(16)
+        _lean = _extract_lean_envelope(result, _w_token, _http_status)
+        if "continuation_token" in _lean:
+            django_cache.set(
+                f"{_HEAVY_CACHE_PREFIX}{_w_token}",
+                _build_heavy_cache_entry(result, request, tool_name),
+                _HEAVY_CACHE_TTL,
+            )
+        elif _lean.get("deleted") is True:
+            # Delete: enrich with the pk from original arguments.
+            pk_val = arguments.get("pk") or arguments.get("id")
+            if pk_val is not None:
+                _lean["id"] = pk_val
+        return _jsonrpc_success(
+            request_id,
+            {"content": [{"type": "text", "text": json.dumps(_lean)}], "isError": False},
+        )
+
+    # Dispatcher-routed write: a group dispatcher routed to a write-tier
+    # underlying tool.  Apply the same lean/verify logic as the flat write
+    # path.  `verify` was stripped from params by make_group_invoke before
+    # the underlying tool ran, so we read it from the original arguments here.
+    if _write_entry is not None and _write_entry.is_dispatcher:
+        _d_resource = arguments.get("resource", "")
+        _d_action = arguments.get("action", "")
+        _d_params: dict[str, Any] = arguments.get("params") or {}
+        _d_sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
+        _d_target = f"{_d_resource}{_d_sep}{_d_action}" if _d_resource and _d_action else ""
+        _d_entry = tool_registry.get_entry(_d_target) if _d_target else None
+        if _d_entry is not None and _d_entry.is_write and not _d_entry.is_heavy:
+            _d_verify = bool(_d_params.get("verify", False))
+            if _d_verify:
+                return _jsonrpc_success(
+                    request_id,
+                    {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False},
+                )
+            from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
+                _extract_lean_envelope,
+            )
+            _w_token = secrets.token_urlsafe(16)
+            _d_lean = _extract_lean_envelope(result, _w_token, _http_status)
+            if "continuation_token" in _d_lean:
+                django_cache.set(
+                    f"{_HEAVY_CACHE_PREFIX}{_w_token}",
+                    _build_heavy_cache_entry(result, request, tool_name),
+                    _HEAVY_CACHE_TTL,
+                )
+            elif _d_lean.get("deleted") is True:
+                pk_val = _d_params.get("pk") or _d_params.get("id")
+                if pk_val is not None:
+                    _d_lean["id"] = pk_val
+            return _jsonrpc_success(
+                request_id,
+                {"content": [{"type": "text", "text": json.dumps(_d_lean)}], "isError": False},
+            )
 
     # @mcp_heavy tools: cache the result and return a probe envelope so the agent
     # can choose how much of the response to retrieve on the follow-up call.

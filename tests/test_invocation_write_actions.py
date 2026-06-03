@@ -198,19 +198,31 @@ class TestExtractData:
     """Focused probes against _extract_data() for each response shape."""
 
     def test_204_response_yields_deleted_envelope(self) -> None:
-        """A bare 204 Response (no data) returns the structured envelope."""
-        resp = Response(status=204)
-        assert SyncInvocation._extract_data(resp) == {"deleted": True, "status": 204}
+        """A bare 204 Response (no data) returns the structured envelope and status 204."""
+        data, http_status = SyncInvocation._extract_data(Response(status=204))
+        assert data == {"deleted": True, "status": 204}
+        assert http_status == 204
 
     def test_response_with_data_returned_verbatim(self) -> None:
         """A 200 Response with data passes through unchanged."""
         resp = Response({"id": 1, "name": "x"}, status=200)
-        assert SyncInvocation._extract_data(resp) == {"id": 1, "name": "x"}
+        data, http_status = SyncInvocation._extract_data(resp)
+        assert data == {"id": 1, "name": "x"}
+        assert http_status == 200
 
     def test_response_data_none_returns_status_envelope(self) -> None:
         """A non-204 Response with data=None returns {status: <code>} not None."""
-        resp = Response(status=202)
-        assert SyncInvocation._extract_data(resp) == {"status": 202}
+        data, http_status = SyncInvocation._extract_data(Response(status=202))
+        assert data == {"status": 202}
+        assert http_status == 202
+
+    def test_201_response_status_threaded_through(self) -> None:
+        """A 201 Created response carries http_status=201 in the tuple."""
+        data, http_status = SyncInvocation._extract_data(
+            Response({"id": "new-uuid", "name": "x"}, status=201)
+        )
+        assert data == {"id": "new-uuid", "name": "x"}
+        assert http_status == 201
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +246,7 @@ class TestJsonRendererNormalisation:
         uid = UUID("11d1d2c3-4444-5555-6666-7777aaaabbbb")
         resp = Response({"id": uid, "name": "x"}, status=200)
 
-        content = SyncInvocation._extract_data(resp)
+        content, _ = SyncInvocation._extract_data(resp)
         assert content == {"id": str(uid), "name": "x"}
         # Critical: stdlib json.dumps must not raise TypeError.
         import json as _json  # pylint: disable=import-outside-toplevel
@@ -248,7 +260,7 @@ class TestJsonRendererNormalisation:
         ts = datetime(2026, 5, 4, 12, 34, 56, tzinfo=UTC)
         resp = Response({"created": ts}, status=200)
 
-        content = SyncInvocation._extract_data(resp)
+        content, _ = SyncInvocation._extract_data(resp)
         assert isinstance(content["created"], str)
         assert "2026-05-04" in content["created"]
 
@@ -258,7 +270,7 @@ class TestJsonRendererNormalisation:
 
         resp = Response({"amount": Decimal("19.95")}, status=200)
 
-        content = SyncInvocation._extract_data(resp)
+        content, _ = SyncInvocation._extract_data(resp)
         # DRF's JSONRenderer emits Decimals as JSON numbers (or strings if
         # COERCE_DECIMAL_TO_STRING is set in settings).  Either is fine — the
         # key requirement is no TypeError on stdlib re-encode.
@@ -275,14 +287,16 @@ class TestJsonRendererNormalisation:
         nested = OrderedDict([("id", UUID("11d1d2c3-4444-5555-6666-7777aaaabbbb")), ("name", "y")])
         resp = Response({"nested": nested}, status=200)
 
-        content = SyncInvocation._extract_data(resp)
+        content, _ = SyncInvocation._extract_data(resp)
         assert content["nested"]["id"] == "11d1d2c3-4444-5555-6666-7777aaaabbbb"
         assert content["nested"]["name"] == "y"
 
     def test_plain_primitives_unchanged(self) -> None:
         """Pure-primitive response.data passes through unchanged (regression check)."""
         resp = Response({"a": 1, "b": "two", "c": [3, 4]}, status=200)
-        assert SyncInvocation._extract_data(resp) == {"a": 1, "b": "two", "c": [3, 4]}
+        data, http_status = SyncInvocation._extract_data(resp)
+        assert data == {"a": 1, "b": "two", "c": [3, 4]}
+        assert http_status == 200
 
     def test_unrenderable_payload_surfaces_as_tool_error_not_500(
         self, rf: RequestFactory

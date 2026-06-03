@@ -610,6 +610,7 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
             input_schema=build_group_input_schema(),
             permission_classes=[],
             permission_tier="read",
+            is_dispatcher=True,
         )
         for member_name in member_tools:
             tool_registry.set_hidden(member_name, True)
@@ -655,7 +656,9 @@ def _make_invocation_fn(
         result = invocation.invoke(tool_def, arguments, request)
         if result.is_error:
             raise ToolInvocationError(result.content)
-        return result.content
+        # Return the full ToolResult so views.py can read http_status for the
+        # lean envelope.  views.py unwraps .content after checking isinstance.
+        return result
 
     return _invoke
 
@@ -856,6 +859,7 @@ class FrisianMcpConfig(AppConfig):
                 input_schema=tool_def.input_schema,
                 permission_classes=list(tool_def.permission_classes),
                 permission_tier=tool_def.permission_tier,
+                is_write=tool_def.is_write,
             )
 
         load_middleware()

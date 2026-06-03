@@ -409,7 +409,7 @@ class TestFrisianMcpApiKeyAuthentication:
         assert result is not None
         assert result[1].permission == "read_write"
 
-    def test_authenticate_header_returns_bearer(self, rf: "RequestFactory") -> None:
+    def test_authenticate_header_returns_bearer(self, rf: RequestFactory) -> None:
         """authenticate_header() returns a Bearer realm string."""
         req = rf.get("/")
         header = self._auth().authenticate_header(req)
@@ -451,7 +451,8 @@ class TestMcpViewApiKeyIntegration:
         assert response.status_code == 401
 
     def test_unrecognised_key_returns_401(self, rf: RequestFactory, settings: Any) -> None:
-        """Bearer token that doesn't match any API key or DB token → 401.
+        """
+        Bearer token that doesn't match any API key or DB token → 401.
 
         FrisianMcpTokenAuthentication is listed second and raises AuthenticationFailed
         for unrecognised tokens, so a wrong key falls through and is rejected.
@@ -472,7 +473,8 @@ class TestMcpViewApiKeyIntegration:
         assert response.status_code == 401
 
     def test_valid_key_allows_request(self, rf: RequestFactory, settings: Any) -> None:
-        """Valid API key with no permission guard → request succeeds.
+        """
+        Valid API key with no permission guard → request succeeds.
 
         The MCP gateway is tier-based, not IsAuthenticated-based.  API keys
         authenticate the request (setting request.auth.permission) without
