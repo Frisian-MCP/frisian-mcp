@@ -14,6 +14,7 @@ Coverage:
 - @mcp_heavy takes precedence when both is_heavy and is_write are set
 - Read/list paths are unaffected (regression guard)
 - Token-savings measurement for 60-object bulk create
+- Group dispatcher write path (resource/action routing through lean envelope)
 """
 
 from __future__ import annotations
@@ -746,3 +747,205 @@ class TestReadPathUnaffected:
         # Lean write fields must NOT appear.
         assert "accepted" not in result
         assert "deleted" not in result
+
+
+# ---------------------------------------------------------------------------
+# Group dispatcher write path
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherGroupWritePath:
+    """Group dispatcher (FRISIAN_MCP_DISPATCH_GROUPS) routes write actions through lean envelope."""
+
+    def _build_dispatcher_registry(
+        self,
+        flat_tools: dict[str, tuple[Any, bool]],
+        group_name: str = "dcim",
+        resource_prefixes: frozenset[str] | None = None,
+    ) -> ToolRegistry:
+        """
+        Build an isolated registry with flat tools + a group dispatcher.
+
+        Args:
+            flat_tools: mapping of tool_name -> (handler, is_write)
+            group_name: name to register the group dispatcher under
+            resource_prefixes: passed to make_group_invoke; defaults to prefixes
+                derived from flat_tools keys
+
+        The dispatcher tool is registered with is_dispatcher=True so that
+        views.py's dispatcher lean-envelope block (``_write_entry.is_dispatcher``)
+        fires correctly.
+        """
+        from frisian_mcp.backends.group_dispatcher import (  # noqa: PLC0415
+            build_group_input_schema,
+            make_group_invoke,
+        )
+
+        isolated = ToolRegistry()
+        sep = "_"
+
+        for tool_name, (handler, is_write) in flat_tools.items():
+            isolated.register(
+                name=tool_name,
+                fn=handler,
+                description=f"stub {tool_name}",
+                input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+                permission_classes=[],
+                is_write=is_write,
+                permission_tier="read",
+            )
+
+        member_tools = frozenset(flat_tools.keys())
+        if resource_prefixes is None:
+            resource_prefixes = frozenset(n.split(sep, 1)[0] for n in flat_tools)
+
+        invoke_fn = make_group_invoke(group_name, member_tools, isolated, resource_prefixes)
+        isolated.register(
+            name=group_name,
+            fn=invoke_fn,
+            description=f"group dispatcher for {group_name}",
+            input_schema=build_group_input_schema(),
+            permission_classes=[],
+            permission_tier="read",
+            is_dispatcher=True,
+        )
+        return isolated
+
+    # ------------------------------------------------------------------ create
+
+    def test_dispatcher_create_returns_lean_envelope(self, rf: RequestFactory) -> None:
+        """Write via group dispatcher returns lean envelope by default (no verify)."""
+        full_object = {
+            "id": "device-uuid-11",
+            "name": "spine-01",
+            "status": {"value": "active"},
+            "device_type": {"model": "Nexus 9000"},
+            "extra": "not in lean",
+        }
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return full_object
+
+        isolated = self._build_dispatcher_registry({"device_create": (_create, True)})
+
+        with patch("frisian_mcp.views.tool_registry", isolated), patch(
+            "frisian_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = None
+            response = _call_tool(
+                rf, "dcim", {"resource": "device", "action": "create", "params": {"name": "spine-01"}}
+            )
+
+        result = _tool_result(response)
+        assert not _is_error(response)
+
+        # Lean envelope must include id and accepted, not full body.
+        assert result.get("id") == "device-uuid-11"
+        assert "accepted" in result or "continuation_token" in result
+        assert "device_type" not in result
+        assert "extra" not in result
+
+    def test_dispatcher_create_verify_true_returns_full_object(self, rf: RequestFactory) -> None:
+        """verify=True inside params returns the full serialised object directly."""
+        full_object = {
+            "id": "device-uuid-22",
+            "name": "spine-02",
+            "status": {"value": "active"},
+            "device_type": {"model": "Nexus 9000"},
+            "extra": "included when verify=True",
+        }
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return full_object
+
+        isolated = self._build_dispatcher_registry({"device_create": (_create, True)})
+
+        with patch("frisian_mcp.views.tool_registry", isolated), patch(
+            "frisian_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = None
+            response = _call_tool(
+                rf,
+                "dcim",
+                {"resource": "device", "action": "create", "params": {"name": "spine-02", "verify": True}},
+            )
+
+        result = _tool_result(response)
+        assert not _is_error(response)
+        assert result == full_object
+
+    # ------------------------------------------------------------------ verify stripping
+
+    def test_dispatcher_verify_stripped_from_params_before_tool(self, rf: RequestFactory) -> None:
+        """verify is stripped from params by the dispatcher before the underlying tool sees them."""
+        received_params: dict[str, Any] = {}
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            received_params.update(arguments)
+            return {"id": "x"}
+
+        isolated = self._build_dispatcher_registry({"device_create": (_create, True)})
+
+        with patch("frisian_mcp.views.tool_registry", isolated), patch(
+            "frisian_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = None
+            _call_tool(
+                rf,
+                "dcim",
+                {"resource": "device", "action": "create", "params": {"name": "spine-03", "verify": True}},
+            )
+
+        assert "verify" not in received_params
+
+    # ------------------------------------------------------------------ delete
+
+    def test_dispatcher_delete_returns_lean_with_id(self, rf: RequestFactory) -> None:
+        """Delete via dispatcher returns {deleted, id, status_code} lean envelope."""
+
+        def _destroy(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return {"deleted": True, "status": 204}
+
+        isolated = self._build_dispatcher_registry({"device_destroy": (_destroy, True)})
+
+        with patch("frisian_mcp.views.tool_registry", isolated), patch(
+            "frisian_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = None
+            response = _call_tool(
+                rf,
+                "dcim",
+                {"resource": "device", "action": "destroy", "params": {"id": "device-uuid-99"}},
+            )
+
+        result = _tool_result(response)
+        assert not _is_error(response)
+        assert result["deleted"] is True
+        assert result["id"] == "device-uuid-99"
+        assert result["status_code"] == 204
+        assert "continuation_token" not in result
+
+    # ------------------------------------------------------------------ read unaffected
+
+    def test_dispatcher_read_action_returns_full_result(self, rf: RequestFactory) -> None:
+        """Read action routed through group dispatcher returns the full result unchanged."""
+        full_list = [{"id": str(i), "name": f"device-{i}", "extra": "included"} for i in range(3)]
+
+        def _list(arguments: dict[str, Any], request: Any) -> list[dict[str, Any]]:
+            return full_list
+
+        isolated = self._build_dispatcher_registry({"device_list": (_list, False)})
+
+        with patch("frisian_mcp.views.tool_registry", isolated), patch(
+            "frisian_mcp.views.django_cache"
+        ) as mock_cache:
+            mock_cache.get.return_value = None
+            response = _call_tool(rf, "dcim", {"resource": "device", "action": "list", "params": {}})
+
+        result = _tool_result(response)
+        assert not _is_error(response)
+
+        # Full list must be returned unmodified.
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert result[0]["extra"] == "included"

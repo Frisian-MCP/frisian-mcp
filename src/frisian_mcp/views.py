@@ -937,6 +937,44 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             {"content": [{"type": "text", "text": json.dumps(_lean)}], "isError": False},
         )
 
+    # Dispatcher-routed write: a group dispatcher routed to a write-tier
+    # underlying tool.  Apply the same lean/verify logic as the flat write
+    # path.  `verify` was stripped from params by make_group_invoke before
+    # the underlying tool ran, so we read it from the original arguments here.
+    if _write_entry is not None and _write_entry.is_dispatcher:
+        _d_resource = arguments.get("resource", "")
+        _d_action = arguments.get("action", "")
+        _d_params: dict[str, Any] = arguments.get("params") or {}
+        _d_sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
+        _d_target = f"{_d_resource}{_d_sep}{_d_action}" if _d_resource and _d_action else ""
+        _d_entry = tool_registry.get_entry(_d_target) if _d_target else None
+        if _d_entry is not None and _d_entry.is_write and not _d_entry.is_heavy:
+            _d_verify = bool(_d_params.get("verify", False))
+            if _d_verify:
+                return _jsonrpc_success(
+                    request_id,
+                    {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False},
+                )
+            from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
+                _extract_lean_envelope,
+            )
+            _w_token = secrets.token_urlsafe(16)
+            _d_lean = _extract_lean_envelope(result, _w_token)
+            if "continuation_token" in _d_lean:
+                django_cache.set(
+                    f"{_HEAVY_CACHE_PREFIX}{_w_token}",
+                    _build_heavy_cache_entry(result, request, tool_name),
+                    _HEAVY_CACHE_TTL,
+                )
+            elif _d_lean.get("deleted") is True:
+                pk_val = _d_params.get("pk") or _d_params.get("id")
+                if pk_val is not None:
+                    _d_lean["id"] = pk_val
+            return _jsonrpc_success(
+                request_id,
+                {"content": [{"type": "text", "text": json.dumps(_d_lean)}], "isError": False},
+            )
+
     # @mcp_heavy tools: cache the result and return a probe envelope so the agent
     # can choose how much of the response to retrieve on the follow-up call.
     _entry = tool_registry.get_entry(tool_name)

@@ -610,6 +610,7 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
             input_schema=build_group_input_schema(),
             permission_classes=[],
             permission_tier="read",
+            is_dispatcher=True,
         )
         for member_name in member_tools:
             tool_registry.set_hidden(member_name, True)
