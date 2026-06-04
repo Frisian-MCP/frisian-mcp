@@ -1138,14 +1138,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         _http_status = result.http_status
         result = result.content
 
-    # Lite-mode success post-processing: when the caller passed ``lite: true``
-    # and the result is a dispatcher help payload (``{"help": True, ...}``),
-    # strip the instructional scaffolding (action descriptions, input
-    # schemas, navigation hints) so the agent receives action names only.
-    # Non-help dispatcher results, write/heavy envelopes, and plain tool
-    # results are left unchanged — lite never strips operation data, only
-    # the re-teaching wrapper.  See :func:`_strip_lite_scaffolding`.
-    if _lite and _write_entry is not None and _write_entry.is_dispatcher:
+    # Lite-mode success post-processing: strip instructional scaffolding
+    # (hints map, navigation strings, dispatcher action descriptions) from
+    # any successful response when the caller passed ``lite: true``.
+    # _strip_lite_scaffolding is safe to call on all result shapes — it only
+    # removes known scaffolding patterns, never operation data.  The
+    # is_dispatcher guard was removed because it caused silent no-ops when
+    # host apps omit that registration flag; the function itself is the guard.
+    if _lite:
         result = _strip_lite_scaffolding(result)
 
     # Write-path lean default: cache the full result and return a compact
