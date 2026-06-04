@@ -302,12 +302,16 @@ def make_group_invoke(
             )
 
         # Strip frisian-mcp protocol params before the underlying tool sees params.
-        # `verify` and `lite` are protocol-level flags; DRF serializers may reject
-        # unknown fields.  views.py reads these from the original top-level arguments.
+        # `verify` is a write-path flag; `lite` is a protocol-level flag on all calls.
+        # DRF serializers may reject unknown fields.  views.py reads both from the
+        # original top-level arguments before dispatch.
         _target_entry = registry.get_entry(target_name)
-        _proto_params = {"verify", "lite"}
-        if _target_entry is not None and _proto_params.intersection(params):
-            params = {k: v for k, v in params.items() if k not in _proto_params}
+        if _target_entry is not None:
+            _strip = {"lite"}
+            if _target_entry.is_write:
+                _strip.add("verify")
+            if _strip.intersection(params):
+                params = {k: v for k, v in params.items() if k not in _strip}
 
         return registry.dispatch(request, target_name, params)
 
