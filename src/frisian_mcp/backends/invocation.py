@@ -463,8 +463,10 @@ class SyncInvocation(BaseInvocationBackend):
             # a string-in-string envelope.
             message = _exception_envelope_message(exc)
             logger.warning(
-                "SyncInvocation: viewset.initial() denied call",
-                extra={"tool": tool.name, "error": message},
+                "SyncInvocation: viewset.initial() denied call — %s: %s",
+                type(exc).__name__,
+                message,
+                extra={"tool": tool.name},
             )
             return ToolResult(content={"error": message}, is_error=True)
 
