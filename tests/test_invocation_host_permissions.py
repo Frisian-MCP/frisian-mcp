@@ -16,6 +16,7 @@ run normally.
 # pylint: disable=redefined-outer-name,protected-access
 from __future__ import annotations
 
+import unittest.mock
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -235,3 +236,83 @@ class TestNonDjangoPermissionsStillEnforced:
         invocation = SyncInvocation()
         result = invocation.invoke(_tool(_CustomPermissionViewSet), {}, req)
         assert result.is_error is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: FRISIAN_MCP_SERVICE_ACCOUNT_USER substitution
+# ---------------------------------------------------------------------------
+
+
+class TestServiceAccountUser:
+    """
+    When FRISIAN_MCP_SERVICE_ACCOUNT_USER is configured and the incoming request
+    has an anonymous user, _resolve_effective_user substitutes the service account
+    so that host ViewSets using IsAuthenticated are satisfied.
+    """
+
+    def test_anonymous_substituted_by_service_account(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """Anonymous request is substituted with the service account user."""
+        service_user = MagicMock()
+        service_user.is_authenticated = True
+        service_user.username = "mcp-service"
+
+        settings.FRISIAN_MCP_SERVICE_ACCOUNT_USER = "mcp-service"
+
+        with unittest.mock.patch(
+            "frisian_mcp.backends.invocation.SyncInvocation._resolve_effective_user",
+            return_value=service_user,
+        ):
+            req = _make_request(rf, authenticated=False)
+            invocation = SyncInvocation()
+            result = invocation.invoke(_tool(_IsAuthenticatedViewSet), {}, req)
+
+        assert result.is_error is False
+
+    def test_authenticated_user_not_replaced(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """When the request already has an authenticated user, it is never replaced."""
+        settings.FRISIAN_MCP_SERVICE_ACCOUNT_USER = "some-service"
+
+        req = _make_request(rf, authenticated=True)
+        original_user = req.user
+
+        resolved = SyncInvocation._resolve_effective_user(req)
+
+        assert resolved is original_user
+
+    def test_service_account_missing_falls_back_to_anonymous(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """When the named user does not exist, _resolve_effective_user returns AnonymousUser."""
+        settings.FRISIAN_MCP_SERVICE_ACCOUNT_USER = "nonexistent-user"
+
+        class _FakeDoesNotExist(Exception):
+            pass
+
+        mock_model = MagicMock()
+        # DoesNotExist must be a real exception class so it can be raised and caught.
+        mock_model.DoesNotExist = _FakeDoesNotExist
+        mock_model.objects.get.side_effect = _FakeDoesNotExist
+
+        with unittest.mock.patch(
+            "django.contrib.auth.get_user_model", return_value=mock_model
+        ):
+            req = _make_request(rf, authenticated=False)
+            resolved = SyncInvocation._resolve_effective_user(req)
+
+        assert isinstance(resolved, AnonymousUser)
+
+    def test_no_setting_returns_anonymous_unchanged(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """With no FRISIAN_MCP_SERVICE_ACCOUNT_USER set, anonymous user passes through."""
+        if hasattr(settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER"):
+            delattr(settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER")
+
+        req = _make_request(rf, authenticated=False)
+        resolved = SyncInvocation._resolve_effective_user(req)
+
+        assert isinstance(resolved, AnonymousUser)
