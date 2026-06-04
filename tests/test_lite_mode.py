@@ -434,11 +434,51 @@ class TestLiteHelpers:
         assert _strip_lite_scaffolding(payload) is payload
 
     def test_strip_lite_scaffolding_passthrough_when_not_help(self) -> None:
-        """A dict without ``help: True`` is returned unchanged (operation data)."""
+        """A data dict with no scaffolding fields is returned unchanged."""
         from frisian_mcp.views import _strip_lite_scaffolding
 
         payload = {"results": [1, 2], "count": 2}
         assert _strip_lite_scaffolding(payload) == payload
+
+    def test_strip_lite_scaffolding_removes_hints_from_data_response(self) -> None:
+        """``hints`` is stripped even when ``help`` is absent (regular data response)."""
+        from frisian_mcp.views import _strip_lite_scaffolding
+
+        payload = {
+            "count": 3,
+            "results": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+            "hints": {"next": "add params.offset=3"},
+        }
+        out = _strip_lite_scaffolding(payload)
+        assert "hints" not in out
+        assert out["count"] == 3
+        assert len(out["results"]) == 3
+
+    def test_strip_lite_scaffolding_drops_scaffolding_strings_from_data_response(
+        self,
+    ) -> None:
+        """Instructional string fields are stripped from non-help responses too."""
+        from frisian_mcp.views import _strip_lite_scaffolding
+
+        payload = {
+            "count": 1,
+            "results": [{"id": "x"}],
+            "tip": "Use action='help' to see available filters.",
+        }
+        out = _strip_lite_scaffolding(payload)
+        assert "tip" not in out
+        assert out["count"] == 1
+
+    def test_strip_lite_scaffolding_actions_not_reduced_on_data_response(self) -> None:
+        """``actions`` is NOT reduced to names on a non-help payload."""
+        from frisian_mcp.views import _strip_lite_scaffolding
+
+        payload = {
+            "results": [{"actions": ["edit", "delete"]}],
+            "actions": [{"name": "a", "description": "desc"}],
+        }
+        out = _strip_lite_scaffolding(payload)
+        assert out["actions"] == [{"name": "a", "description": "desc"}]
 
     def test_strip_lite_scaffolding_handles_string_action_entries(self) -> None:
         """Group-dispatcher style ``actions: [str, ...]`` is preserved."""

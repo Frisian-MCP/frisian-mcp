@@ -101,23 +101,19 @@ _LITE_SCAFFOLDING_SUBSTRINGS: tuple[str, ...] = (
 
 def _strip_lite_scaffolding(payload: Any) -> Any:
     """
-    Return a copy of *payload* with dispatcher scaffolding removed.
+    Return a copy of *payload* with instructional scaffolding removed.
 
-    Applied when a caller passes ``lite: true`` on a ``tools/call`` to a
-    dispatcher tool and the dispatcher returned its help / action-listing
-    payload (signalled by ``payload["help"] is True``).  The lite contract is:
+    Applied on every successful ``tools/call`` response when the caller passes
+    ``lite: true``.  The lite contract is:
 
-    * Reduce each entry in the top-level ``actions`` list to its ``name``
-      string (drop ``description``, ``input_schema``, ``params``).
+    * Drop the ``hints`` map (operator-supplied navigation hints).
     * Remove any top-level string field whose value contains
       instructional scaffolding (``"use action='help'"`` and similar) —
       detected by :data:`_LITE_SCAFFOLDING_SUBSTRINGS`.
-    * Drop the ``hints`` map when present (those are operator-supplied
-      navigation hints that lite mode suppresses).
-    * Leave every other field untouched (data, not scaffolding).
-
-    Non-dispatcher / non-help payloads are returned unchanged: lite mode
-    strips scaffolding, never operation data.
+    * On dispatcher help responses (``payload["help"] is True``): also
+      reduce each entry in the ``actions`` list to its ``name`` string
+      (drop ``description``, ``input_schema``, ``params``).
+    * Leave every other field untouched — data is never stripped.
 
     Args:
         payload: The dispatch result returned by the tool's ``invoke``.
@@ -129,16 +125,14 @@ def _strip_lite_scaffolding(payload: Any) -> Any:
     """
     if not isinstance(payload, dict):
         return payload
-    if payload.get("help") is not True:
-        return payload
 
+    is_help = payload.get("help") is True
     stripped: dict[str, Any] = {}
     for key, value in payload.items():
-        if key == "actions" and isinstance(value, list):
-            # Reduce action entries to plain name strings.  Each entry may be a
-            # dict (single dispatcher: {"name", "description", "input_schema",
-            # "params"}) or a string (group dispatcher: action names only) —
-            # handle both shapes uniformly.
+        if is_help and key == "actions" and isinstance(value, list):
+            # Reduce action entries to plain name strings (help responses only).
+            # Each entry may be a dict (single dispatcher) or a string (group
+            # dispatcher: action names only) — handle both shapes uniformly.
             names: list[str] = []
             for entry in value:
                 if isinstance(entry, dict):
