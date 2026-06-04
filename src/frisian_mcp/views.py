@@ -836,7 +836,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # self-teaching escape hatch.  Strip it from ``arguments`` here so the
     # underlying tool implementation never sees the protocol flag.  Pattern
     # matches how ``verify`` is stripped on the write-path below.
+    arguments = dict(arguments)
     _lite: bool = bool(arguments.pop("lite", False))
+    # Fallback: agents that cached an older schema (before ``lite`` was added as
+    # a top-level dispatcher property) pass ``lite`` inside the ``params`` bag.
+    # Extract it there too so lite works regardless of which schema the agent saw.
+    if not _lite and isinstance(arguments.get("params"), dict):
+        arguments["params"] = dict(arguments["params"])
+        _lite = bool(arguments["params"].pop("lite", False))
 
     # Per-agent tool allowlist: when an active AgentConnection with a non-null
     # allowed_tools list is linked to the caller's credential, reject any tool
