@@ -480,6 +480,37 @@ class TestLiteHelpers:
         out = _strip_lite_scaffolding(payload)
         assert out["actions"] == [{"name": "a", "description": "desc"}]
 
+    def test_strip_lite_scaffolding_reduces_resources_to_names_on_group_help(
+        self,
+    ) -> None:
+        """Full-group help ``resources`` dict is reduced to a sorted name list."""
+        from frisian_mcp.views import _strip_lite_scaffolding
+
+        payload = {
+            "help": True,
+            "group": "bgp",
+            "resources": {
+                "peergroup": ["list", "retrieve", "create"],
+                "autonomoussystem": ["list", "retrieve"],
+                "peering": ["list"],
+            },
+        }
+        out = _strip_lite_scaffolding(payload)
+        assert out["resources"] == ["autonomoussystem", "peergroup", "peering"]
+        assert out["group"] == "bgp"
+
+    def test_strip_lite_scaffolding_resources_not_reduced_on_data_response(
+        self,
+    ) -> None:
+        """``resources`` dict is NOT reduced on a non-help payload."""
+        from frisian_mcp.views import _strip_lite_scaffolding
+
+        payload = {
+            "resources": {"device": ["list", "retrieve"]},
+        }
+        out = _strip_lite_scaffolding(payload)
+        assert out["resources"] == {"device": ["list", "retrieve"]}
+
     def test_strip_lite_scaffolding_handles_string_action_entries(self) -> None:
         """Group-dispatcher style ``actions: [str, ...]`` is preserved."""
         from frisian_mcp.views import _strip_lite_scaffolding
