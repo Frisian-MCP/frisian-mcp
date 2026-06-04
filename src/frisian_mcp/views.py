@@ -143,6 +143,12 @@ def _strip_lite_scaffolding(payload: Any) -> Any:
                     names.append(entry)
             stripped[key] = names
             continue
+        if is_help and key == "resources" and isinstance(value, dict):
+            # Full-group help returns {resource: [actions, ...], ...}.  Agent
+            # already knows the action catalogue from orientation; lite reduces
+            # this to a sorted list of resource names only.
+            stripped[key] = sorted(value.keys())
+            continue
         if key == "hints":
             # Operator-supplied navigation hints are scaffolding by definition.
             continue
