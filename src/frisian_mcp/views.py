@@ -85,6 +85,80 @@ _REFRESH_HINT = (
     " — the server manifest may have changed."
 )
 
+#: Substrings used to detect instructional scaffolding text that the
+#: ``lite: true`` per-call flag should strip from dispatcher help responses.
+#: Matched case-insensitively against the *value* of any string field on the
+#: dispatcher help payload (e.g. a ``hints`` map keyed by tool name).  A field
+#: whose value contains any of these substrings is removed from the lite
+#: response so the agent receives the action list without re-teaching text.
+_LITE_SCAFFOLDING_SUBSTRINGS: tuple[str, ...] = (
+    "use action=",
+    "use action ",
+    "call tools/list",
+    "tools/list to refresh",
+)
+
+
+def _strip_lite_scaffolding(payload: Any) -> Any:
+    """
+    Return a copy of *payload* with instructional scaffolding removed.
+
+    Applied on every successful ``tools/call`` response when the caller passes
+    ``lite: true``.  The lite contract is:
+
+    * Drop the ``hints`` map (operator-supplied navigation hints).
+    * Remove any top-level string field whose value contains
+      instructional scaffolding (``"use action='help'"`` and similar) —
+      detected by :data:`_LITE_SCAFFOLDING_SUBSTRINGS`.
+    * On dispatcher help responses (``payload["help"] is True``): also
+      reduce each entry in the ``actions`` list to its ``name`` string
+      (drop ``description``, ``input_schema``, ``params``).
+    * Leave every other field untouched — data is never stripped.
+
+    Args:
+        payload: The dispatch result returned by the tool's ``invoke``.
+
+    Returns:
+        A new dict (or the original *payload* unchanged when no stripping
+        applies).  Never mutates *payload* in place.
+
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    is_help = payload.get("help") is True
+    stripped: dict[str, Any] = {}
+    for key, value in payload.items():
+        if is_help and key == "actions" and isinstance(value, list):
+            # Reduce action entries to plain name strings (help responses only).
+            # Each entry may be a dict (single dispatcher) or a string (group
+            # dispatcher: action names only) — handle both shapes uniformly.
+            names: list[str] = []
+            for entry in value:
+                if isinstance(entry, dict):
+                    name = entry.get("name")
+                    if isinstance(name, str):
+                        names.append(name)
+                elif isinstance(entry, str):
+                    names.append(entry)
+            stripped[key] = names
+            continue
+        if is_help and key == "resources" and isinstance(value, dict):
+            # Full-group help returns {resource: [actions, ...], ...}.  Agent
+            # already knows the action catalogue from orientation; lite reduces
+            # this to a sorted list of resource names only.
+            stripped[key] = sorted(value.keys())
+            continue
+        if key == "hints":
+            # Operator-supplied navigation hints are scaffolding by definition.
+            continue
+        if isinstance(value, str) and any(
+            marker in value.lower() for marker in _LITE_SCAFFOLDING_SUBSTRINGS
+        ):
+            continue
+        stripped[key] = value
+    return stripped
+
 
 def _get_token_permission(request: Any) -> str:
     """
@@ -290,13 +364,102 @@ def _jsonrpc_error(
     request_id: JsonRpcId,
     code: int,
     message: str,
-    data: str | None = None,
+    data: Any = None,
 ) -> JsonResponse:
-    """Return a JSON-RPC 2.0 error response."""
+    """
+    Return a JSON-RPC 2.0 error response.
+
+    *data* may be any JSON-serialisable value.  Strings remain the common
+    case (e.g. close-match suggestions for an unknown tool); dicts are used
+    by the lite-mode escape hatch (see :func:`_lite_enrich_error`) to attach
+    the failing tool's ``inputSchema`` so the agent can self-teach without
+    a separate ``tools/list`` round-trip.
+    """
     error: JsonDict = {"code": code, "message": message}
     if data is not None:
         error["data"] = data
     return JsonResponse({"jsonrpc": "2.0", "id": request_id, "error": error})
+
+
+def _lite_enrich_error_content(
+    content: dict[str, Any], tool_name: str, lite: bool
+) -> dict[str, Any]:
+    """
+    Attach the failing tool's ``inputSchema`` to an ``isError`` content dict.
+
+    ``tools/call`` failures that surface as ``isError=true`` content blocks
+    (rather than JSON-RPC ``error`` responses) carry their detail in
+    ``content[0].text`` as JSON.  This helper mirrors :func:`_lite_enrich_error`
+    for that path: when *lite* is ``True`` and the tool exists, attach the
+    tool's ``inputSchema`` to the content dict so the agent can self-correct.
+
+    Args:
+        content: The dict that will be JSON-serialised into
+            ``content[0].text`` of an ``isError=true`` response.
+        tool_name: The tool name the caller invoked.
+        lite: The per-call ``lite`` flag extracted from arguments.
+
+    Returns:
+        Either *content* unchanged, or a new dict with ``"inputSchema"``
+        added.  Never mutates *content* in place.
+
+    """
+    if not lite or not tool_name:
+        return content
+    entry = tool_registry.get_entry(tool_name)
+    if entry is None:
+        return content
+    return {**content, "inputSchema": entry.input_schema}
+
+
+def _lite_enrich_error(
+    response: JsonResponse, tool_name: str, lite: bool
+) -> JsonResponse:
+    """
+    Attach the failing tool's ``inputSchema`` to a JSON-RPC error response.
+
+    Implements the lite-mode escape hatch: when a caller passes
+    ``lite: true`` on a ``tools/call`` and the call fails (bad params,
+    unknown action, validation error, etc.), the response includes the
+    tool's input schema so the agent can self-correct without re-fetching
+    ``tools/list``.  Lite mode normally suppresses scaffolding; a failure
+    re-includes it.
+
+    When *lite* is ``False`` or the tool is not registered, *response* is
+    returned unchanged.  Otherwise the response body is rewritten so that
+    ``error.data`` is a structured dict containing ``"detail"`` (the original
+    string data, when present) and ``"inputSchema"`` (the tool's schema).
+
+    Args:
+        response: The JSON-RPC error response built by :func:`_jsonrpc_error`.
+        tool_name: The tool name the caller invoked.
+        lite: The per-call ``lite`` flag extracted from arguments.
+
+    Returns:
+        Either *response* unchanged, or a new ``JsonResponse`` with the
+        ``inputSchema`` attached to ``error.data``.
+
+    """
+    if not lite or not tool_name:
+        return response
+    entry = tool_registry.get_entry(tool_name)
+    if entry is None:
+        return response
+    body = json.loads(response.content)
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return response
+    existing = err.get("data")
+    enriched: dict[str, Any]
+    if isinstance(existing, dict):
+        enriched = {**existing}
+    elif existing is None:
+        enriched = {}
+    else:
+        enriched = {"detail": existing}
+    enriched["inputSchema"] = entry.input_schema
+    err["data"] = enriched
+    return JsonResponse(body)
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +836,21 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             request_id, INVALID_PARAMS, "Invalid params", "'arguments' must be an object"
         )
 
+    # Per-call ``lite`` opt-in (Issue 4 / Repeated-Path Token Reduction).  When
+    # ``lite: true`` is present we (a) suppress dispatcher help scaffolding on
+    # success and (b) re-include the tool's ``inputSchema`` on failure as a
+    # self-teaching escape hatch.  Strip it from ``arguments`` here so the
+    # underlying tool implementation never sees the protocol flag.  Pattern
+    # matches how ``verify`` is stripped on the write-path below.
+    arguments = dict(arguments)
+    _lite: bool = bool(arguments.pop("lite", False))
+    # Fallback: agents that cached an older schema (before ``lite`` was added as
+    # a top-level dispatcher property) pass ``lite`` inside the ``params`` bag.
+    # Extract it there too so lite works regardless of which schema the agent saw.
+    if not _lite and isinstance(arguments.get("params"), dict):
+        arguments["params"] = dict(arguments["params"])
+        _lite = bool(arguments["params"].pop("lite", False))
+
     # Per-agent tool allowlist: when an active AgentConnection with a non-null
     # allowed_tools list is linked to the caller's credential, reject any tool
     # name not in that list before reaching the registry.
@@ -833,23 +1011,38 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             data += f". Did you mean: {', '.join(suggestions)}?"
         data += f" Available tools: {', '.join(sorted(known_names))}."
         data += _REFRESH_HINT
-        return _jsonrpc_error(request_id, METHOD_NOT_FOUND, "Unknown tool", data)
+        # Lite-mode escape hatch is a no-op here: the tool is unknown so the
+        # registry has no inputSchema to re-include.  The close-match
+        # suggestions in ``data`` are already the agent's recovery path.
+        return _lite_enrich_error(
+            _jsonrpc_error(request_id, METHOD_NOT_FOUND, "Unknown tool", data),
+            tool_name,
+            _lite,
+        )
     except LookupError as exc:
         # LookupError from inside a registered tool (e.g. group dispatcher raises
         # LookupError for an unknown resource/action pair).  Distinct from the
         # tool-not-found case above: the MCP tool exists, but the sub-action does
         # not.  Surface as isError:true so the agent can self-correct.
+        content = _lite_enrich_error_content(
+            {"error": str(exc), "status_code": 404}, tool_name, _lite
+        )
         return _jsonrpc_success(
             request_id,
             {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": str(exc), "status_code": 404})}
-                ],
+                "content": [{"type": "text", "text": json.dumps(content)}],
                 "isError": True,
             },
         )
     except ToolInputError as exc:
-        return _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc))
+        # Lite-mode escape hatch: when the call fails because arguments did not
+        # validate against ``inputSchema``, re-include the schema so the agent
+        # can self-correct without a separate ``tools/list`` round-trip.
+        return _lite_enrich_error(
+            _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc)),
+            tool_name,
+            _lite,
+        )
     except ToolInvocationError as exc:
         # Backend returned ToolResult.is_error=True (non-DRF exception in the ViewSet).
         # Forward the actual error content so the agent receives actionable feedback
@@ -857,6 +1050,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         content = exc.content if isinstance(exc.content, dict) else {"error": str(exc.content)}
         if "status_code" not in content:
             content = {**content, "status_code": 500}
+        content = _lite_enrich_error_content(content, tool_name, _lite)
         return _jsonrpc_success(
             request_id,
             {
@@ -868,12 +1062,13 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # Return as isError=True tool-level content, not a JSON-RPC protocol error.
         # INVALID_PARAMS (-32602) is reserved for argument structure failures; using
         # it for auth denial misleads agents into thinking their call format is wrong.
+        content = _lite_enrich_error_content(
+            {"error": str(exc), "status_code": 403}, tool_name, _lite
+        )
         return _jsonrpc_success(
             request_id,
             {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": str(exc), "status_code": 403})}
-                ],
+                "content": [{"type": "text", "text": json.dumps(content)}],
                 "isError": True,
             },
         )
@@ -881,6 +1076,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # IT-8: Surface DRF field-level validation errors with structured detail so
         # the caller can display per-field messages without parsing a flat string.
         content = _build_drf_error_content(exc)
+        content = _lite_enrich_error_content(content, tool_name, _lite)
         return _jsonrpc_success(
             request_id,
             {
@@ -892,12 +1088,13 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # Surface Django model/form validation errors as structured isError=True content
         # so agents receive actionable feedback in the same format as DRFValidationError.
         msg = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
+        content = _lite_enrich_error_content(
+            {"error": msg, "status_code": 400}, tool_name, _lite
+        )
         return _jsonrpc_success(
             request_id,
             {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": msg, "status_code": 400})}
-                ],
+                "content": [{"type": "text", "text": json.dumps(content)}],
                 "isError": True,
             },
         )
@@ -906,35 +1103,34 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # raise ValueError for user-correctable input problems (e.g. invalid UUID, bad
         # enum value).  Return as a tool-level isError response so the caller gets
         # actionable feedback without a full JSON-RPC error.
+        content = _lite_enrich_error_content(
+            {"error": str(exc), "status_code": 400}, tool_name, _lite
+        )
         return _jsonrpc_success(
             request_id,
             {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": str(exc), "status_code": 400})}
-                ],
+                "content": [{"type": "text", "text": json.dumps(content)}],
                 "isError": True,
             },
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.exception("tool_execution_error", extra={"tool": tool_name, "error": str(exc)})
+        content = _lite_enrich_error_content(
+            {
+                "error": (
+                    str(exc)
+                    if getattr(settings, "FRISIAN_MCP_EXPOSE_ERRORS", settings.DEBUG)
+                    else "Internal tool error"
+                ),
+                "status_code": 500,
+            },
+            tool_name,
+            _lite,
+        )
         return _jsonrpc_success(
             request_id,
             {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps(
-                            {
-                                "error": (
-                                    str(exc)
-                                    if getattr(settings, "FRISIAN_MCP_EXPOSE_ERRORS", settings.DEBUG)  # noqa: E501  # pylint: disable=line-too-long
-                                    else "Internal tool error"
-                                ),
-                                "status_code": 500,
-                            }
-                        ),
-                    }
-                ],
+                "content": [{"type": "text", "text": json.dumps(content)}],
                 "isError": True,
             },
         )
@@ -947,6 +1143,16 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     if isinstance(result, ToolResult):
         _http_status = result.http_status
         result = result.content
+
+    # Lite-mode success post-processing: strip instructional scaffolding
+    # (hints map, navigation strings, dispatcher action descriptions) from
+    # any successful response when the caller passed ``lite: true``.
+    # _strip_lite_scaffolding is safe to call on all result shapes — it only
+    # removes known scaffolding patterns, never operation data.  The
+    # is_dispatcher guard was removed because it caused silent no-ops when
+    # host apps omit that registration flag; the function itself is the guard.
+    if _lite:
+        result = _strip_lite_scaffolding(result)
 
     # Write-path lean default: cache the full result and return a compact
     # confirmation envelope unless the caller passed verify=True.  @mcp_heavy

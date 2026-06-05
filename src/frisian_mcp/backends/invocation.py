@@ -405,9 +405,7 @@ class SyncInvocation(BaseInvocationBackend):
         # ``self.context['request'].user.is_authenticated`` or queryset-scoping
         # helpers like ``.restrict(user, 'view')`` for permission-aware FK
         # lookups.  Setting the private slots directly skips the lazy path.
-        drf_request._user = getattr(  # type: ignore[attr-defined]  # pylint: disable=protected-access
-            request, "user", AnonymousUser()
-        )
+        drf_request._user = self._resolve_effective_user(request)  # type: ignore[attr-defined]  # pylint: disable=protected-access
         drf_request._auth = getattr(  # type: ignore[attr-defined]  # pylint: disable=protected-access
             request, "auth", None
         )
@@ -465,8 +463,10 @@ class SyncInvocation(BaseInvocationBackend):
             # a string-in-string envelope.
             message = _exception_envelope_message(exc)
             logger.warning(
-                "SyncInvocation: viewset.initial() denied call",
-                extra={"tool": tool.name, "error": message},
+                "SyncInvocation: viewset.initial() denied call — %s: %s",
+                type(exc).__name__,
+                message,
+                extra={"tool": tool.name},
             )
             return ToolResult(content={"error": message}, is_error=True)
 
@@ -597,11 +597,48 @@ class SyncInvocation(BaseInvocationBackend):
         # first read().  Set it explicitly so the synthetic request works.
         req._read_started = False  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
-        # Forward the authenticated user from the original MCP gateway request.
-        # Fall back to AnonymousUser when AuthenticationMiddleware has not been
-        # configured (e.g. minimal test setups without middleware).
-        req.user = getattr(original, "user", AnonymousUser())
+        req.user = self._resolve_effective_user(original)
         return req
+
+    @staticmethod
+    def _resolve_effective_user(request: Any) -> Any:
+        """
+        Return the Django user to forward to the synthetic inner request.
+
+        When ``request.user`` is already authenticated, it is returned as-is.
+        When the caller is anonymous and ``settings.FRISIAN_MCP_SERVICE_ACCOUNT_USER``
+        names a known Django user, that user is substituted so host-app ViewSets
+        see an authenticated identity and pass ``IsAuthenticated`` checks.  This
+        lets a no-auth MCP endpoint serve data without requiring callers to supply
+        a token — frisian-mcp's tier / max-tier system remains the primary access
+        gate; this only satisfies the host-app authentication layer.
+
+        Falls back to ``AnonymousUser`` when the setting is absent or the named
+        user does not exist.
+        """
+        from django.conf import settings as _settings  # pylint: disable=import-outside-toplevel
+
+        user = getattr(request, "user", None)
+        if user is not None and getattr(user, "is_authenticated", False):
+            return user
+
+        service_username: str | None = getattr(
+            _settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER", None
+        )
+        if not service_username:
+            return user if user is not None else AnonymousUser()
+
+        from django.contrib.auth import get_user_model  # pylint: disable=import-outside-toplevel
+
+        UserModel = get_user_model()
+        try:
+            return UserModel.objects.get(username=service_username)
+        except UserModel.DoesNotExist:
+            logger.warning(
+                "FRISIAN_MCP_SERVICE_ACCOUNT_USER %r not found; using AnonymousUser",
+                service_username,
+            )
+            return user if user is not None else AnonymousUser()
 
     @staticmethod
     def _extract_data(response: Any) -> tuple[Any, int]:

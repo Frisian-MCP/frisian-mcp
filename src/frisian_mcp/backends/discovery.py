@@ -422,6 +422,22 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     },
                 }
 
+            input_schema = {
+                **input_schema,
+                "properties": {
+                    **input_schema.get("properties", {}),
+                    "lite": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Suppress instructional scaffolding in the response "
+                            "(action listings, hint text, parameter descriptions). "
+                            "On failure the tool schema is re-included in the error."
+                        ),
+                    },
+                },
+            }
+
             tools.append(
                 ToolDefinition(
                     name=tool_name,

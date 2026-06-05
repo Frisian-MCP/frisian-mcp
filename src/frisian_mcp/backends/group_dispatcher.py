@@ -111,6 +111,15 @@ def build_group_input_schema() -> dict[str, Any]:
                 "additionalProperties": True,
                 "description": "Parameters forwarded to the underlying tool.",
             },
+            "lite": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Suppress instructional scaffolding in the response "
+                    "(action listings, hint text, parameter descriptions). "
+                    "On failure the tool schema is re-included in the error."
+                ),
+            },
         },
     }
 
@@ -292,12 +301,17 @@ def make_group_invoke(
                 f"Unknown tool {target_name!r} in group {group_name!r}.{hint}"
             )
 
-        # Strip the `verify` flag before the underlying write tool sees params.
-        # `verify` is a frisian-mcp protocol param; DRF serializers may reject
-        # unknown fields.  views.py reads verify from the original arguments.
+        # Strip frisian-mcp protocol params before the underlying tool sees params.
+        # `verify` is a write-path flag; `lite` is a protocol-level flag on all calls.
+        # DRF serializers may reject unknown fields.  views.py reads both from the
+        # original top-level arguments before dispatch.
         _target_entry = registry.get_entry(target_name)
-        if _target_entry is not None and _target_entry.is_write and "verify" in params:
-            params = {k: v for k, v in params.items() if k != "verify"}
+        if _target_entry is not None:
+            _strip = {"lite"}
+            if _target_entry.is_write:
+                _strip.add("verify")
+            if _strip.intersection(params):
+                params = {k: v for k, v in params.items() if k not in _strip}
 
         return registry.dispatch(request, target_name, params)
 
