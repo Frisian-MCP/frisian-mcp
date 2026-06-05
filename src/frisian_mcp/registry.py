@@ -528,6 +528,26 @@ class ToolRegistry:
             and isinstance(next(iter(arguments.values())), list)
         )
 
+        # Reject nested-dict wrapper on write tools: agents often send
+        # {data: {field: value}} following REST conventions, which silently
+        # produces records with all fields empty because the flat field keys
+        # the serializer expects are never present in the top-level arguments.
+        # Only fires when the wrapper key is not a declared property in the
+        # tool's inputSchema (a model with a real "data" JSON field is fine).
+        if entry.is_write and not _is_list_body and len(arguments) == 1:
+            _wrap_key = next(iter(arguments))
+            if (
+                _wrap_key in _BULK_LIST_BODY_KEYS
+                and isinstance(arguments[_wrap_key], dict)
+                and _wrap_key not in (entry.input_schema.get("properties") or {})
+            ):
+                _expected = sorted((entry.input_schema.get("properties") or {}).keys())
+                raise ToolInputError(
+                    f'Payload must be flat: fields should be top-level arguments, '
+                    f'not wrapped in "{_wrap_key}": {{...}}. '
+                    f"Send the fields directly as: {_expected}."
+                )
+
         if not is_dispatcher_help and not _is_list_body:
             try:
                 jsonschema.validate(instance=arguments, schema=entry.input_schema)
