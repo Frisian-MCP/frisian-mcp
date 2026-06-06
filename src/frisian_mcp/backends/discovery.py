@@ -373,6 +373,18 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                 resource,
             )
 
+        # Extract Django model metadata for permission-aware discovery.
+        perm_app_label: str | None = None
+        perm_model: str | None = None
+        try:
+            qs = getattr(cls, "queryset", None)
+            if qs is not None and hasattr(qs, "model"):
+                m = qs.model
+                perm_app_label = m._meta.app_label  # pylint: disable=protected-access
+                perm_model = m._meta.model_name  # pylint: disable=protected-access
+        except Exception:  # pylint: disable=broad-exception-caught  # noqa: S110
+            pass
+
         include_actions, exclude_actions = _action_filters(cls)
 
         for http_method, action_name in actions.items():
@@ -450,6 +462,8 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     permission_tier=permission_tier,
                     url_path=full_path,
                     is_write=is_write,
+                    perm_app_label=perm_app_label,
+                    perm_model=perm_model,
                 )
             )
             logger.debug("frisian_mcp discovered tool %s.%s", resource, action_name)

@@ -80,6 +80,18 @@ _TOOLS_LIST_CACHE_KEY = "frisian_mcp:tools_list"
 _HEAVY_CACHE_PREFIX = "frisian_mcp:heavy:"
 _HEAVY_CACHE_TTL: int = 300  # seconds; tokens expire after 5 minutes
 
+#: Maps DRF action names to the Django permission verb used for permission checks.
+#: Used by FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY to derive the capability string
+#: ``"app_label.verb_model"`` for each discovered tool.
+_DRF_ACTION_TO_PERM_VERB: dict[str, str] = {
+    "list": "view",
+    "retrieve": "view",
+    "create": "add",
+    "update": "change",
+    "partial_update": "change",
+    "destroy": "delete",
+}
+
 _REFRESH_HINT = (
     " Call tools/list to refresh your available tools"
     " — the server manifest may have changed."
@@ -538,6 +550,52 @@ def _resolve_classes(setting_name: str) -> list[Any] | None:
     return [import_string(cls) if isinstance(cls, str) else cls for cls in raw]
 
 
+def _get_permission_adapter() -> Any:
+    """
+    Load and instantiate the configured ``PermissionAdapter``.
+
+    Reads ``FRISIAN_MCP_PERMISSION_ADAPTER`` (dotted import path).  Defaults
+    to :class:`~frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter`.
+    Cached as a module-level singleton so the import happens once per process.
+    """
+    dotted: str = getattr(
+        settings,
+        "FRISIAN_MCP_PERMISSION_ADAPTER",
+        "frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter",
+    )
+    cls = import_string(dotted)
+    return cls()
+
+
+def _make_perm_entry_filter(capabilities: frozenset[str]) -> Any:
+    """
+    Return a ``_ToolEntry`` filter callable for the given capability set.
+
+    A tool is included when:
+
+    * It has no ``perm_app_label`` / ``perm_model`` metadata (decorator tools,
+      group dispatchers) — always visible.
+    * It is a dispatcher — always visible (per-action enforcement happens at
+      invocation time inside the dispatcher's own permission tier checks).
+    * Its derived capability string (``"app_label.verb_model"``) is present in
+      *capabilities*.
+
+    Unknown DRF action names default to ``"view"`` (conservative inclusion —
+    if the user can view the resource they can see the tool).
+    """
+
+    def _filter(entry: Any) -> bool:
+        if not entry.perm_app_label or not entry.perm_model:
+            return True
+        if entry.is_dispatcher:
+            return True
+        verb = _DRF_ACTION_TO_PERM_VERB.get(entry.perm_drf_action or "", "view")
+        cap = f"{entry.perm_app_label}.{verb}_{entry.perm_model}"
+        return cap in capabilities
+
+    return _filter
+
+
 def _resolve_agent_connection_state(request: Any) -> tuple[Any | None, bool]:
     """
     Look up the AgentConnection state for ``request.auth``.
@@ -786,7 +844,24 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
     cache_ttl: int | None = getattr(settings, "FRISIAN_MCP_TOOLS_LIST_CACHE_TTL", None)
     # Use a per-tier cache key so authenticated requests benefit from caching too.
     cache_key = f"{_TOOLS_LIST_CACHE_KEY}:{max_tier or 'all'}"
-    use_cache = cache_ttl is not None and (conn is None or conn.allowed_tools is None)
+    # Permission-aware discovery builds a per-user entry filter; bypassing the
+    # shared tier-based cache ensures different users see only their own tools.
+    perm_aware: bool = getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False)
+    use_cache = (
+        cache_ttl is not None
+        and (conn is None or conn.allowed_tools is None)
+        and not perm_aware
+    )
+
+    # Resolve the per-user entry filter when permission-aware discovery is on.
+    entry_filter = None
+    if perm_aware:
+        user = getattr(request, "user", None)
+        if user is not None:
+            adapter = _get_permission_adapter()
+            if not adapter.is_unrestricted(user):
+                capabilities = adapter.get_capabilities(user)
+                entry_filter = _make_perm_entry_filter(capabilities)
 
     if use_cache:
         tools: list[dict[str, Any]] | None = django_cache.get(cache_key)
@@ -794,7 +869,7 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
             tools = tool_registry.list_tools(max_tier=max_tier)
             django_cache.set(cache_key, tools, cache_ttl)
     else:
-        tools = tool_registry.list_tools(max_tier=max_tier)
+        tools = tool_registry.list_tools(max_tier=max_tier, entry_filter=entry_filter)
 
     if conn is not None and conn.allowed_tools is not None:
         allowed: frozenset[str] = frozenset(conn.allowed_tools)

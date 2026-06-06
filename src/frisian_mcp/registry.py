@@ -211,6 +211,9 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         "is_heavy",
         "is_write",
         "name",
+        "perm_app_label",
+        "perm_drf_action",
+        "perm_model",
         "permission_classes",
         "permission_tier",
     )
@@ -228,6 +231,9 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
         hidden: bool = False,
+        perm_app_label: str | None = None,
+        perm_model: str | None = None,
+        perm_drf_action: str | None = None,
     ) -> None:
         self.name = name
         self.fn = fn
@@ -247,6 +253,12 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         # ``list_tools()`` output — used by FRISIAN_MCP_DISPATCH_GROUPS to bury
         # bundled flat tools behind their group dispatcher.
         self.hidden = hidden
+        # Permission metadata extracted from DRF discovery.  Used by
+        # FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY to filter tools/list.
+        # ``None`` for decorator tools and group dispatchers (always visible).
+        self.perm_app_label = perm_app_label
+        self.perm_model = perm_model
+        self.perm_drf_action = perm_drf_action
 
 
 class ToolRegistry:
@@ -277,6 +289,9 @@ class ToolRegistry:
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
         hidden: bool = False,
+        perm_app_label: str | None = None,
+        perm_model: str | None = None,
+        perm_drf_action: str | None = None,
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -310,6 +325,14 @@ class ToolRegistry:
                 :meth:`list_tools` output but remains dispatchable by name.
                 Used by ``FRISIAN_MCP_DISPATCH_GROUPS`` to bury bundled flat
                 tools behind their group dispatcher.
+            perm_app_label: Django app label extracted from the ViewSet queryset
+                model.  Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to
+                build the required permission string.
+            perm_model: Django model name (``model._meta.model_name``) extracted
+                from the ViewSet queryset.  Paired with *perm_app_label*.
+            perm_drf_action: DRF action name (e.g. ``"list"``, ``"retrieve"``)
+                used to derive the Django permission verb via the
+                ``_DRF_ACTION_TO_PERM_VERB`` mapping in ``views.py``.
 
         """
         with self._lock:
@@ -325,6 +348,9 @@ class ToolRegistry:
                 permission_tier=permission_tier,
                 dispatcher_meta=dispatcher_meta,
                 hidden=hidden,
+                perm_app_label=perm_app_label,
+                perm_model=perm_model,
+                perm_drf_action=perm_drf_action,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:
@@ -363,7 +389,11 @@ class ToolRegistry:
             entry.hidden = hidden
             return True
 
-    def list_tools(self, max_tier: str | None = None) -> list[dict[str, Any]]:
+    def list_tools(
+        self,
+        max_tier: str | None = None,
+        entry_filter: Callable[[Any], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Return the tool listing in MCP ``tools/list`` response format.
 
@@ -379,6 +409,11 @@ class ToolRegistry:
                 has zero visible actions at the caller's tier, the dispatcher
                 is omitted entirely so it is not advertised as a callable
                 navigation entry-point with no callable actions.
+            entry_filter: Optional callable applied to each ``_ToolEntry`` before
+                it is included in the result.  Return ``False`` to exclude the
+                entry.  Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to
+                apply per-user capability filtering without holding the registry
+                lock across external calls.
 
         """
         max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
@@ -394,6 +429,8 @@ class ToolRegistry:
                 if entry.hidden:
                     continue
                 if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
+                    continue
+                if entry_filter is not None and not entry_filter(entry):
                     continue
 
                 # Plain (non-dispatcher) tool: include the registered schema

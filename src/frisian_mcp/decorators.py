@@ -81,6 +81,7 @@ def mcp_action(
     input_schema: dict[str, Any] | None = None,
     write: bool = False,
     admin: bool = False,
+    backend_action: str | None = None,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Mark a method as a dispatchable action on an ``@mcp_dispatcher`` class.
@@ -95,6 +96,10 @@ def mcp_action(
         input_schema: Optional JSON Schema (draft-07) for per-call validation.
         write: Set ``True`` to assign ``permission_tier="read_write"``.
         admin: Set ``True`` to assign ``permission_tier="admin"``.
+        backend_action: Django permission verb (``"view"``, ``"add"``, ``"change"``,
+            ``"delete"``) for non-CRUD actions.  Required when
+            ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` is on and the action name
+            is not one of the standard CRUD names.
 
     Returns:
         The original method, unchanged, with ``_mcp_action_meta`` attached.
@@ -108,6 +113,7 @@ def mcp_action(
             "params": params or {},
             "input_schema": input_schema,
             "permission_tier": "admin" if admin else "read_write" if write else "read",
+            "backend_action": backend_action,
         }
         return fn
 
@@ -159,6 +165,7 @@ def mcp_dispatcher(
                         input_schema=action_meta["input_schema"],
                         method=attr,
                         permission_tier=action_meta.get("permission_tier", "read"),
+                        backend_action=action_meta.get("backend_action"),
                     )
                     action_map[entry.name] = entry
 

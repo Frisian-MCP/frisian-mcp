@@ -27,6 +27,7 @@ class ActionEntry:
     input_schema: dict[str, Any] | None
     method: Callable[..., Any]
     permission_tier: str = "read"
+    backend_action: str | None = None
 
 
 @dataclasses.dataclass
