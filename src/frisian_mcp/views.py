@@ -508,7 +508,7 @@ def _build_drf_error_content(exc: DRFValidationError) -> dict[str, Any]:
             "status_code": 422,
         }
     if isinstance(detail, list):
-        if detail and isinstance(detail[0], (dict, list)):
+        if detail and isinstance(detail[0], dict | list):
             # Bulk validation: detail is a list of per-row error dicts.
             # Flatten each row using _flatten_error_detail to avoid Python repr()
             # of ErrorDetail objects (e.g. "{'field': [ErrorDetail(...)]}").
@@ -594,6 +594,41 @@ def _make_perm_entry_filter(capabilities: frozenset[str]) -> Any:
         return cap in capabilities
 
     return _filter
+
+
+def _make_perm_action_filter_factory(
+    capabilities: frozenset[str],
+) -> Any:
+    """
+    Build an ``action_filter_factory`` for permission-filtered dispatcher action enums.
+
+    The factory receives a dispatcher ``_ToolEntry`` and returns either
+    ``None`` (no filtering — the dispatcher has no perm metadata) or a
+    ``(action_name, action_entry) -> bool`` predicate.
+
+    For each action the predicate resolves the required Django permission verb:
+
+    * Non-CRUD actions use ``action_entry.backend_action`` when set.
+    * All other action names are looked up in ``_DRF_ACTION_TO_PERM_VERB``
+      (defaulting to ``"view"`` for unknowns).
+
+    An action is hidden when the derived
+    ``"app_label.verb_model"`` string is absent from *capabilities*.
+    """
+
+    def factory(entry: Any) -> Any:
+        if not entry.perm_app_label or not entry.perm_model:
+            return None
+        app_label: str = entry.perm_app_label
+        model: str = entry.perm_model
+
+        def action_filter(action_name: str, action_entry: Any) -> bool:
+            verb = action_entry.backend_action or _DRF_ACTION_TO_PERM_VERB.get(action_name, "view")
+            return f"{app_label}.{verb}_{model}" in capabilities
+
+        return action_filter
+
+    return factory
 
 
 def _resolve_agent_connection_state(request: Any) -> tuple[Any | None, bool]:
@@ -853,8 +888,9 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
         and not perm_aware
     )
 
-    # Resolve the per-user entry filter when permission-aware discovery is on.
+    # Resolve per-user filters when permission-aware discovery is on.
     entry_filter = None
+    action_filter_factory = None
     if perm_aware:
         user = getattr(request, "user", None)
         if user is not None:
@@ -862,6 +898,7 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
             if not adapter.is_unrestricted(user):
                 capabilities = adapter.get_capabilities(user)
                 entry_filter = _make_perm_entry_filter(capabilities)
+                action_filter_factory = _make_perm_action_filter_factory(capabilities)
 
     if use_cache:
         tools: list[dict[str, Any]] | None = django_cache.get(cache_key)
@@ -869,7 +906,11 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
             tools = tool_registry.list_tools(max_tier=max_tier)
             django_cache.set(cache_key, tools, cache_ttl)
     else:
-        tools = tool_registry.list_tools(max_tier=max_tier, entry_filter=entry_filter)
+        tools = tool_registry.list_tools(
+            max_tier=max_tier,
+            entry_filter=entry_filter,
+            action_filter_factory=action_filter_factory,
+        )
 
     if conn is not None and conn.allowed_tools is not None:
         allowed: frozenset[str] = frozenset(conn.allowed_tools)

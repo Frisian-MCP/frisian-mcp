@@ -393,6 +393,7 @@ class ToolRegistry:
         self,
         max_tier: str | None = None,
         entry_filter: Callable[[Any], bool] | None = None,
+        action_filter_factory: Callable[[Any], Callable[[str, Any], bool] | None] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Return the tool listing in MCP ``tools/list`` response format.
@@ -414,6 +415,12 @@ class ToolRegistry:
                 entry.  Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to
                 apply per-user capability filtering without holding the registry
                 lock across external calls.
+            action_filter_factory: Optional callable that receives a dispatcher
+                ``_ToolEntry`` and returns either ``None`` (no extra filtering)
+                or a ``(action_name, ActionEntry) -> bool`` predicate applied on
+                top of tier filtering when building the dispatcher's action enum.
+                Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide
+                write/delete actions the requesting user lacks permission for.
 
         """
         max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
@@ -451,8 +458,11 @@ class ToolRegistry:
                 # filtered to the caller's tier.  Hide the dispatcher entirely
                 # when no actions remain visible (avoids exposing an empty
                 # navigation tool that can only return help with zero actions).
+                action_filter = (
+                    action_filter_factory(entry) if action_filter_factory is not None else None
+                )
                 filtered_schema = _build_dispatcher_input_schema(
-                    entry.dispatcher_meta, max_tier=max_tier
+                    entry.dispatcher_meta, max_tier=max_tier, action_filter=action_filter
                 )
                 visible_actions = filtered_schema["properties"]["action"]["enum"]
                 if max_tier is not None and not visible_actions:

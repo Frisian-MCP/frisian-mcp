@@ -559,6 +559,232 @@ class TestE003Check:
         e003 = [e for e in errors if e.id == E003_UNANNOTATED_CUSTOM_ACTION]
         assert e003 == []
 
+
+# ---------------------------------------------------------------------------
+# T4: _make_perm_action_filter_factory — dispatcher action enum filtering
+# ---------------------------------------------------------------------------
+
+
+def _make_dispatcher_entry(
+    app_label: str,
+    model: str,
+    actions: dict[str, ActionEntry],
+) -> Any:
+    """Return a mock _ToolEntry representing a dispatcher with the given perm metadata."""
+    from frisian_mcp.backends.dispatcher import DispatcherMeta
+
+    entry = MagicMock()
+    entry.is_dispatcher = True
+    entry.perm_app_label = app_label
+    entry.perm_model = model
+    entry.dispatcher_meta = DispatcherMeta(
+        name=f"{app_label}_{model}",
+        description="test dispatcher",
+        actions=actions,
+    )
+    return entry
+
+
+def _crud_actions() -> dict[str, ActionEntry]:
+    """Return a minimal set of CRUD ActionEntry objects."""
+    def _m(*_: Any) -> dict:  # noqa: ANN202
+        return {}
+
+    return {
+        "list": ActionEntry(
+            name="list", description="List", params={}, input_schema=None, method=_m
+        ),
+        "retrieve": ActionEntry(
+            name="retrieve", description="Get one", params={}, input_schema=None, method=_m
+        ),
+        "create": ActionEntry(
+            name="create", description="Create", params={}, input_schema=None, method=_m
+        ),
+        "update": ActionEntry(
+            name="update", description="Update", params={}, input_schema=None, method=_m
+        ),
+        "destroy": ActionEntry(
+            name="destroy", description="Delete", params={}, input_schema=None, method=_m
+        ),
+    }
+
+
+class TestPermActionFilterFactory:
+    """Unit and integration tests for ``_make_perm_action_filter_factory``."""
+
+    def test_factory_returns_none_for_entry_without_perm_metadata(self) -> None:
+        """Factory returns None when the dispatcher has no perm_app_label/perm_model."""
+        from frisian_mcp.views import _make_perm_action_filter_factory
+
+        entry = MagicMock()
+        entry.perm_app_label = None
+        entry.perm_model = None
+        factory = _make_perm_action_filter_factory(frozenset({"dcim.view_device"}))
+        assert factory(entry) is None
+
+    def test_factory_returns_callable_when_perm_metadata_present(self) -> None:
+        """Factory returns a callable when perm_app_label and perm_model are set."""
+        from frisian_mcp.views import _make_perm_action_filter_factory
+
+        entry = _make_dispatcher_entry("dcim", "device", _crud_actions())
+        factory = _make_perm_action_filter_factory(frozenset({"dcim.view_device"}))
+        result = factory(entry)
+        assert callable(result)
+
+    @pytest.mark.parametrize(
+        "action_name, backend_action, cap, expected",
+        [
+            # Standard CRUD verbs
+            ("list", None, "dcim.view_device", True),
+            ("retrieve", None, "dcim.view_device", True),
+            ("create", None, "dcim.add_device", True),
+            ("update", None, "dcim.change_device", True),
+            ("destroy", None, "dcim.delete_device", True),
+            # Unknown action name defaults to "view"
+            ("custom_action", None, "dcim.view_device", True),
+            # backend_action overrides action name mapping
+            ("sync", "add", "dcim.add_device", True),
+            ("sync", "add", "dcim.view_device", False),
+            # Missing capability → excluded
+            ("list", None, "dcim.add_device", False),  # has add, not view
+        ],
+    )
+    def test_action_filter_predicate(
+        self,
+        action_name: str,
+        backend_action: str | None,
+        cap: str,
+        expected: bool,
+    ) -> None:
+        """action_filter predicate correctly allows/blocks each case."""
+        from frisian_mcp.views import _make_perm_action_filter_factory
+
+        action_entry = ActionEntry(
+            name=action_name,
+            description="test",
+            params={},
+            input_schema=None,
+            method=lambda *_: {},
+            backend_action=backend_action,
+        )
+        entry = _make_dispatcher_entry("dcim", "device", {action_name: action_entry})
+        factory = _make_perm_action_filter_factory(frozenset({cap}))
+        predicate = factory(entry)
+        assert predicate is not None
+        assert predicate(action_name, action_entry) is expected
+
+    def test_view_only_user_sees_read_actions_not_write(self) -> None:
+        """A user with only view_device sees list/retrieve but not create/update/destroy."""
+        from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
+        from frisian_mcp.views import _make_perm_action_filter_factory
+
+        actions = _crud_actions()
+        entry = _make_dispatcher_entry("dcim", "device", actions)
+        factory = _make_perm_action_filter_factory(frozenset({"dcim.view_device"}))
+        predicate = factory(entry)
+
+        schema = _build_dispatcher_input_schema(
+            entry.dispatcher_meta, action_filter=predicate
+        )
+        visible = schema["properties"]["action"]["enum"]
+        assert "list" in visible
+        assert "retrieve" in visible
+        assert "create" not in visible
+        assert "update" not in visible
+        assert "destroy" not in visible
+
+    def test_full_crud_user_sees_all_actions(self) -> None:
+        """A user with all permissions sees every action in the enum."""
+        from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
+        from frisian_mcp.views import _make_perm_action_filter_factory
+
+        actions = _crud_actions()
+        entry = _make_dispatcher_entry("dcim", "device", actions)
+        caps = frozenset({
+            "dcim.view_device",
+            "dcim.add_device",
+            "dcim.change_device",
+            "dcim.delete_device",
+        })
+        factory = _make_perm_action_filter_factory(caps)
+        predicate = factory(entry)
+
+        schema = _build_dispatcher_input_schema(
+            entry.dispatcher_meta, action_filter=predicate
+        )
+        visible = set(schema["properties"]["action"]["enum"])
+        assert visible == {"list", "retrieve", "create", "update", "destroy"}
+
+    def test_no_capabilities_user_sees_no_actions(self) -> None:
+        """A user with zero permissions sees an empty action enum."""
+        from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
+        from frisian_mcp.views import _make_perm_action_filter_factory
+
+        actions = _crud_actions()
+        entry = _make_dispatcher_entry("dcim", "device", actions)
+        factory = _make_perm_action_filter_factory(frozenset())
+        predicate = factory(entry)
+
+        schema = _build_dispatcher_input_schema(
+            entry.dispatcher_meta, action_filter=predicate
+        )
+        assert schema["properties"]["action"]["enum"] == []
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+        FRISIAN_MCP_PERMISSION_ADAPTER=(
+            "frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter"
+        ),
+    )
+    def test_list_tools_action_filter_factory_wired(self) -> None:
+        """list_tools passes action_filter_factory into dispatcher schema when flag is on."""
+        from frisian_mcp.backends.dispatcher import DispatcherMeta
+        from frisian_mcp.registry import ToolRegistry
+
+        def _m(*_: Any) -> dict:  # noqa: ANN202
+            return {}
+
+        reg = ToolRegistry()
+        meta = DispatcherMeta(
+            name="_paf_test_dispatcher",
+            description="test",
+            actions={
+                "list": ActionEntry(
+                    name="list", description="List", params={}, input_schema=None, method=_m
+                ),
+                "create": ActionEntry(
+                    name="create", description="Create", params={}, input_schema=None, method=_m
+                ),
+            },
+        )
+        reg.register(
+            name="_paf_test_dispatcher",
+            fn=_m,
+            description="test dispatcher",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            dispatcher_meta=meta,
+            perm_app_label="dcim",
+            perm_model="paftestmodel",
+        )
+
+        view_only_caps = frozenset({"dcim.view_paftestmodel"})
+        action_filter_factory = __import__(
+            "frisian_mcp.views", fromlist=["_make_perm_action_filter_factory"]
+        )._make_perm_action_filter_factory(view_only_caps)
+
+        tools = reg.list_tools(
+            entry_filter=lambda _e: True,
+            action_filter_factory=lambda e: action_filter_factory(e),
+        )
+        dispatcher_tool = next(
+            (t for t in tools if t["name"] == "_paf_test_dispatcher"), None
+        )
+        assert dispatcher_tool is not None
+        enum = dispatcher_tool["inputSchema"]["properties"]["action"]["enum"]
+        assert "list" in enum
+        assert "create" not in enum
+
     @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True)
     def test_dispatcher_custom_action_without_backend_action_raises_e003(self) -> None:
         """Non-CRUD action without backend_action triggers E003."""

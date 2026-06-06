@@ -40,7 +40,9 @@ class DispatcherMeta:
 
 
 def _visible_actions(
-    meta: DispatcherMeta, max_tier: str | None
+    meta: DispatcherMeta,
+    max_tier: str | None,
+    action_filter: Callable[[str, ActionEntry], bool] | None = None,
 ) -> dict[str, ActionEntry]:
     """
     Return the subset of *meta.actions* visible at *max_tier*.
@@ -51,19 +53,35 @@ def _visible_actions(
     only actions whose ``permission_tier`` rank is at or below the caller's
     tier rank.  Unknown tier strings collapse to ``"read"`` to avoid silently
     exposing privileged actions to misconfigured callers.
+
+    *action_filter*, when supplied, is applied after tier filtering.  It
+    receives ``(action_name, action_entry)`` and should return ``False`` to
+    hide an action.  Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to
+    strip write/delete actions from the enum when the user lacks the
+    corresponding Django permission.
     """
     if max_tier is None:
-        return dict(meta.actions)
-    max_rank = _TIER_RANK.get(max_tier, 0)
+        candidates = dict(meta.actions)
+    else:
+        max_rank = _TIER_RANK.get(max_tier, 0)
+        candidates = {
+            name: entry
+            for name, entry in meta.actions.items()
+            if _TIER_RANK.get(entry.permission_tier, 0) <= max_rank
+        }
+    if action_filter is None:
+        return candidates
     return {
         name: entry
-        for name, entry in meta.actions.items()
-        if _TIER_RANK.get(entry.permission_tier, 0) <= max_rank
+        for name, entry in candidates.items()
+        if action_filter(name, entry)
     }
 
 
 def _build_dispatcher_input_schema(
-    meta: DispatcherMeta, max_tier: str | None = None
+    meta: DispatcherMeta,
+    max_tier: str | None = None,
+    action_filter: Callable[[str, ActionEntry], bool] | None = None,
 ) -> dict[str, Any]:
     """
     Return the compact inputSchema for a dispatcher tool.
@@ -73,8 +91,12 @@ def _build_dispatcher_input_schema(
     lower-privilege callers never see write/admin action names in
     ``tools/list``.  When *max_tier* is ``None`` the full enum is returned
     (legacy/internal behaviour).
+
+    *action_filter* applies an additional predicate after tier filtering —
+    used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide actions for
+    which the requesting user lacks the corresponding Django permission.
     """
-    visible = _visible_actions(meta, max_tier)
+    visible = _visible_actions(meta, max_tier, action_filter=action_filter)
     # Build a self-documenting params description so agents that only read the
     # top-level schema (and don't call help) can see per-action parameter names.
     param_hints = "; ".join(
