@@ -648,6 +648,14 @@ def _ensure_perm_context_on_request(request: Any) -> None:
         request._mcp_capabilities = None  # type: ignore[attr-defined]
         request._mcp_perm_entry_filter = None  # type: ignore[attr-defined]
         return
+    # Blanket-tier mode: OAuthServicePrincipal (User field blank on OAuthClient).
+    # The tier is the sole gate; per-capability filtering does not apply.
+    # Operators who want Django-permission scoping must link a Django User to the
+    # OAuthClient — matching the "API token" design the admin UI describes.
+    if getattr(user, "_mcp_is_service_principal", False) is True:
+        request._mcp_capabilities = None  # type: ignore[attr-defined]
+        request._mcp_perm_entry_filter = None  # type: ignore[attr-defined]
+        return
     adapter = _get_permission_adapter()
     if adapter.is_unrestricted(user):
         request._mcp_capabilities = None  # type: ignore[attr-defined]

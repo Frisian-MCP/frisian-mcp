@@ -69,6 +69,11 @@ class OAuthServicePrincipal:
     is_superuser: bool = False
     pk: None = None
     id: None = None
+    #: Marker checked by ``_ensure_perm_context_on_request`` so that blanket-tier
+    #: OAuth clients (no linked Django User) skip per-capability filtering and let
+    #: the tier be the sole gate — matching the "API token" behaviour the operator
+    #: expects when leaving the User field blank on the OAuthClient admin form.
+    _mcp_is_service_principal: bool = True
 
     def __init__(self, permission: str = "read") -> None:
         """Set the permission tier and derive is_staff from it."""
