@@ -103,6 +103,18 @@ class OAuthClient(models.Model):
             "Read Only, Read Write, or Admin."
         ),
     )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        help_text=(
+            "Django user whose permissions govern tool visibility for this client "
+            "when FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY is enabled. "
+            "Leave blank to use the global FRISIAN_MCP_OAUTH_SERVICE_USER setting."
+        ),
+    )
     redirect_uris = models.JSONField(
         default=list,
         blank=True,

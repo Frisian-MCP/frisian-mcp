@@ -146,7 +146,7 @@ class OAuthTokenAuthentication(BaseAuthentication):
         # Tokens are stored as HMAC-SHA256 digests (SEC-1).  Hash the bearer
         # value before lookup so a leaked DB row cannot be replayed directly.
         try:
-            access_token = OAuthAccessToken.objects.select_related("client").get(
+            access_token = OAuthAccessToken.objects.select_related("client", "client__user").get(
                 token=_hmac_secret(token_str),
             )
         except OAuthAccessToken.DoesNotExist:
@@ -164,11 +164,17 @@ class OAuthTokenAuthentication(BaseAuthentication):
         # changes take effect immediately without waiting for token expiry.
         principal = OAuthServicePrincipal(permission=access_token.client.permission)
 
-        # Some host frameworks require request.user to be a real Django User
-        # instance for audit-log FKs (e.g. ObjectChange.user).  Honour the
-        # explicit FRISIAN_MCP_OAUTH_SERVICE_USER setting when provided.
+        # Resolve request.user to a real Django User instance so that
+        # FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY can call get_all_permissions().
+        # Priority: per-client user → global FRISIAN_MCP_OAUTH_SERVICE_USER → OAuthServicePrincipal.
         # Do NOT fall back to "first superuser in DB" — that silently elevates
         # every OAuth token to superuser-level request.user (SEC-839c3b7c).
+
+        # 1. Per-client user (set in admin on the OAuthClient record).
+        if access_token.client.user_id is not None:
+            return (access_token.client.user, access_token)
+
+        # 2. Global service user fallback.
         service_username: str | None = getattr(settings, "FRISIAN_MCP_OAUTH_SERVICE_USER", None)
         if service_username:
             try:
