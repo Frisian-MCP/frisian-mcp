@@ -1,15 +1,15 @@
 """
-Nautobot-specific permission adapter.
+Permission adapter that honours ``EXEMPT_VIEW_PERMISSIONS``.
 
-Nautobot's ``ObjectPermissionBackend`` populates ``user.get_all_permissions()``
-with ``"app_label.action_model"`` strings (e.g. ``"dcim.view_device"``), so
-:class:`~frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter` works
-directly.
+Some Django applications mark certain models as globally readable via an
+``EXEMPT_VIEW_PERMISSIONS`` setting.  Models listed there are implicitly
+viewable by all authenticated users without an explicit object permission
+being assigned, so their ``"view_<model>"`` capability must be synthesized
+for ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to include the corresponding
+tools in ``tools/list``.
 
-This subclass extends the base adapter to honour Nautobot's
-``EXEMPT_VIEW_PERMISSIONS`` setting: models listed there are implicitly
-readable by all authenticated users, so their ``"view_<model>"`` capability is
-synthesized even when the user holds no explicit object permission.
+This subclass of :class:`~frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter`
+adds that synthesis on top of the standard ``user.get_all_permissions()`` lookup.
 """
 
 from __future__ import annotations
@@ -21,17 +21,18 @@ from django.conf import settings
 from frisian_mcp.contrib.permissions.base import DjangoPermissionAdapter
 
 
-class NautobotPermissionAdapter(DjangoPermissionAdapter):
+class ExemptViewPermissionAdapter(DjangoPermissionAdapter):
     """
-    Nautobot adapter that adds ``EXEMPT_VIEW_PERMISSIONS`` support.
+    Django permission adapter with ``EXEMPT_VIEW_PERMISSIONS`` support.
 
-    Nautobot's ``ObjectPermissionBackend`` stores permissions in
-    ``user.get_all_permissions()`` using the standard Django ``"app_label.action_model"``
-    format, so the base adapter handles the common case.  This subclass
-    additionally synthesizes ``"app_label.view_<model>"`` capabilities for models
-    in ``settings.EXEMPT_VIEW_PERMISSIONS`` so that tools backed by those models
-    appear in ``tools/list`` for all authenticated users, matching the behaviour
-    of Nautobot's ``RestrictedQuerySet``.
+    Extends :class:`DjangoPermissionAdapter` by synthesizing
+    ``"app_label.view_<model>"`` capabilities for every model listed in
+    ``settings.EXEMPT_VIEW_PERMISSIONS``.  This ensures that tools backed
+    by globally-readable models appear in ``tools/list`` for all authenticated
+    users, matching the implicit read-access semantics of that setting.
+
+    Supports both the ``"__all__"`` shorthand (all installed models become
+    view-capable) and an explicit list of ``"app_label.model_name"`` strings.
     """
 
     def get_capabilities(self, user: Any) -> frozenset[str]:
