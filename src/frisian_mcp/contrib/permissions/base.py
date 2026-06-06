@@ -20,6 +20,22 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+#: Maps DRF viewset action names to the Django permission verb used when
+#: checking whether a user can perform that action.  Unknown action names
+#: fall back to ``"view"`` (most conservative default).
+_DRF_ACTION_TO_PERM_VERB: dict[str, str] = {
+    "list": "view",
+    "retrieve": "view",
+    "create": "add",
+    "update": "change",
+    "partial_update": "change",
+    "destroy": "delete",
+    # Bulk DRF actions
+    "bulk_destroy": "delete",
+    "bulk_update": "change",
+    "bulk_partial_update": "change",
+}
+
 
 @runtime_checkable
 class PermissionAdapter(Protocol):

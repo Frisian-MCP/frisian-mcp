@@ -861,3 +861,160 @@ class TestPermActionFilterFactory:
             errors = check_permission_aware_discovery()
         e003 = [e for e in errors if e.id == E003_UNANNOTATED_CUSTOM_ACTION]
         assert e003 == []
+
+
+# ---------------------------------------------------------------------------
+# Help-bypass fix: action="help" must respect Django permission filtering
+# ---------------------------------------------------------------------------
+
+
+def _make_ae(name: str, method: Any) -> ActionEntry:
+    """Build a minimal ActionEntry for help-bypass tests."""
+    return ActionEntry(
+        name=name,
+        description=name.capitalize(),
+        params={},
+        input_schema=None,
+        method=method,
+    )
+
+
+class TestHelpBypassFix:
+    """
+    Verify ``action="help"`` on dispatchers respects Django-permission filtering.
+
+    Agents could previously enumerate write/delete actions via help even when
+    they lacked those permissions.  The fix attaches capabilities to the request
+    so both ``@mcp_dispatcher`` and group dispatchers apply the same filtering
+    as ``tools/list``.
+    """
+
+    def _req(self, caps: frozenset[str] | None) -> Any:
+        """Return a mock request with ``_mcp_capabilities`` pre-attached."""
+        req = MagicMock()
+        req._mcp_capabilities = caps
+        req._mcp_perm_entry_filter = None
+        return req
+
+    def test_dispatcher_help_filters_write_actions_for_view_only_user(self) -> None:
+        """action="help" on @mcp_dispatcher hides create/destroy for view-only users."""
+        from frisian_mcp.backends.dispatcher import (
+            DispatcherMeta,
+            _build_help_response,
+            _build_perm_action_filter_from_request,
+        )
+        from frisian_mcp.registry import ToolRegistry
+
+        def _m(*_: Any) -> dict[str, Any]:
+            return {}
+
+        reg = ToolRegistry()
+        meta = DispatcherMeta(
+            name="_hb_disp",
+            description="test",
+            actions={
+                "list": _make_ae("list", _m),
+                "create": _make_ae("create", _m),
+                "destroy": _make_ae("destroy", _m),
+            },
+        )
+        reg.register(
+            name="_hb_disp",
+            fn=_m,
+            description="test",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            dispatcher_meta=meta,
+            perm_app_label="dcim",
+            perm_model="hbmodel",
+        )
+
+        req = self._req(frozenset({"dcim.view_hbmodel"}))
+        with patch("frisian_mcp.registry.tool_registry", reg):
+            af = _build_perm_action_filter_from_request(req, "_hb_disp")
+
+        names = {a["name"] for a in _build_help_response(meta, action_filter=af)["actions"]}
+        assert "list" in names
+        assert "create" not in names
+        assert "destroy" not in names
+
+    def test_dispatcher_help_shows_all_for_unrestricted_user(self) -> None:
+        """action="help" shows all actions when capabilities is None (superuser/flag off)."""
+        from frisian_mcp.backends.dispatcher import (
+            DispatcherMeta,
+            _build_help_response,
+            _build_perm_action_filter_from_request,
+        )
+
+        def _m(*_: Any) -> dict[str, Any]:
+            return {}
+
+        meta = DispatcherMeta(
+            name="_hb_unrestricted",
+            description="test",
+            actions={"list": _make_ae("list", _m), "create": _make_ae("create", _m)},
+        )
+        req = self._req(None)  # None = unrestricted/disabled
+        af = _build_perm_action_filter_from_request(req, "_hb_unrestricted")
+        assert af is None
+
+        names = {a["name"] for a in _build_help_response(meta, action_filter=None)["actions"]}
+        assert names == {"list", "create"}
+
+    def test_group_help_filters_write_tools_for_view_only_user(self) -> None:
+        """build_group_help hides write tools when entry_filter is supplied."""
+        from frisian_mcp.backends.group_dispatcher import build_group_help
+        from frisian_mcp.registry import ToolRegistry
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        def _m(*_: Any) -> dict[str, Any]:
+            return {}
+
+        reg = ToolRegistry()
+        # Use "zone_<action>" so the default "_" separator splits as (resource="zone", action=...).
+        for act, drf in [
+            ("list", "list"), ("retrieve", "retrieve"),
+            ("create", "create"), ("destroy", "destroy"),
+        ]:
+            reg.register(
+                name=f"zone_{act}",
+                fn=_m,
+                description=act,
+                input_schema={"type": "object"},
+                perm_app_label="dns",
+                perm_model="zone",
+                perm_drf_action=drf,
+            )
+
+        filt = _make_perm_entry_filter(frozenset({"dns.view_zone"}))
+        tnames = ["zone_list", "zone_retrieve", "zone_create", "zone_destroy"]
+        result = build_group_help("dns", tnames, reg, entry_filter=filt)
+        visible = set(result["resources"]["zone"])
+        assert "list" in visible
+        assert "retrieve" in visible
+        assert "create" not in visible
+        assert "destroy" not in visible
+
+    def test_ensure_perm_context_idempotent(self) -> None:
+        """_ensure_perm_context_on_request is a no-op on the second call."""
+        from frisian_mcp.views import _ensure_perm_context_on_request
+
+        req = MagicMock(spec=[])
+        req.user = MagicMock()
+        req.user.is_superuser = False
+        req.user.get_all_permissions.return_value = {"dcim.view_device"}
+
+        with override_settings(
+            FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+            FRISIAN_MCP_PERMISSION_ADAPTER=(
+                "frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter"
+            ),
+        ):
+            _ensure_perm_context_on_request(req)
+            caps_first = req._mcp_capabilities
+            req.user.get_all_permissions.return_value = {"ipam.view_prefix"}
+            _ensure_perm_context_on_request(req)
+            caps_second = req._mcp_capabilities
+
+        assert caps_first == caps_second
+

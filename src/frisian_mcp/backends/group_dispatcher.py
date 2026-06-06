@@ -132,6 +132,7 @@ def build_group_help(
     hints: dict[str, str] | None = None,
     resource: str | None = None,
     resource_prefixes: frozenset[str] | None = None,
+    entry_filter: Callable[[Any], bool] | None = None,
 ) -> dict[str, Any]:
     """
     Return the structured help payload for a group dispatcher.
@@ -183,6 +184,11 @@ def build_group_help(
             ``FRISIAN_MCP_DISPATCH_GROUPS``), used for prefix-aware splitting
             of tool names so that multi-word resources (e.g. ``location_type``)
             are correctly identified even when the separator is ``"_"``.
+        entry_filter: Optional callable applied to each ``_ToolEntry`` after
+            tier filtering.  Return ``False`` to exclude a tool from the help
+            listing.  Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to
+            hide tools the requesting user lacks Django permission for, so
+            ``action="help"`` respects the same filtering as ``tools/list``.
 
     Returns:
         A ``dict`` whose ``"help"`` key is ``True``.
@@ -199,6 +205,8 @@ def build_group_help(
         if entry is None:
             continue
         if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
+            continue
+        if entry_filter is not None and not entry_filter(entry):
             continue
         resources_map.setdefault(parsed[0], []).append(parsed[1])
 
@@ -273,6 +281,9 @@ def make_group_invoke(
                 getattr(settings, "FRISIAN_MCP_TOOL_HINTS", None) or {}
             )
             group_hints = {k: v for k, v in raw_hints.items() if k in tool_names}
+            # Apply Django-permission entry filter when FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY
+            # is enabled, so action="help" respects the same filtering as tools/list.
+            perm_entry_filter = getattr(request, "_mcp_perm_entry_filter", None)
             return build_group_help(
                 group_name,
                 sorted(tool_names),
@@ -281,6 +292,7 @@ def make_group_invoke(
                 hints=group_hints or None,
                 resource=resource,
                 resource_prefixes=resource_prefixes,
+                entry_filter=perm_entry_filter,
             )
 
         if resource is None:
