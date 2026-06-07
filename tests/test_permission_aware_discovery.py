@@ -1,4 +1,4 @@
-"""Tests for permission-aware discovery, backend_action, and E002/E003 checks."""
+"""Tests for permission-aware discovery, backend_action, and E003 checks."""
 # pylint: disable=redefined-outer-name
 from __future__ import annotations
 
@@ -622,11 +622,18 @@ class TestGroupDispatcherVisibility:
 
 
 class TestE002Check:
-    """Django system check E002: OAuth installed without FRISIAN_MCP_OAUTH_SERVICE_USER."""
+    """
+    E002 constant is retained for backward compat but the check no longer fires.
+
+    OAuth clients with no linked Django user are treated as service principals
+    (``_mcp_is_service_principal=True``) and bypass capability filtering — tier
+    is the sole gate.  Clients with a linked user get full ObjectPermission
+    filtering.  There is no configuration gap that E002 needs to guard against.
+    """
 
     @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=False)
     def test_flag_off_no_errors(self) -> None:
-        """E002 check returns no errors when flag is off."""
+        """No errors when flag is off."""
         from frisian_mcp.checks import check_permission_aware_discovery
 
         errors = check_permission_aware_discovery()
@@ -636,17 +643,13 @@ class TestE002Check:
         FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
         FRISIAN_MCP_OAUTH_SERVICE_USER=None,
     )
-    def test_oauth_installed_no_service_user_raises_e002(self) -> None:
-        """E002 fires when OAuth is installed and FRISIAN_MCP_OAUTH_SERVICE_USER is unset."""
-        import frisian_mcp.checks as checks_mod
+    def test_oauth_installed_no_service_user_no_e002(self) -> None:
+        """E002 does not fire when OAuth is installed without FRISIAN_MCP_OAUTH_SERVICE_USER."""
         from frisian_mcp.checks import E002_OAUTH_IDENTITY_GAP, check_permission_aware_discovery
 
-        mock_apps = MagicMock()
-        mock_apps.is_installed.return_value = True
-        with patch.object(checks_mod, "django_apps", mock_apps):
-            errors = check_permission_aware_discovery()
+        errors = check_permission_aware_discovery()
         e002 = [e for e in errors if e.id == E002_OAUTH_IDENTITY_GAP]
-        assert len(e002) == 1
+        assert e002 == []
 
     @override_settings(
         FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
@@ -654,26 +657,18 @@ class TestE002Check:
     )
     def test_oauth_installed_with_service_user_no_e002(self) -> None:
         """No E002 when OAuth is installed and FRISIAN_MCP_OAUTH_SERVICE_USER is set."""
-        import frisian_mcp.checks as checks_mod
         from frisian_mcp.checks import E002_OAUTH_IDENTITY_GAP, check_permission_aware_discovery
 
-        mock_apps = MagicMock()
-        mock_apps.is_installed.return_value = True
-        with patch.object(checks_mod, "django_apps", mock_apps):
-            errors = check_permission_aware_discovery()
+        errors = check_permission_aware_discovery()
         e002 = [e for e in errors if e.id == E002_OAUTH_IDENTITY_GAP]
         assert e002 == []
 
     @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True)
     def test_oauth_not_installed_no_e002(self) -> None:
-        """No E002 when frisian_mcp.contrib.oauth is not installed."""
-        import frisian_mcp.checks as checks_mod
+        """No E002 regardless of whether frisian_mcp.contrib.oauth is installed."""
         from frisian_mcp.checks import E002_OAUTH_IDENTITY_GAP, check_permission_aware_discovery
 
-        mock_apps = MagicMock()
-        mock_apps.is_installed.return_value = False
-        with patch.object(checks_mod, "django_apps", mock_apps):
-            errors = check_permission_aware_discovery()
+        errors = check_permission_aware_discovery()
         e002 = [e for e in errors if e.id == E002_OAUTH_IDENTITY_GAP]
         assert e002 == []
 

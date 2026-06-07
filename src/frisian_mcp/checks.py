@@ -35,7 +35,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.checks import (  # noqa: A004 — Django's Warning, not builtins  # pylint: disable=redefined-builtin
     Error,  # noqa: A004
@@ -138,25 +137,6 @@ def check_permission_aware_discovery(  # pylint: disable=unused-argument
         return []
 
     errors: list[Error] = []
-
-    # E002 — OAuth service principal has no Django permissions.
-    if django_apps.is_installed("frisian_mcp.contrib.oauth"):
-        service_user = getattr(settings, "FRISIAN_MCP_OAUTH_SERVICE_USER", None)
-        if not service_user:
-            errors.append(
-                Error(
-                    "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY is True but "
-                    "FRISIAN_MCP_OAUTH_SERVICE_USER is not set. "
-                    "OAuth service principals carry no Django permissions, so "
-                    "tools/list would return an empty tool set for all OAuth clients.",
-                    hint=(
-                        "Set FRISIAN_MCP_OAUTH_SERVICE_USER to the username or primary "
-                        "key of a Django user whose permissions should be used when "
-                        "resolving tool visibility for OAuth-authenticated requests."
-                    ),
-                    id=E002_OAUTH_IDENTITY_GAP,
-                )
-            )
 
     # E003 — Unannotated non-CRUD dispatcher actions.
     try:
