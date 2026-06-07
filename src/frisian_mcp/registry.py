@@ -460,16 +460,24 @@ class ToolRegistry:
                 # (dcim, bgp, ipam, …) would always appear in tools/list even
                 # when the user's ObjectPermissions cover only one group (e.g.
                 # dns), leaking the existence of every other group dispatcher.
-                if (
-                    entry.group_tool_names
-                    and entry_filter is not None
-                    and not any(
-                        entry_filter(self._tools[t])
+                #
+                # Only perm-aware child tools (those with perm_app_label AND
+                # perm_model) are considered.  Perm-less children (e.g. napalm,
+                # notes) always pass _make_perm_entry_filter regardless of the
+                # user's capabilities; counting them would make the group
+                # visible even when the user has no real permissions for it.
+                if entry.group_tool_names and entry_filter is not None:
+                    perm_children = [
+                        self._tools[t]
                         for t in entry.group_tool_names
                         if t in self._tools
-                    )
-                ):
-                    continue
+                        and self._tools[t].perm_app_label is not None
+                        and self._tools[t].perm_model is not None
+                    ]
+                    if perm_children and not any(
+                        entry_filter(c) for c in perm_children
+                    ):
+                        continue
 
                 # Plain (non-dispatcher) tool: include the registered schema
                 # verbatim — the entry's own permission_tier already gated it

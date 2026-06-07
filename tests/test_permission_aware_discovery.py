@@ -615,6 +615,69 @@ class TestGroupDispatcherVisibility:
         finally:
             self._teardown()
 
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+        FRISIAN_MCP_PERMISSION_ADAPTER="frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter",
+    )
+    def test_perm_less_child_does_not_keep_group_visible(self) -> None:
+        """
+        A group is hidden when its only perm-aware children fail the filter.
+
+        Perm-less children (no perm_app_label / perm_model, e.g. napalm, notes)
+        always pass _make_perm_entry_filter.  Counting them caused groups to
+        remain visible for users with no matching capabilities.
+        """
+        from frisian_mcp.registry import tool_registry
+
+        group_name = "_grp_permless_test"
+        perm_child = "_grp_permless_net_list"
+        permless_child = "_grp_permless_napalm"
+
+        tool_registry.register(
+            name=perm_child,
+            fn=_noop,
+            description="net list",
+            input_schema={"type": "object"},
+            perm_app_label="net",
+            perm_model="network",
+            perm_drf_action="list",
+            hidden=True,
+        )
+        tool_registry.register(
+            name=permless_child,
+            fn=_noop,
+            description="napalm — no perm metadata",
+            input_schema={"type": "object"},
+            # No perm_app_label / perm_model — simulates napalm/notes tools
+            hidden=True,
+        )
+        tool_registry.register(
+            name=group_name,
+            fn=_noop,
+            description="net group",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            group_tool_names=frozenset({perm_child, permless_child}),
+        )
+
+        try:
+            # User has no permissions → perm-aware child fails → group hidden.
+            req = _build_request(perms=set())
+            body = self._post_tools_list(req)
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert group_name not in names, (
+                "Group should be hidden when user lacks capabilities for perm-aware children"
+            )
+
+            # User has the matching permission → group visible.
+            req2 = _build_request(perms={"net.view_network"})
+            body2 = self._post_tools_list(req2)
+            names2 = [t["name"] for t in body2["result"]["tools"]]
+            assert group_name in names2
+        finally:
+            for name in (perm_child, permless_child, group_name):
+                tool_registry._tools.pop(name, None)
+
 
 # ---------------------------------------------------------------------------
 # T3: E002 check
