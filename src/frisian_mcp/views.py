@@ -56,6 +56,7 @@ from rest_framework.request import Request as DRFRequest
 from rest_framework.views import APIView
 
 from frisian_mcp.backends.base import ToolResult
+from frisian_mcp.contrib.permissions.base import _DRF_ACTION_TO_PERM_VERB
 from frisian_mcp.middleware import build_middleware_chain, get_middleware_instances
 from frisian_mcp.protocol import (
     INTERNAL_ERROR,
@@ -496,7 +497,7 @@ def _build_drf_error_content(exc: DRFValidationError) -> dict[str, Any]:
             "status_code": 422,
         }
     if isinstance(detail, list):
-        if detail and isinstance(detail[0], (dict, list)):
+        if detail and isinstance(detail[0], dict | list):
             # Bulk validation: detail is a list of per-row error dicts.
             # Flatten each row using _flatten_error_detail to avoid Python repr()
             # of ErrorDetail objects (e.g. "{'field': [ErrorDetail(...)]}").
@@ -536,6 +537,134 @@ def _resolve_classes(setting_name: str) -> list[Any] | None:
     if raw is None:
         return None
     return [import_string(cls) if isinstance(cls, str) else cls for cls in raw]
+
+
+def _get_permission_adapter() -> Any:
+    """
+    Load and instantiate the configured ``PermissionAdapter``.
+
+    Reads ``FRISIAN_MCP_PERMISSION_ADAPTER`` (dotted import path).  Defaults
+    to :class:`~frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter`.
+    Cached as a module-level singleton so the import happens once per process.
+    """
+    dotted: str = getattr(
+        settings,
+        "FRISIAN_MCP_PERMISSION_ADAPTER",
+        "frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter",
+    )
+    cls = import_string(dotted)
+    return cls()
+
+
+def _make_perm_entry_filter(capabilities: frozenset[str]) -> Any:
+    """
+    Return a ``_ToolEntry`` filter callable for the given capability set.
+
+    A tool is included when:
+
+    * It has no ``perm_app_label`` / ``perm_model`` metadata (decorator tools,
+      group dispatchers) — always visible.
+    * It is a dispatcher — always visible (per-action enforcement happens at
+      invocation time inside the dispatcher's own permission tier checks).
+    * Its derived capability string (``"app_label.verb_model"``) is present in
+      *capabilities*.
+
+    Unknown DRF action names default to ``"view"`` (conservative inclusion —
+    if the user can view the resource they can see the tool).
+    """
+
+    def _filter(entry: Any) -> bool:
+        if not entry.perm_app_label or not entry.perm_model:
+            return True
+        if entry.is_dispatcher:
+            return True
+        verb = _DRF_ACTION_TO_PERM_VERB.get(entry.perm_drf_action or "", "view")
+        cap = f"{entry.perm_app_label}.{verb}_{entry.perm_model}"
+        return cap in capabilities
+
+    return _filter
+
+
+def _make_perm_action_filter_factory(
+    capabilities: frozenset[str],
+) -> Any:
+    """
+    Build an ``action_filter_factory`` for permission-filtered dispatcher action enums.
+
+    The factory receives a dispatcher ``_ToolEntry`` and returns either
+    ``None`` (no filtering — the dispatcher has no perm metadata) or a
+    ``(action_name, action_entry) -> bool`` predicate.
+
+    For each action the predicate resolves the required Django permission verb:
+
+    * Non-CRUD actions use ``action_entry.backend_action`` when set.
+    * All other action names are looked up in ``_DRF_ACTION_TO_PERM_VERB``
+      (defaulting to ``"view"`` for unknowns).
+
+    An action is hidden when the derived
+    ``"app_label.verb_model"`` string is absent from *capabilities*.
+    """
+
+    def factory(entry: Any) -> Any:
+        if not entry.perm_app_label or not entry.perm_model:
+            return None
+        app_label: str = entry.perm_app_label
+        model: str = entry.perm_model
+
+        def action_filter(action_name: str, action_entry: Any) -> bool:
+            verb = action_entry.backend_action or _DRF_ACTION_TO_PERM_VERB.get(action_name, "view")
+            return f"{app_label}.{verb}_{model}" in capabilities
+
+        return action_filter
+
+    return factory
+
+
+def _ensure_perm_context_on_request(request: Any) -> None:
+    """
+    Compute and cache permission context on *request* if not already done.
+
+    Sets two attributes:
+
+    * ``_mcp_capabilities`` — ``frozenset[str]`` of Django permission strings
+      the requesting user holds, or ``None`` when permission-aware discovery is
+      disabled or the user is unrestricted (superuser).
+    * ``_mcp_perm_entry_filter`` — a ``(_ToolEntry) -> bool`` callable built
+      from the capabilities, or ``None`` for the same conditions.
+
+    Idempotent: a second call on the same request object is a no-op.
+    Both dispatchers and the tools/list handler call this so capabilities are
+    computed exactly once per request regardless of which path runs first.
+    """
+    # pylint: disable=protected-access
+    if hasattr(request, "_mcp_capabilities"):
+        return
+    perm_aware: bool = getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False)
+    if not perm_aware:
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
+        return
+    user = getattr(request, "user", None)
+    if user is None:
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
+        return
+    # Blanket-tier mode: OAuthServicePrincipal (User field blank on OAuthClient).
+    # The tier is the sole gate; per-capability filtering does not apply.
+    # Operators who want Django-permission scoping must link a Django User to the
+    # OAuthClient — matching the "API token" design the admin UI describes.
+    if getattr(user, "_mcp_is_service_principal", False) is True:
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
+        return
+    adapter = _get_permission_adapter()
+    if adapter.is_unrestricted(user):
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
+        return
+    caps: frozenset[str] = adapter.get_capabilities(user)
+    request._mcp_capabilities = caps
+    request._mcp_perm_entry_filter = _make_perm_entry_filter(caps)
 
 
 def _resolve_agent_connection_state(request: Any) -> tuple[Any | None, bool]:
@@ -786,7 +915,25 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
     cache_ttl: int | None = getattr(settings, "FRISIAN_MCP_TOOLS_LIST_CACHE_TTL", None)
     # Use a per-tier cache key so authenticated requests benefit from caching too.
     cache_key = f"{_TOOLS_LIST_CACHE_KEY}:{max_tier or 'all'}"
-    use_cache = cache_ttl is not None and (conn is None or conn.allowed_tools is None)
+    # Permission-aware discovery builds a per-user entry filter; bypassing the
+    # shared tier-based cache ensures different users see only their own tools.
+    perm_aware: bool = getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False)
+    use_cache = (
+        cache_ttl is not None
+        and (conn is None or conn.allowed_tools is None)
+        and not perm_aware
+    )
+
+    # Resolve per-user filters when permission-aware discovery is on.
+    # _ensure_perm_context_on_request caches the result on the request so tools/call
+    # invocations that follow in the same request cycle share the same computation.
+    _ensure_perm_context_on_request(request)
+    entry_filter = None
+    action_filter_factory = None
+    caps: frozenset[str] | None = getattr(request, "_mcp_capabilities", None)
+    if caps is not None:
+        entry_filter = _make_perm_entry_filter(caps)
+        action_filter_factory = _make_perm_action_filter_factory(caps)
 
     if use_cache:
         tools: list[dict[str, Any]] | None = django_cache.get(cache_key)
@@ -794,7 +941,11 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
             tools = tool_registry.list_tools(max_tier=max_tier)
             django_cache.set(cache_key, tools, cache_ttl)
     else:
-        tools = tool_registry.list_tools(max_tier=max_tier)
+        tools = tool_registry.list_tools(
+            max_tier=max_tier,
+            entry_filter=entry_filter,
+            action_filter_factory=action_filter_factory,
+        )
 
     if conn is not None and conn.allowed_tools is not None:
         allowed: frozenset[str] = frozenset(conn.allowed_tools)
@@ -978,6 +1129,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         )
 
         AgentConnection.objects.filter(pk=conn.pk).update(last_seen_at=timezone.now())
+
+    # Ensure permission context is cached on the request before dispatch so that
+    # dispatcher action="help" calls can apply Django permission filtering without
+    # needing to re-resolve capabilities (avoids a second DB/cache round-trip).
+    _ensure_perm_context_on_request(request)
 
     # Write-path filtering: strip the `verify` negotiation flag before dispatching
     # to the invocation backend.  The ViewSet serializer must never see it — it

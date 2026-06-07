@@ -12,6 +12,20 @@ Registered checks
     ``FRISIAN_MCP_ALLOW_UNAUTHENTICATED = True`` to silence the warning —
     that is the explicit opt-in.
 
+``frisian_mcp.E002``  (retired — constant retained for backward compat)
+    This check was removed.  OAuth clients without a linked Django user are
+    handled as service principals (``_mcp_is_service_principal=True``) and
+    bypass capability filtering; the tier is the sole gate.  Clients with a
+    linked user receive full ObjectPermission filtering.  No configuration
+    gap exists for E002 to guard against.
+
+``frisian_mcp.E003``
+    Error when ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True`` and a
+    ``@mcp_dispatcher`` action is a non-CRUD action (not ``list``,
+    ``create``, ``retrieve``, ``update``, ``partial_update``, or ``destroy``)
+    without a ``backend_action`` annotation.  The permission adapter cannot
+    derive the required Django permission verb for unannotated custom actions.
+
 The checks module is imported from :class:`frisian_mcp.apps.FrisianMcpConfig`
 so the ``@register`` decorators fire at app load.  It contributes nothing
 at runtime beyond the registrations themselves.
@@ -19,16 +33,31 @@ at runtime beyond the registrations themselves.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.conf import settings
 from django.core.checks import (  # noqa: A004 — Django's Warning, not builtins  # pylint: disable=redefined-builtin
+    Error,  # noqa: A004
     Tags,
     Warning,
     register,
 )
 
+from frisian_mcp.registry import tool_registry
+
+logger = logging.getLogger(__name__)
+
 W001_NO_PERMISSION_CLASSES = "frisian_mcp.W001"
+E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
+E003_UNANNOTATED_CUSTOM_ACTION = "frisian_mcp.E003"
+
+#: Standard DRF CRUD actions that map cleanly to a Django permission verb.
+#: Non-CRUD ``@mcp_action`` methods must supply ``backend_action`` so the
+#: permission adapter can derive the capability string.
+_CRUD_ACTIONS: frozenset[str] = frozenset(
+    {"list", "create", "retrieve", "update", "partial_update", "destroy"}
+)
 
 
 @register(Tags.security)
@@ -83,3 +112,55 @@ def check_permission_classes_in_production(  # pylint: disable=unused-argument
             id=W001_NO_PERMISSION_CLASSES,
         )
     ]
+
+
+@register(Tags.security)
+def check_permission_aware_discovery(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Error]:
+    """
+    Validate the ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` configuration.
+
+    Fires one sub-check when the feature flag is ``True``:
+
+    **E003** — Unannotated custom action: a ``@mcp_dispatcher`` action is a
+    non-CRUD action without a ``backend_action`` keyword argument.  The
+    permission adapter cannot derive a Django permission verb for unrecognised
+    action names.  Annotate the ``@mcp_action`` with
+    ``backend_action='view'`` (or ``'add'`` / ``'change'`` / ``'delete'``).
+    """
+    if not getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False):
+        return []
+
+    errors: list[Error] = []
+
+    # E003 — Unannotated non-CRUD dispatcher actions.
+    try:
+        for tool_name in tool_registry.list_names():
+            entry = tool_registry.get_entry(tool_name)
+            if entry is None or not entry.is_dispatcher or entry.dispatcher_meta is None:
+                continue
+            for action_name, action_entry in entry.dispatcher_meta.actions.items():
+                if action_name in _CRUD_ACTIONS:
+                    continue
+                if action_entry.backend_action is None:
+                    errors.append(
+                        Error(
+                            f"Dispatcher {tool_name!r} has a non-CRUD action "
+                            f"{action_name!r} without a backend_action annotation. "
+                            "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY cannot determine "
+                            "the required Django permission for this action.",
+                            hint=(
+                                f"Add backend_action='view' (or 'add', 'change', 'delete') "
+                                f"to @mcp_action for {action_name!r} on {tool_name!r}."
+                            ),
+                            id=E003_UNANNOTATED_CUSTOM_ACTION,
+                        )
+                    )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "frisian_mcp E003 check failed during registry iteration: %s", exc, exc_info=True
+        )
+
+    return errors

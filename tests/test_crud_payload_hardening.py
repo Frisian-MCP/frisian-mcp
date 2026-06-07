@@ -111,6 +111,30 @@ def data_field_registry() -> ToolRegistry:
     return reg
 
 
+# Schema with no required fields — used to isolate guard behaviour from
+# jsonschema required-field failures.
+_NO_REQUIRED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "email": {"type": "string"},
+    },
+}
+
+
+@pytest.fixture()
+def no_required_write_registry() -> ToolRegistry:
+    """Write tool with no required fields; lets guard boundary tests run clean."""
+    reg = ToolRegistry()
+    reg.register(
+        name="contacts_create",
+        fn=_noop_tool,
+        description="Create a contact",
+        input_schema=_NO_REQUIRED_SCHEMA,
+        is_write=True,
+    )
+    return reg
+
+
 # ---------------------------------------------------------------------------
 # Rejection tests — Approach B
 # ---------------------------------------------------------------------------
@@ -219,3 +243,41 @@ class TestAllowedPayloadShapes:
             {"email": "a@b.com", "data": {"extra": "value"}},
         )
         assert result["email"] == "a@b.com"
+
+    def test_non_dict_value_in_bulk_key_passthrough(
+        self, no_required_write_registry: ToolRegistry
+    ) -> None:
+        """{data: None} is not a dict — guard must not fire; call succeeds."""
+        # isinstance(None, dict) is False so the guard condition short-circuits.
+        # Using a no-required schema confirms the guard is silent (not jsonschema).
+        result = no_required_write_registry.dispatch(
+            _build_request(),
+            "contacts_create",
+            {"data": None},
+        )
+        assert result == {"data": None}
+
+    def test_non_bulk_set_key_with_dict_value_passthrough(
+        self, no_required_write_registry: ToolRegistry
+    ) -> None:
+        """{payload: {...}} — key not in _BULK_LIST_BODY_KEYS — guard must not fire."""
+        result = no_required_write_registry.dispatch(
+            _build_request(),
+            "contacts_create",
+            {"payload": {"email": "a@b.com"}},
+        )
+        assert result == {"payload": {"email": "a@b.com"}}
+
+    def test_camelcase_wrapper_key_normalized_then_rejected(
+        self, write_registry: ToolRegistry
+    ) -> None:
+        """Wrapper key {Data} is normalized to {data} by camelCase, then rejected."""
+        with pytest.raises(ToolInputError) as exc_info:
+            write_registry.dispatch(
+                _build_request(),
+                "contacts_create",
+                {"Data": {"email": "a@b.com", "first_name": "Alice"}},
+            )
+        msg = str(exc_info.value)
+        assert "flat" in msg.lower()
+        assert '"data"' in msg

@@ -35,7 +35,7 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         (
             None,
             {
-                "fields": ("name", "is_active", "permission"),
+                "fields": ("name", "is_active", "permission", "user"),
             },
         ),
         (

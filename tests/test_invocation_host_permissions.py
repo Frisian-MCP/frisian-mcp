@@ -245,6 +245,8 @@ class TestNonDjangoPermissionsStillEnforced:
 
 class TestServiceAccountUser:
     """
+    Service account user substitution tests.
+
     When FRISIAN_MCP_SERVICE_ACCOUNT_USER is configured and the incoming request
     has an anonymous user, _resolve_effective_user substitutes the service account
     so that host ViewSets using IsAuthenticated are satisfied.
@@ -289,13 +291,13 @@ class TestServiceAccountUser:
         """When the named user does not exist, _resolve_effective_user returns AnonymousUser."""
         settings.FRISIAN_MCP_SERVICE_ACCOUNT_USER = "nonexistent-user"
 
-        class _FakeDoesNotExist(Exception):
+        class _FakeDoesNotExistError(Exception):
             pass
 
         mock_model = MagicMock()
         # DoesNotExist must be a real exception class so it can be raised and caught.
-        mock_model.DoesNotExist = _FakeDoesNotExist
-        mock_model.objects.get.side_effect = _FakeDoesNotExist
+        mock_model.DoesNotExist = _FakeDoesNotExistError
+        mock_model.objects.get.side_effect = _FakeDoesNotExistError
 
         with unittest.mock.patch(
             "django.contrib.auth.get_user_model", return_value=mock_model

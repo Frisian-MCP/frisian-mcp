@@ -611,6 +611,7 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
             permission_classes=[],
             permission_tier="read",
             is_dispatcher=True,
+            group_tool_names=frozenset(member_tools),
         )
         for member_name in member_tools:
             tool_registry.set_hidden(member_name, True)
@@ -860,6 +861,9 @@ class FrisianMcpConfig(AppConfig):
                 permission_classes=list(tool_def.permission_classes),
                 permission_tier=tool_def.permission_tier,
                 is_write=tool_def.is_write,
+                perm_app_label=tool_def.perm_app_label,
+                perm_model=tool_def.perm_model,
+                perm_drf_action=tool_def.action,
             )
 
         load_middleware()

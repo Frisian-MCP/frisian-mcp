@@ -70,6 +70,8 @@ class ToolDefinition:  # pylint: disable=too-many-instance-attributes
     permission_tier: str = "read"
     url_path: str = ""
     is_write: bool = False
+    perm_app_label: str | None = None
+    perm_model: str | None = None
 
 
 @dataclasses.dataclass

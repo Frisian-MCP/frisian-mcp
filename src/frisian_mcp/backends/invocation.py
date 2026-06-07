@@ -630,10 +630,10 @@ class SyncInvocation(BaseInvocationBackend):
 
         from django.contrib.auth import get_user_model  # pylint: disable=import-outside-toplevel
 
-        UserModel = get_user_model()
+        user_model = get_user_model()
         try:
-            return UserModel.objects.get(username=service_username)
-        except UserModel.DoesNotExist:
+            return user_model.objects.get(username=service_username)
+        except user_model.DoesNotExist:
             logger.warning(
                 "FRISIAN_MCP_SERVICE_ACCOUNT_USER %r not found; using AnonymousUser",
                 service_username,

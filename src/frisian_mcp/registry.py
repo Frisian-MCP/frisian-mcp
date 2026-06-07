@@ -205,17 +205,21 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         "description",
         "dispatcher_meta",
         "fn",
+        "group_tool_names",
         "hidden",
         "input_schema",
         "is_dispatcher",
         "is_heavy",
         "is_write",
         "name",
+        "perm_app_label",
+        "perm_drf_action",
+        "perm_model",
         "permission_classes",
         "permission_tier",
     )
 
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(  # pylint: disable=too-many-arguments,too-many-locals
         self,
         name: str,
         fn: Callable[..., Any],
@@ -228,6 +232,10 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
         hidden: bool = False,
+        perm_app_label: str | None = None,
+        perm_model: str | None = None,
+        perm_drf_action: str | None = None,
+        group_tool_names: frozenset[str] | None = None,
     ) -> None:
         self.name = name
         self.fn = fn
@@ -247,6 +255,17 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         # ``list_tools()`` output — used by FRISIAN_MCP_DISPATCH_GROUPS to bury
         # bundled flat tools behind their group dispatcher.
         self.hidden = hidden
+        # Permission metadata extracted from DRF discovery.  Used by
+        # FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY to filter tools/list.
+        # ``None`` for decorator tools and group dispatchers (always visible).
+        self.perm_app_label = perm_app_label
+        self.perm_model = perm_model
+        self.perm_drf_action = perm_drf_action
+        # For group dispatchers: frozenset of the flat tool names bundled inside.
+        # Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide the group
+        # dispatcher when the requesting user has no capabilities for any of its
+        # child tools — so agents never see a group they cannot use at all.
+        self.group_tool_names = group_tool_names
 
 
 class ToolRegistry:
@@ -264,7 +283,7 @@ class ToolRegistry:
         self._tools: dict[str, _ToolEntry] = {}
         self._lock: threading.Lock = threading.Lock()
 
-    def register(  # pylint: disable=too-many-arguments
+    def register(  # pylint: disable=too-many-arguments,too-many-locals
         self,
         name: str,
         fn: Callable[..., Any],
@@ -277,6 +296,10 @@ class ToolRegistry:
         permission_tier: str = "read",
         dispatcher_meta: Any = None,
         hidden: bool = False,
+        perm_app_label: str | None = None,
+        perm_model: str | None = None,
+        perm_drf_action: str | None = None,
+        group_tool_names: frozenset[str] | None = None,
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -310,6 +333,20 @@ class ToolRegistry:
                 :meth:`list_tools` output but remains dispatchable by name.
                 Used by ``FRISIAN_MCP_DISPATCH_GROUPS`` to bury bundled flat
                 tools behind their group dispatcher.
+            perm_app_label: Django app label extracted from the ViewSet queryset
+                model.  Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to
+                build the required permission string.
+            perm_model: Django model name (``model._meta.model_name``) extracted
+                from the ViewSet queryset.  Paired with *perm_app_label*.
+            perm_drf_action: DRF action name (e.g. ``"list"``, ``"retrieve"``)
+                used to derive the Django permission verb via the
+                ``_DRF_ACTION_TO_PERM_VERB`` mapping in ``views.py``.
+            group_tool_names: For group dispatchers registered via
+                ``FRISIAN_MCP_DISPATCH_GROUPS``, the frozenset of flat tool
+                names bundled inside this dispatcher.  Used by
+                ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide the group
+                dispatcher from ``tools/list`` when none of its child tools are
+                accessible to the requesting user.
 
         """
         with self._lock:
@@ -325,6 +362,10 @@ class ToolRegistry:
                 permission_tier=permission_tier,
                 dispatcher_meta=dispatcher_meta,
                 hidden=hidden,
+                perm_app_label=perm_app_label,
+                perm_model=perm_model,
+                perm_drf_action=perm_drf_action,
+                group_tool_names=group_tool_names,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:
@@ -363,7 +404,12 @@ class ToolRegistry:
             entry.hidden = hidden
             return True
 
-    def list_tools(self, max_tier: str | None = None) -> list[dict[str, Any]]:
+    def list_tools(
+        self,
+        max_tier: str | None = None,
+        entry_filter: Callable[[Any], bool] | None = None,
+        action_filter_factory: Callable[[Any], Callable[[str, Any], bool] | None] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Return the tool listing in MCP ``tools/list`` response format.
 
@@ -379,6 +425,17 @@ class ToolRegistry:
                 has zero visible actions at the caller's tier, the dispatcher
                 is omitted entirely so it is not advertised as a callable
                 navigation entry-point with no callable actions.
+            entry_filter: Optional callable applied to each ``_ToolEntry`` before
+                it is included in the result.  Return ``False`` to exclude the
+                entry.  Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to
+                apply per-user capability filtering without holding the registry
+                lock across external calls.
+            action_filter_factory: Optional callable that receives a dispatcher
+                ``_ToolEntry`` and returns either ``None`` (no extra filtering)
+                or a ``(action_name, ActionEntry) -> bool`` predicate applied on
+                top of tier filtering when building the dispatcher's action enum.
+                Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide
+                write/delete actions the requesting user lacks permission for.
 
         """
         max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
@@ -395,6 +452,32 @@ class ToolRegistry:
                     continue
                 if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
                     continue
+                if entry_filter is not None and not entry_filter(entry):
+                    continue
+
+                # Group dispatcher: hide when the user has no capabilities for
+                # any of its child tools.  Without this check every group tool
+                # (dcim, bgp, ipam, …) would always appear in tools/list even
+                # when the user's ObjectPermissions cover only one group (e.g.
+                # dns), leaking the existence of every other group dispatcher.
+                #
+                # Only perm-aware child tools (those with perm_app_label AND
+                # perm_model) are considered.  Perm-less children (e.g. napalm,
+                # notes) always pass _make_perm_entry_filter regardless of the
+                # user's capabilities; counting them would make the group
+                # visible even when the user has no real permissions for it.
+                if entry.group_tool_names and entry_filter is not None:
+                    perm_children = [
+                        self._tools[t]
+                        for t in entry.group_tool_names
+                        if t in self._tools
+                        and self._tools[t].perm_app_label is not None
+                        and self._tools[t].perm_model is not None
+                    ]
+                    if perm_children and not any(
+                        entry_filter(c) for c in perm_children
+                    ):
+                        continue
 
                 # Plain (non-dispatcher) tool: include the registered schema
                 # verbatim — the entry's own permission_tier already gated it
@@ -414,8 +497,11 @@ class ToolRegistry:
                 # filtered to the caller's tier.  Hide the dispatcher entirely
                 # when no actions remain visible (avoids exposing an empty
                 # navigation tool that can only return help with zero actions).
+                action_filter = (
+                    action_filter_factory(entry) if action_filter_factory is not None else None
+                )
                 filtered_schema = _build_dispatcher_input_schema(
-                    entry.dispatcher_meta, max_tier=max_tier
+                    entry.dispatcher_meta, max_tier=max_tier, action_filter=action_filter
                 )
                 visible_actions = filtered_schema["properties"]["action"]["enum"]
                 if max_tier is not None and not visible_actions:
