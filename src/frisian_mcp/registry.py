@@ -205,6 +205,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         "description",
         "dispatcher_meta",
         "fn",
+        "group_tool_names",
         "hidden",
         "input_schema",
         "is_dispatcher",
@@ -218,7 +219,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         "permission_tier",
     )
 
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(  # pylint: disable=too-many-arguments,too-many-locals
         self,
         name: str,
         fn: Callable[..., Any],
@@ -234,6 +235,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         perm_app_label: str | None = None,
         perm_model: str | None = None,
         perm_drf_action: str | None = None,
+        group_tool_names: frozenset[str] | None = None,
     ) -> None:
         self.name = name
         self.fn = fn
@@ -259,6 +261,11 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         self.perm_app_label = perm_app_label
         self.perm_model = perm_model
         self.perm_drf_action = perm_drf_action
+        # For group dispatchers: frozenset of the flat tool names bundled inside.
+        # Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide the group
+        # dispatcher when the requesting user has no capabilities for any of its
+        # child tools — so agents never see a group they cannot use at all.
+        self.group_tool_names = group_tool_names
 
 
 class ToolRegistry:
@@ -276,7 +283,7 @@ class ToolRegistry:
         self._tools: dict[str, _ToolEntry] = {}
         self._lock: threading.Lock = threading.Lock()
 
-    def register(  # pylint: disable=too-many-arguments
+    def register(  # pylint: disable=too-many-arguments,too-many-locals
         self,
         name: str,
         fn: Callable[..., Any],
@@ -292,6 +299,7 @@ class ToolRegistry:
         perm_app_label: str | None = None,
         perm_model: str | None = None,
         perm_drf_action: str | None = None,
+        group_tool_names: frozenset[str] | None = None,
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -333,6 +341,12 @@ class ToolRegistry:
             perm_drf_action: DRF action name (e.g. ``"list"``, ``"retrieve"``)
                 used to derive the Django permission verb via the
                 ``_DRF_ACTION_TO_PERM_VERB`` mapping in ``views.py``.
+            group_tool_names: For group dispatchers registered via
+                ``FRISIAN_MCP_DISPATCH_GROUPS``, the frozenset of flat tool
+                names bundled inside this dispatcher.  Used by
+                ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide the group
+                dispatcher from ``tools/list`` when none of its child tools are
+                accessible to the requesting user.
 
         """
         with self._lock:
@@ -351,6 +365,7 @@ class ToolRegistry:
                 perm_app_label=perm_app_label,
                 perm_model=perm_model,
                 perm_drf_action=perm_drf_action,
+                group_tool_names=group_tool_names,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:
@@ -438,6 +453,22 @@ class ToolRegistry:
                 if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
                     continue
                 if entry_filter is not None and not entry_filter(entry):
+                    continue
+
+                # Group dispatcher: hide when the user has no capabilities for
+                # any of its child tools.  Without this check every group tool
+                # (dcim, bgp, ipam, …) would always appear in tools/list even
+                # when the user's ObjectPermissions cover only one group (e.g.
+                # dns), leaking the existence of every other group dispatcher.
+                if (
+                    entry.group_tool_names
+                    and entry_filter is not None
+                    and not any(
+                        entry_filter(self._tools[t])
+                        for t in entry.group_tool_names
+                        if t in self._tools
+                    )
+                ):
                     continue
 
                 # Plain (non-dispatcher) tool: include the registered schema

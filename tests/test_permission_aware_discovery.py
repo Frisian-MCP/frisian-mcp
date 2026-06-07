@@ -444,6 +444,179 @@ class TestToolsListPermAwareFilter:
 
 
 # ---------------------------------------------------------------------------
+# Group dispatcher visibility filtering
+# ---------------------------------------------------------------------------
+
+
+class TestGroupDispatcherVisibility:
+    """Group dispatchers are hidden when the user has no capabilities for any child tool."""
+
+    _GROUP = "_grp_test_net"
+    _CHILD_VIEW = "_grp_test_net_list"
+    _CHILD_WRITE = "_grp_test_net_create"
+    _OTHER_GROUP = "_grp_test_other"
+    _OTHER_CHILD = "_grp_test_other_list"
+
+    def _post_tools_list(self, request: Any) -> dict[str, Any]:
+        from django.http import HttpRequest
+
+        from frisian_mcp.views import _parse_and_dispatch
+
+        http_req = HttpRequest()
+        http_req.method = "POST"
+        http_req._stream = None  # type: ignore[attr-defined]
+        http_req._body = json.dumps(  # type: ignore[attr-defined]
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        ).encode()
+        http_req.META["HTTP_ACCEPT"] = "application/json"
+        http_req._mcp_max_tier = None  # type: ignore[attr-defined]
+        http_req.user = request.user
+        http_req.auth = request.auth
+        response = _parse_and_dispatch(http_req)
+        return json.loads(response.content)
+
+    def _setup(self) -> None:
+        from frisian_mcp.registry import tool_registry
+
+        # Child tools for the group under test.
+        tool_registry.register(
+            name=self._CHILD_VIEW,
+            fn=_noop,
+            description="net list",
+            input_schema={"type": "object"},
+            perm_app_label="net",
+            perm_model="network",
+            perm_drf_action="list",
+            hidden=True,
+        )
+        tool_registry.register(
+            name=self._CHILD_WRITE,
+            fn=_noop,
+            description="net create",
+            input_schema={"type": "object"},
+            perm_app_label="net",
+            perm_model="network",
+            perm_drf_action="create",
+            hidden=True,
+        )
+        # Group dispatcher that bundles those two tools.
+        tool_registry.register(
+            name=self._GROUP,
+            fn=_noop,
+            description="net group",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            group_tool_names=frozenset({self._CHILD_VIEW, self._CHILD_WRITE}),
+        )
+        # Separate group with its own child — used to confirm only the
+        # matching group is hidden, not all groups.
+        tool_registry.register(
+            name=self._OTHER_CHILD,
+            fn=_noop,
+            description="other list",
+            input_schema={"type": "object"},
+            perm_app_label="other",
+            perm_model="thing",
+            perm_drf_action="list",
+            hidden=True,
+        )
+        tool_registry.register(
+            name=self._OTHER_GROUP,
+            fn=_noop,
+            description="other group",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            group_tool_names=frozenset({self._OTHER_CHILD}),
+        )
+
+    def _teardown(self) -> None:
+        from frisian_mcp.registry import tool_registry
+
+        for name in (
+            self._CHILD_VIEW, self._CHILD_WRITE, self._GROUP,
+            self._OTHER_CHILD, self._OTHER_GROUP,
+        ):
+            tool_registry._tools.pop(name, None)
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+        FRISIAN_MCP_PERMISSION_ADAPTER="frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter",
+    )
+    def test_group_hidden_when_user_has_no_child_capabilities(self) -> None:
+        """Group dispatcher absent from tools/list when user has zero matching capabilities."""
+        self._setup()
+        try:
+            req = _build_request(perms=set())
+            body = self._post_tools_list(req)
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert self._GROUP not in names
+            assert self._OTHER_GROUP not in names
+        finally:
+            self._teardown()
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+        FRISIAN_MCP_PERMISSION_ADAPTER="frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter",
+    )
+    def test_group_visible_when_user_has_at_least_one_child_capability(self) -> None:
+        """Group dispatcher appears when the user has view capability for any child tool."""
+        self._setup()
+        try:
+            req = _build_request(perms={"net.view_network"})
+            body = self._post_tools_list(req)
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert self._GROUP in names
+            assert self._OTHER_GROUP not in names
+        finally:
+            self._teardown()
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+        FRISIAN_MCP_PERMISSION_ADAPTER="frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter",
+    )
+    def test_two_groups_each_visible_when_user_has_capabilities_for_both(self) -> None:
+        """Both groups appear when user has at least one capability in each."""
+        self._setup()
+        try:
+            req = _build_request(perms={"net.view_network", "other.view_thing"})
+            body = self._post_tools_list(req)
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert self._GROUP in names
+            assert self._OTHER_GROUP in names
+        finally:
+            self._teardown()
+
+    @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=False)
+    def test_group_always_visible_when_flag_off(self) -> None:
+        """Group dispatcher is always visible when permission-aware discovery is disabled."""
+        self._setup()
+        try:
+            req = _build_request(perms=set())
+            body = self._post_tools_list(req)
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert self._GROUP in names
+            assert self._OTHER_GROUP in names
+        finally:
+            self._teardown()
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+        FRISIAN_MCP_PERMISSION_ADAPTER="frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter",
+    )
+    def test_group_always_visible_for_superuser(self) -> None:
+        """Superusers bypass capability filtering — all groups visible."""
+        self._setup()
+        try:
+            req = _build_request(is_superuser=True, perms=set())
+            body = self._post_tools_list(req)
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert self._GROUP in names
+            assert self._OTHER_GROUP in names
+        finally:
+            self._teardown()
+
+
+# ---------------------------------------------------------------------------
 # T3: E002 check
 # ---------------------------------------------------------------------------
 
