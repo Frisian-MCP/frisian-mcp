@@ -271,7 +271,7 @@ class TestAllowedPayloadShapes:
     def test_camelcase_wrapper_key_normalized_then_rejected(
         self, write_registry: ToolRegistry
     ) -> None:
-        """{Data: {...}} is normalized to {data: {...}} by camelCase normalization, then rejected."""
+        """Wrapper key {Data} is normalized to {data} by camelCase, then rejected."""
         with pytest.raises(ToolInputError) as exc_info:
             write_registry.dispatch(
                 _build_request(),

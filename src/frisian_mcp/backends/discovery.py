@@ -311,7 +311,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             elif isinstance(pattern, URLPattern):
                 self._process_pattern(pattern, prefix, seen, tools)
 
-    def _process_pattern(  # pylint: disable=too-many-locals
+    def _process_pattern(  # pylint: disable=too-many-locals,too-many-statements
         self,
         pattern: URLPattern,
         prefix: str,

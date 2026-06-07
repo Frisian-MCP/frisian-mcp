@@ -124,7 +124,7 @@ def build_group_input_schema() -> dict[str, Any]:
     }
 
 
-def build_group_help(
+def build_group_help(  # pylint: disable=too-many-locals
     group_name: str,
     tool_names: list[str],
     registry: ToolRegistry,

@@ -49,11 +49,11 @@ class PermissionAdapter(Protocol):
 
     def get_capabilities(self, user: Any) -> frozenset[str]:
         """Return frozenset of ``'app_label.action_model'`` strings held by *user*."""
-        ...
+        raise NotImplementedError
 
     def is_unrestricted(self, user: Any) -> bool:
         """Return ``True`` when *user* should see all tools regardless of permissions."""
-        ...
+        raise NotImplementedError
 
 
 class DjangoPermissionAdapter:

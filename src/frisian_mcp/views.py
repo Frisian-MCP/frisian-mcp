@@ -636,34 +636,35 @@ def _ensure_perm_context_on_request(request: Any) -> None:
     Both dispatchers and the tools/list handler call this so capabilities are
     computed exactly once per request regardless of which path runs first.
     """
+    # pylint: disable=protected-access
     if hasattr(request, "_mcp_capabilities"):
         return
     perm_aware: bool = getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False)
     if not perm_aware:
-        request._mcp_capabilities = None  # type: ignore[attr-defined]
-        request._mcp_perm_entry_filter = None  # type: ignore[attr-defined]
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
         return
     user = getattr(request, "user", None)
     if user is None:
-        request._mcp_capabilities = None  # type: ignore[attr-defined]
-        request._mcp_perm_entry_filter = None  # type: ignore[attr-defined]
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
         return
     # Blanket-tier mode: OAuthServicePrincipal (User field blank on OAuthClient).
     # The tier is the sole gate; per-capability filtering does not apply.
     # Operators who want Django-permission scoping must link a Django User to the
     # OAuthClient — matching the "API token" design the admin UI describes.
     if getattr(user, "_mcp_is_service_principal", False) is True:
-        request._mcp_capabilities = None  # type: ignore[attr-defined]
-        request._mcp_perm_entry_filter = None  # type: ignore[attr-defined]
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
         return
     adapter = _get_permission_adapter()
     if adapter.is_unrestricted(user):
-        request._mcp_capabilities = None  # type: ignore[attr-defined]
-        request._mcp_perm_entry_filter = None  # type: ignore[attr-defined]
+        request._mcp_capabilities = None
+        request._mcp_perm_entry_filter = None
         return
     caps: frozenset[str] = adapter.get_capabilities(user)
-    request._mcp_capabilities = caps  # type: ignore[attr-defined]
-    request._mcp_perm_entry_filter = _make_perm_entry_filter(caps)  # type: ignore[attr-defined]
+    request._mcp_capabilities = caps
+    request._mcp_perm_entry_filter = _make_perm_entry_filter(caps)
 
 
 def _resolve_agent_connection_state(request: Any) -> tuple[Any | None, bool]:
