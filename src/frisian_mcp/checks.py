@@ -12,12 +12,12 @@ Registered checks
     ``FRISIAN_MCP_ALLOW_UNAUTHENTICATED = True`` to silence the warning —
     that is the explicit opt-in.
 
-``frisian_mcp.E002``
-    Error when ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True`` and
-    ``frisian_mcp.contrib.oauth`` is installed but
-    ``FRISIAN_MCP_OAUTH_SERVICE_USER`` is not set.  OAuth service principals
-    have no Django permissions, so all tools would be hidden from OAuth
-    clients unless a concrete service user is configured.
+``frisian_mcp.E002``  (retired — constant retained for backward compat)
+    This check was removed.  OAuth clients without a linked Django user are
+    handled as service principals (``_mcp_is_service_principal=True``) and
+    bypass capability filtering; the tier is the sole gate.  Clients with a
+    linked user receive full ObjectPermission filtering.  No configuration
+    gap exists for E002 to guard against.
 
 ``frisian_mcp.E003``
     Error when ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True`` and a
@@ -33,6 +33,7 @@ at runtime beyond the registrations themselves.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.conf import settings
@@ -44,6 +45,8 @@ from django.core.checks import (  # noqa: A004 — Django's Warning, not builtin
 )
 
 from frisian_mcp.registry import tool_registry
+
+logger = logging.getLogger(__name__)
 
 W001_NO_PERMISSION_CLASSES = "frisian_mcp.W001"
 E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
@@ -119,13 +122,7 @@ def check_permission_aware_discovery(  # pylint: disable=unused-argument
     """
     Validate the ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` configuration.
 
-    Fires two sub-checks when the feature flag is ``True``:
-
-    **E002** — OAuth identity gap: ``frisian_mcp.contrib.oauth`` is installed
-    but ``FRISIAN_MCP_OAUTH_SERVICE_USER`` is not set.  OAuth service
-    principals have ``get_all_permissions() == set()``, so permission-aware
-    discovery would hide every tool from OAuth clients.  Operators must
-    configure a service user so the adapter can resolve real capabilities.
+    Fires one sub-check when the feature flag is ``True``:
 
     **E003** — Unannotated custom action: a ``@mcp_dispatcher`` action is a
     non-CRUD action without a ``backend_action`` keyword argument.  The
@@ -161,7 +158,9 @@ def check_permission_aware_discovery(  # pylint: disable=unused-argument
                             id=E003_UNANNOTATED_CUSTOM_ACTION,
                         )
                     )
-    except Exception:  # pylint: disable=broad-exception-caught  # noqa: S110
-        pass
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "frisian_mcp E003 check failed during registry iteration: %s", exc, exc_info=True
+        )
 
     return errors

@@ -31,8 +31,13 @@ class ExemptViewPermissionAdapter(DjangoPermissionAdapter):
     by globally-readable models appear in ``tools/list`` for all authenticated
     users, matching the implicit read-access semantics of that setting.
 
-    Supports both the ``"__all__"`` shorthand (all installed models become
-    view-capable) and an explicit list of ``"app_label.model_name"`` strings.
+    Supports both the ``"__all__"`` / ``"*"`` shorthand (all installed models
+    become view-capable) and an explicit list of ``"app_label.model_name"``
+    strings.  When the wildcard form is used, models listed in
+    ``settings.EXEMPT_EXCLUDE_MODELS`` are excluded from synthesis — matching
+    the semantics of the host application's own permission enforcement.
+    ``EXEMPT_EXCLUDE_MODELS`` is expected to be a sequence of
+    ``(app_label, model_name)`` tuples (e.g. ``[("auth", "group")]``).
     """
 
     def get_capabilities(self, user: Any) -> frozenset[str]:
@@ -40,14 +45,19 @@ class ExemptViewPermissionAdapter(DjangoPermissionAdapter):
         base = super().get_capabilities(user)
         extra: set[str] = set()
         exempt: list[str] | str = getattr(settings, "EXEMPT_VIEW_PERMISSIONS", [])
-        if exempt == "__all__":
+        if exempt in ("__all__", "*"):
             # All view permissions are globally exempt — add view_<model> for every
-            # installed model so no tool is filtered out on a view-action basis.
+            # installed model so no tool is filtered out on a view-action basis,
+            # but honour EXEMPT_EXCLUDE_MODELS so protected models stay gated.
             from django.apps import apps  # pylint: disable=import-outside-toplevel
 
+            exclude: set[tuple[str, str]] = set(
+                getattr(settings, "EXEMPT_EXCLUDE_MODELS", None) or ()
+            )
             for model in apps.get_models():
                 meta = model._meta  # pylint: disable=protected-access
-                extra.add(f"{meta.app_label}.view_{meta.model_name}")
+                if (meta.app_label, meta.model_name) not in exclude:
+                    extra.add(f"{meta.app_label}.view_{meta.model_name}")
         else:
             for model_label in (exempt or []):
                 parts = str(model_label).split(".", 1)

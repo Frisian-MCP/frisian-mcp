@@ -1345,3 +1345,166 @@ class TestHelpBypassFix:
 
         assert caps_first == caps_second
 
+
+# ---------------------------------------------------------------------------
+# ExemptViewPermissionAdapter — EXEMPT_EXCLUDE_MODELS
+# ---------------------------------------------------------------------------
+
+
+class TestExemptViewAdapterExcludeModels:
+    """
+    ExemptViewPermissionAdapter + EXEMPT_EXCLUDE_MODELS.
+
+    When EXEMPT_VIEW_PERMISSIONS is the wildcard form (``"__all__"`` or ``"*"``),
+    models in EXEMPT_EXCLUDE_MODELS must NOT be synthesized as view-capable.
+    """
+
+    def _make_user(self, perms: set[str] | None = None) -> Any:
+        user = MagicMock()
+        user.is_anonymous = False
+        user.is_superuser = False
+        user.get_all_permissions.return_value = perms or set()
+        return user
+
+    @override_settings(
+        EXEMPT_VIEW_PERMISSIONS="__all__",
+        EXEMPT_EXCLUDE_MODELS=[("auth", "group"), ("auth", "permission")],
+    )
+    def test_exempt_all_excludes_listed_models(self) -> None:
+        """Excluded models are NOT synthesized as view-capable with '__all__'."""
+        from frisian_mcp.contrib.permissions.exempt_view_adapter import (
+            ExemptViewPermissionAdapter,
+        )
+
+        adapter = ExemptViewPermissionAdapter()
+        caps = adapter.get_capabilities(self._make_user())
+        assert "auth.view_group" not in caps
+        assert "auth.view_permission" not in caps
+
+    @override_settings(
+        EXEMPT_VIEW_PERMISSIONS="*",
+        EXEMPT_EXCLUDE_MODELS=[("auth", "group")],
+    )
+    def test_exempt_star_wildcard_excludes_listed_models(self) -> None:
+        """Excluded models are NOT synthesized as view-capable with '*'."""
+        from frisian_mcp.contrib.permissions.exempt_view_adapter import (
+            ExemptViewPermissionAdapter,
+        )
+
+        adapter = ExemptViewPermissionAdapter()
+        caps = adapter.get_capabilities(self._make_user())
+        assert "auth.view_group" not in caps
+
+    @override_settings(
+        EXEMPT_VIEW_PERMISSIONS="__all__",
+        EXEMPT_EXCLUDE_MODELS=[],
+    )
+    def test_exempt_all_empty_exclude_includes_all(self) -> None:
+        """Empty EXEMPT_EXCLUDE_MODELS means all models are synthesized."""
+        from django.apps import apps
+
+        from frisian_mcp.contrib.permissions.exempt_view_adapter import (
+            ExemptViewPermissionAdapter,
+        )
+
+        adapter = ExemptViewPermissionAdapter()
+        caps = adapter.get_capabilities(self._make_user())
+        # Every installed model should appear.
+        for model in apps.get_models():
+            meta = model._meta  # pylint: disable=protected-access
+            assert f"{meta.app_label}.view_{meta.model_name}" in caps
+
+    @override_settings(
+        EXEMPT_VIEW_PERMISSIONS=["dcim.device"],
+        EXEMPT_EXCLUDE_MODELS=[("dcim", "device")],
+    )
+    def test_explicit_list_form_unaffected_by_exclude_models(self) -> None:
+        """EXEMPT_EXCLUDE_MODELS only applies to the wildcard path, not the list path."""
+        from frisian_mcp.contrib.permissions.exempt_view_adapter import (
+            ExemptViewPermissionAdapter,
+        )
+
+        adapter = ExemptViewPermissionAdapter()
+        caps = adapter.get_capabilities(self._make_user())
+        # Explicit list path still synthesizes the capability regardless of exclude list.
+        assert "dcim.view_device" in caps
+
+
+# ---------------------------------------------------------------------------
+# _ensure_perm_context_on_request — service principal bypass
+# ---------------------------------------------------------------------------
+
+
+class TestServicePrincipalBypass:
+    """
+    Service principal capability bypass.
+
+    OAuth service principals (``_mcp_is_service_principal=True``) must bypass
+    capability filtering entirely — tier is the sole gate.
+    """
+
+    def test_service_principal_sets_null_filter(self) -> None:
+        """_mcp_perm_entry_filter is None for service principal regardless of permissions."""
+        from frisian_mcp.views import _ensure_perm_context_on_request
+
+        req = MagicMock(spec=[])
+        user = MagicMock()
+        user.is_superuser = False
+        user._mcp_is_service_principal = True
+        user.get_all_permissions.return_value = set()
+        req.user = user
+
+        with override_settings(
+            FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+            FRISIAN_MCP_PERMISSION_ADAPTER=(
+                "frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter"
+            ),
+        ):
+            _ensure_perm_context_on_request(req)
+
+        assert req._mcp_capabilities is None
+        assert req._mcp_perm_entry_filter is None
+
+    def test_service_principal_sees_all_tools_in_list(self) -> None:
+        """tools/list returns all tools for a service principal even with no capabilities."""
+        from frisian_mcp.registry import ToolRegistry
+        from frisian_mcp.views import _ensure_perm_context_on_request
+
+        reg = ToolRegistry()
+        for name, app, model in [
+            ("device_list", "dcim", "device"),
+            ("prefix_list", "ipam", "prefix"),
+        ]:
+            reg.register(
+                name=name,
+                fn=_noop,
+                description=name,
+                input_schema={"type": "object"},
+                perm_app_label=app,
+                perm_model=model,
+                perm_drf_action="list",
+            )
+
+        req = MagicMock(spec=[])
+        user = MagicMock()
+        user.is_superuser = False
+        user._mcp_is_service_principal = True
+        user.get_all_permissions.return_value = set()
+        req.user = user
+
+        with override_settings(
+            FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True,
+            FRISIAN_MCP_PERMISSION_ADAPTER=(
+                "frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter"
+            ),
+        ):
+            _ensure_perm_context_on_request(req)
+            tools = reg.list_tools(
+                max_tier=None,
+                entry_filter=req._mcp_perm_entry_filter,
+            )
+
+        names = {t["name"] for t in tools}
+        assert "device_list" in names
+        assert "prefix_list" in names
+
