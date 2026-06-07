@@ -210,6 +210,22 @@ def build_group_help(  # pylint: disable=too-many-locals
             continue
         resources_map.setdefault(parsed[0], []).append(parsed[1])
 
+    def _filter_hints(raw: dict[str, str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for k, v in raw.items():
+            hint_entry = registry.get_entry(k)
+            if hint_entry is None:
+                # Unknown tool — only include when no capability filter is active.
+                if entry_filter is None:
+                    out[k] = v
+                continue
+            if _TIER_RANK.get(hint_entry.permission_tier, 0) > max_rank:
+                continue
+            if entry_filter is not None and not entry_filter(hint_entry):
+                continue
+            out[k] = v
+        return out
+
     if resource is not None:
         # Resource-scoped view: just show this resource's actions + its hints.
         payload: dict[str, Any] = {
@@ -219,7 +235,9 @@ def build_group_help(  # pylint: disable=too-many-locals
             "actions": sorted(resources_map.get(resource, [])),
         }
         if hints:
-            resource_hints = {k: v for k, v in hints.items() if k.startswith(f"{resource}{sep}")}
+            resource_hints = _filter_hints(
+                {k: v for k, v in hints.items() if k.startswith(f"{resource}{sep}")}
+            )
             if resource_hints:
                 payload["hints"] = resource_hints
         return payload
@@ -230,11 +248,13 @@ def build_group_help(  # pylint: disable=too-many-locals
         "resources": {r: sorted(acts) for r, acts in resources_map.items()},
     }
     if hints:
-        payload["hints"] = hints
+        filtered = _filter_hints(hints)
+        if filtered:
+            payload["hints"] = filtered
     return payload
 
 
-def make_group_invoke(
+def make_group_invoke(  # pylint: disable=too-many-locals
     group_name: str,
     tool_names: frozenset[str],
     registry: ToolRegistry,
@@ -324,6 +344,21 @@ def make_group_invoke(
                 _strip.add("verify")
             if _strip.intersection(params):
                 params = {k: v for k, v in params.items() if k not in _strip}
+
+        # Enforce capability filter at dispatch time so that callers who already
+        # know a tool's name cannot bypass FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY
+        # by calling the group dispatcher directly.  The filter is the same
+        # callable that tools/list uses — only fires when the feature is enabled.
+        _perm_filter = getattr(request, "_mcp_perm_entry_filter", None)
+        if (
+            _perm_filter is not None
+            and _target_entry is not None
+            and not _perm_filter(_target_entry)
+        ):
+            raise PermissionError(
+                f"You do not have permission to use "
+                f"{resource!r}/{action!r} in group {group_name!r}."
+            )
 
         return registry.dispatch(request, target_name, params)
 

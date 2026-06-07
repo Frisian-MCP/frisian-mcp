@@ -1163,6 +1163,102 @@ class TestHelpBypassFix:
         assert "create" not in visible
         assert "destroy" not in visible
 
+    def test_group_help_hints_filtered_by_entry_filter(self) -> None:
+        """
+        build_group_help strips hints for tools the entry_filter rejects.
+
+        A user with only view_zone should not see hints for zone_create or
+        zone_destroy even if those hints are present in FRISIAN_MCP_TOOL_HINTS.
+        """
+        from frisian_mcp.backends.group_dispatcher import build_group_help
+        from frisian_mcp.registry import ToolRegistry
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        def _m(*_: Any) -> dict[str, Any]:
+            return {}
+
+        reg = ToolRegistry()
+        for act, drf in [
+            ("list", "list"), ("retrieve", "retrieve"),
+            ("create", "create"), ("destroy", "destroy"),
+        ]:
+            reg.register(
+                name=f"zone_{act}",
+                fn=_m,
+                description=act,
+                input_schema={"type": "object"},
+                perm_app_label="dns",
+                perm_model="zone",
+                perm_drf_action=drf,
+            )
+
+        hints = {
+            "zone_list": "List all zones.",
+            "zone_retrieve": "Get one zone.",
+            "zone_create": "Create a zone.",
+            "zone_destroy": "Delete a zone.",
+        }
+        filt = _make_perm_entry_filter(frozenset({"dns.view_zone"}))
+        tnames = ["zone_list", "zone_retrieve", "zone_create", "zone_destroy"]
+        result = build_group_help("dns", tnames, reg, entry_filter=filt, hints=hints)
+        returned_hints = result.get("hints", {})
+        assert "zone_list" in returned_hints
+        assert "zone_retrieve" in returned_hints
+        assert "zone_create" not in returned_hints
+        assert "zone_destroy" not in returned_hints
+
+    def test_group_dispatch_raises_permission_error_for_filtered_tool(self) -> None:
+        """
+        make_group_invoke raises PermissionError when the entry_filter rejects the target.
+
+        A caller who knows a resource/action name cannot bypass
+        FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY by calling the group dispatcher
+        directly.
+        """
+        from frisian_mcp.backends.group_dispatcher import make_group_invoke
+        from frisian_mcp.registry import ToolRegistry
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        def _m(*_: Any) -> dict[str, Any]:
+            return {}
+
+        reg = ToolRegistry()
+        reg.register(
+            name="zone_list",
+            fn=_m,
+            description="list zones",
+            input_schema={"type": "object"},
+            perm_app_label="dns",
+            perm_model="zone",
+            perm_drf_action="list",
+        )
+        reg.register(
+            name="zone_create",
+            fn=_m,
+            description="create zone",
+            input_schema={"type": "object"},
+            perm_app_label="dns",
+            perm_model="zone",
+            perm_drf_action="create",
+        )
+
+        # User has view only — zone_create should be blocked at dispatch.
+        filt = _make_perm_entry_filter(frozenset({"dns.view_zone"}))
+        invoke = make_group_invoke(
+            "dns",
+            frozenset({"zone_list", "zone_create"}),
+            reg,
+        )
+
+        req = MagicMock()
+        req.user = MagicMock()
+        req.user.is_superuser = False
+        req._mcp_perm_entry_filter = filt
+        req._mcp_capabilities = frozenset({"dns.view_zone"})
+
+        with pytest.raises(PermissionError):
+            invoke({"resource": "zone", "action": "create", "params": {}}, req)
+
     def test_ensure_perm_context_idempotent(self) -> None:
         """_ensure_perm_context_on_request is a no-op on the second call."""
         from frisian_mcp.views import _ensure_perm_context_on_request
