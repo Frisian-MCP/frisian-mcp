@@ -4,13 +4,31 @@ Django system checks for frisian-mcp configuration safety.
 Registered checks
 -----------------
 
-``frisian_mcp.W001``  (SEC-4)
+``frisian_mcp.W001``
     Warns when ``DEBUG=False`` and the gateway has no permission classes
     configured (``FRISIAN_MCP_PERMISSION_CLASSES`` is missing or empty), so
     the MCP endpoint is reachable by unauthenticated callers in production.
     Operators who *do* want a public gateway must set
     ``FRISIAN_MCP_ALLOW_UNAUTHENTICATED = True`` to silence the warning —
     that is the explicit opt-in.
+
+``frisian_mcp.W002``
+    Warns when any key in ``FRISIAN_MCP_API_KEYS`` does not look like a
+    64-character lowercase hex string (the expected HMAC-SHA256 digest
+    format).  Raw plaintext keys in settings are a security risk — if
+    settings are captured by error-tracking or logging, the raw secret is
+    directly usable as a Bearer token.  Use
+    ``python manage.py mcp_hash_api_key <raw-key>`` to generate the correct
+    digest.
+
+``frisian_mcp.W003``
+    Warns when ``FRISIAN_MCP_SERVICE_ACCOUNT_USER`` is set in a non-DEBUG
+    environment.  This setting substitutes the named Django user on every
+    synthetic inner request for anonymous MCP callers, so if the account is
+    privileged (``is_staff`` or ``is_superuser``), unauthenticated callers
+    receive that user's host-app Django permissions — potentially exceeding
+    the MCP tier gate.  Run ``manage.py mcp_doctor --security`` for a
+    detailed privilege audit of the named account.
 
 ``frisian_mcp.E002``  (retired — constant retained for backward compat)
     This check was removed.  OAuth clients without a linked Django user are
@@ -34,6 +52,7 @@ at runtime beyond the registrations themselves.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from django.conf import settings
@@ -49,8 +68,12 @@ from frisian_mcp.registry import tool_registry
 logger = logging.getLogger(__name__)
 
 W001_NO_PERMISSION_CLASSES = "frisian_mcp.W001"
+W002_PLAINTEXT_API_KEYS = "frisian_mcp.W002"
+W003_PRIVILEGED_SERVICE_ACCOUNT = "frisian_mcp.W003"
 E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
 E003_UNANNOTATED_CUSTOM_ACTION = "frisian_mcp.E003"
+
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 #: Standard DRF CRUD actions that map cleanly to a Django permission verb.
 #: Non-CRUD ``@mcp_action`` methods must supply ``backend_action`` so the
@@ -110,6 +133,93 @@ def check_permission_classes_in_production(  # pylint: disable=unused-argument
                 "to silence this warning."
             ),
             id=W001_NO_PERMISSION_CLASSES,
+        )
+    ]
+
+
+@register(Tags.security)
+def check_api_keys_are_hashed(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Warning]:
+    """
+    Warn when any ``FRISIAN_MCP_API_KEYS`` entry does not look like a hashed key.
+
+    :class:`~frisian_mcp.contrib.tokens.authentication.FrisianMcpApiKeyAuthentication`
+    now hashes the incoming Bearer value before comparison, so keys stored in
+    ``FRISIAN_MCP_API_KEYS`` must be 64-character lowercase hex HMAC-SHA256
+    digests.  A key that is not 64 lowercase hex characters is almost certainly
+    a raw plaintext value left over from a pre-hardening configuration.
+
+    Generate the correct digest with::
+
+        python manage.py mcp_hash_api_key <raw-key>
+    """
+    api_keys: dict[str, str] = getattr(settings, "FRISIAN_MCP_API_KEYS", {})
+    if not api_keys:
+        return []
+
+    plain_keys = [k for k in api_keys if not _HEX64_RE.match(k)]
+    if not plain_keys:
+        return []
+
+    count = len(plain_keys)
+    noun = "key does" if count == 1 else "keys do"
+    return [
+        Warning(
+            f"FRISIAN_MCP_API_KEYS contains {count} entr{'y' if count == 1 else 'ies'} "
+            f"that {noun} not look like HMAC-SHA256 digests (64 lowercase hex characters). "
+            "Raw plaintext keys in settings are a security risk — if settings are captured "
+            "by error-tracking or logging, the raw secret is directly usable as a Bearer token.",
+            hint=(
+                "Replace each raw key with its HMAC-SHA256 digest: "
+                "python manage.py mcp_hash_api_key <raw-key>.  "
+                "Update FRISIAN_MCP_API_KEYS to use the printed digest as the dict key."
+            ),
+            id=W002_PLAINTEXT_API_KEYS,
+        )
+    ]
+
+
+@register(Tags.security)
+def check_service_account_user(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Warning]:
+    """
+    Warn when ``FRISIAN_MCP_SERVICE_ACCOUNT_USER`` is configured in production.
+
+    When this setting is present, the invocation backend substitutes the named
+    Django user on every synthetic inner request for anonymous MCP callers, so
+    host-app ViewSets see an authenticated identity.  If the named account is
+    privileged (``is_staff`` or ``is_superuser``), unauthenticated callers
+    receive that user's Django object-permissions at the host-app layer —
+    potentially exceeding what the MCP tier gate allows.
+
+    This check does not query the database; it fires whenever the setting is
+    present in a non-DEBUG environment to prompt a manual audit.  Run
+    ``manage.py mcp_doctor --security`` for a privilege check that actually
+    looks up the user record.
+    """
+    if getattr(settings, "DEBUG", False):
+        return []
+
+    service_user: str | None = getattr(settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER", None)
+    if not service_user:
+        return []
+
+    return [
+        Warning(
+            f"FRISIAN_MCP_SERVICE_ACCOUNT_USER='{service_user}' is set. "
+            "Anonymous MCP callers will be presented to host-app ViewSets as this Django user. "
+            "If the account is privileged (is_staff or is_superuser), unauthenticated callers "
+            "may receive permissions beyond what the MCP tier gate intends.",
+            hint=(
+                "Ensure FRISIAN_MCP_SERVICE_ACCOUNT_USER points to a dedicated low-privilege "
+                "service account (not staff or superuser).  "
+                "Run 'manage.py mcp_doctor --security' to verify the account's privilege level."
+            ),
+            id=W003_PRIVILEGED_SERVICE_ACCOUNT,
         )
     ]
 

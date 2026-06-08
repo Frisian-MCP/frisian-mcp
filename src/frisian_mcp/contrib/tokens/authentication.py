@@ -9,7 +9,12 @@ Two classes are provided:
 
 ``FrisianMcpApiKeyAuthentication``
     Settings-backed static keys: reads the ``FRISIAN_MCP_API_KEYS`` dict
-    (``{raw_key: tier}``) and authenticates without any DB lookup.
+    (``{hmac_of_key: tier}``) and authenticates without any DB lookup.
+
+    Keys **must** be stored as HMAC-SHA256 digests (64 hex chars), not raw
+    strings.  Generate a hash with::
+
+        python manage.py mcp_hash_api_key <raw-key>
 
 Wire both into the MCP gateway via settings::
 
@@ -119,8 +124,18 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
     DRF authentication class for settings-backed static API keys.
 
     Reads ``FRISIAN_MCP_API_KEYS`` from Django settings — a ``dict`` mapping
-    plaintext raw keys to permission tier strings (e.g. ``"read"``,
-    ``"read_write"``, ``"admin"``).  No database queries are performed.
+    HMAC-SHA256 digests of raw keys to permission tier strings (e.g.
+    ``"read"``, ``"read_write"``, ``"admin"``).  No database queries are
+    performed.
+
+    Keys in ``FRISIAN_MCP_API_KEYS`` **must** be the HMAC-SHA256 hex digest of
+    the raw key, not the raw key itself.  Generate a digest with::
+
+        python manage.py mcp_hash_api_key <raw-key>
+
+    This matches the storage contract of :class:`FrisianMcpTokenAuthentication`
+    (DB-backed tokens store only HMACs) so that raw secrets are never present
+    in settings, logs, or error-tracking payloads.
 
     Only requests carrying ``Authorization: Bearer <key>`` are handled.
     All other requests return ``None`` so that DRF can try the next
@@ -140,6 +155,9 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
         """
         Authenticate the request from a static API key.
 
+        Hashes the incoming Bearer value via :func:`~frisian_mcp.contrib.tokens.models._hmac_token`
+        and compares against the stored HMAC digests in ``FRISIAN_MCP_API_KEYS``.
+
         Returns ``(AnonymousUser, _ApiKeyAuth(permission=tier))`` on a match,
         or ``None`` when the header is absent or no key matches.
 
@@ -153,9 +171,10 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
             return None
 
         raw_key = auth_header[len("Bearer ") :]
+        incoming_digest = _hmac_token(raw_key)
 
-        for key, tier in api_keys.items():
-            if secrets.compare_digest(raw_key, key):
+        for stored_digest, tier in api_keys.items():
+            if secrets.compare_digest(incoming_digest, stored_digest):
                 return (AnonymousUser(), _ApiKeyAuth(permission=tier))
 
         return None

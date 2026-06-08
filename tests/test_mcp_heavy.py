@@ -296,6 +296,35 @@ class TestServeHeavyMode:
         assert "chunk" in served
         assert "page" in served
 
+    def test_paginated_page_size_clamped_to_max(self, settings: Any) -> None:
+        """Agent-supplied page_size above FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE is clamped."""
+        settings.FRISIAN_MCP_HEAVY_PAGE_SIZE = 20
+        settings.FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE = 50
+        result = list(range(200))
+        served = _serve_heavy_mode(result, "paginated", {"page": 1, "page_size": 1000000})
+        assert served["page_size"] == 50
+        assert len(served["items"]) == 50
+
+    def test_paginated_page_size_cap_defaults_to_heavy_page_size(
+        self, settings: Any
+    ) -> None:
+        """When FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE is absent, cap defaults to FRISIAN_MCP_HEAVY_PAGE_SIZE."""
+        settings.FRISIAN_MCP_HEAVY_PAGE_SIZE = 10
+        if hasattr(settings, "FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE"):
+            del settings.FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE
+        result = list(range(200))
+        served = _serve_heavy_mode(result, "paginated", {"page": 1, "page_size": 9999})
+        assert served["page_size"] == 10
+        assert len(served["items"]) == 10
+
+    def test_paginated_page_size_within_cap_unchanged(self, settings: Any) -> None:
+        """page_size below the cap is returned as-is."""
+        settings.FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE = 100
+        result = list(range(200))
+        served = _serve_heavy_mode(result, "paginated", {"page": 1, "page_size": 25})
+        assert served["page_size"] == 25
+        assert len(served["items"]) == 25
+
     def test_filtered_dict_keeps_only_requested_keys(self) -> None:
         """Filtered mode retains only the keys in filter_keys."""
         result = {"a": 1, "b": 2, "c": 3}

@@ -17,7 +17,7 @@ from frisian_mcp.contrib.tokens.authentication import (
     FrisianMcpTokenAuthentication,
     _ApiKeyAuth,
 )
-from frisian_mcp.contrib.tokens.models import FrisianMcpToken
+from frisian_mcp.contrib.tokens.models import FrisianMcpToken, _hmac_token
 from frisian_mcp.registry import ToolRegistry
 from frisian_mcp.views import McpView
 
@@ -358,13 +358,13 @@ class TestFrisianMcpApiKeyAuthentication:
 
     def test_no_header_returns_none(self, settings: Any) -> None:
         """No Authorization header → None."""
-        settings.FRISIAN_MCP_API_KEYS = {"somekey": "read"}
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token("somekey"): "read"}
         req = self._fake_request({})
         assert self._auth().authenticate(req) is None
 
     def test_wrong_prefix_returns_none(self, settings: Any) -> None:
         """Authorization: Token <x> (not Bearer) → None."""
-        settings.FRISIAN_MCP_API_KEYS = {"somekey": "read"}
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token("somekey"): "read"}
         req = self._fake_request({"HTTP_AUTHORIZATION": "Token somekey"})
         assert self._auth().authenticate(req) is None
 
@@ -383,8 +383,9 @@ class TestFrisianMcpApiKeyAuthentication:
 
     def test_valid_key_returns_anonymous_user_with_tier(self, settings: Any) -> None:
         """Matching key returns (AnonymousUser, _ApiKeyAuth) with correct tier."""
-        settings.FRISIAN_MCP_API_KEYS = {"my-secret-key": "read_write"}
-        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer my-secret-key"})
+        raw = "my-secret-key"
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token(raw): "read_write"}
+        req = self._fake_request({"HTTP_AUTHORIZATION": f"Bearer {raw}"})
         result = self._auth().authenticate(req)
         assert result is not None
         user, auth = result
@@ -392,17 +393,25 @@ class TestFrisianMcpApiKeyAuthentication:
         assert isinstance(auth, _ApiKeyAuth)
         assert auth.permission == "read_write"
 
+    def test_raw_key_in_settings_does_not_match(self, settings: Any) -> None:
+        """Raw (unhashed) key stored in settings does not authenticate the raw Bearer."""
+        raw = "correct-key"
+        settings.FRISIAN_MCP_API_KEYS = {raw: "read"}  # raw, not hashed
+        req = self._fake_request({"HTTP_AUTHORIZATION": f"Bearer {raw}"})
+        # The incoming Bearer is hashed before comparison; raw stored key won't match.
+        assert self._auth().authenticate(req) is None
+
     def test_unrecognised_key_returns_none(self, settings: Any) -> None:
         """Unrecognised Bearer token → None (does NOT raise AuthenticationFailed)."""
-        settings.FRISIAN_MCP_API_KEYS = {"correct-key": "read"}
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token("correct-key"): "read"}
         req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer wrong-key"})
         assert self._auth().authenticate(req) is None
 
-    def test_multiple_keys_first_match_wins(self, settings: Any) -> None:
+    def test_multiple_keys_correct_tier_returned(self, settings: Any) -> None:
         """Multiple keys in the dict — matching key's tier is returned."""
         settings.FRISIAN_MCP_API_KEYS = {
-            "read-key": "read",
-            "rw-key": "read_write",
+            _hmac_token("read-key"): "read",
+            _hmac_token("rw-key"): "read_write",
         }
         req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer rw-key"})
         result = self._auth().authenticate(req)
@@ -418,8 +427,9 @@ class TestFrisianMcpApiKeyAuthentication:
 
     def test_is_authenticated_on_result(self, settings: Any) -> None:
         """The returned auth object has is_authenticated=True."""
-        settings.FRISIAN_MCP_API_KEYS = {"key": "read"}
-        req = self._fake_request({"HTTP_AUTHORIZATION": "Bearer key"})
+        raw = "key"
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token(raw): "read"}
+        req = self._fake_request({"HTTP_AUTHORIZATION": f"Bearer {raw}"})
         _, auth = self._auth().authenticate(req)
         assert auth.is_authenticated is True
 
@@ -439,7 +449,7 @@ class TestMcpViewApiKeyIntegration:
             "frisian_mcp.contrib.tokens.authentication.FrisianMcpApiKeyAuthentication",
         ]
         settings.FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
-        settings.FRISIAN_MCP_API_KEYS = {"secret": "read"}
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token("secret"): "read"}
         isolated = ToolRegistry()
         isolated.register("ping", lambda a, r: {}, "Ping", {})
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
@@ -462,7 +472,7 @@ class TestMcpViewApiKeyIntegration:
             "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication",
         ]
         settings.FRISIAN_MCP_PERMISSION_CLASSES = []
-        settings.FRISIAN_MCP_API_KEYS = {"correct": "read"}
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token("correct"): "read"}
         isolated = ToolRegistry()
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
@@ -481,17 +491,18 @@ class TestMcpViewApiKeyIntegration:
         requiring a linked Django user, so AllowAny / empty permission classes
         is the correct gate for this authenticator.
         """
+        raw = "valid-key"
         settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
             "frisian_mcp.contrib.tokens.authentication.FrisianMcpApiKeyAuthentication",
         ]
         settings.FRISIAN_MCP_PERMISSION_CLASSES = []
-        settings.FRISIAN_MCP_API_KEYS = {"valid-key": "read"}
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token(raw): "read"}
         isolated = ToolRegistry()
         isolated.register("ping", lambda a, r: {}, "Ping", {})
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
 
         with patch("frisian_mcp.views.tool_registry", isolated):
-            request = _post_mcp(rf, payload, _bearer("valid-key"))
+            request = _post_mcp(rf, payload, _bearer(raw))
             response = _view(request)
 
         assert response.status_code == 200

@@ -613,6 +613,13 @@ class SyncInvocation(BaseInvocationBackend):
         a token — frisian-mcp's tier / max-tier system remains the primary access
         gate; this only satisfies the host-app authentication layer.
 
+        **Security:** ``FRISIAN_MCP_SERVICE_ACCOUNT_USER`` must point to a
+        dedicated low-privilege service account.  If the named account is
+        ``is_staff`` or ``is_superuser``, every anonymous MCP caller inherits
+        that user's Django object-permissions at the host-app layer, which may
+        exceed what the MCP tier gate intends.  Run
+        ``manage.py mcp_doctor --security`` to audit the configured account.
+
         Falls back to ``AnonymousUser`` when the setting is absent or the named
         user does not exist.
         """
