@@ -298,14 +298,13 @@ class TestJsonRendererNormalisation:
         assert data == {"a": 1, "b": "two", "c": [3, 4]}
         assert http_status == 200
 
-    def test_unrenderable_payload_surfaces_as_tool_error_not_500(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_unrenderable_payload_surfaces_as_tool_error_not_500(self, rf: RequestFactory) -> None:
         """When JSONRenderer crashes, invoke() returns is_error=True (no 500 propagates)."""
 
         class _UnrenderableViewSet(ViewSet):
             def list(self, request: Any) -> Response:
                 """Return a Response with a payload JSONRenderer cannot serialise."""
+
                 # An object instance is not natively JSON-encodable and DRF's
                 # encoder raises TypeError.  This simulates an unrendrable
                 # custom field in a real serializer.
@@ -395,9 +394,7 @@ class TestInitialLifecycleHook:
         # The action saw only the row initial() left in scope.
         assert result.content == [{"id": 1, "public": True}]
 
-    def test_permission_denied_in_initial_surfaces_as_tool_error(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_permission_denied_in_initial_surfaces_as_tool_error(self, rf: RequestFactory) -> None:
         """A PermissionDenied raised in initial() becomes is_error=True, not a 500."""
         from rest_framework.exceptions import (  # pylint: disable=import-outside-toplevel
             PermissionDenied,
@@ -461,9 +458,7 @@ class TestInitialLifecycleHook:
         with pytest.raises(ValidationError):
             SyncInvocation().invoke(tool, {}, outer)
 
-    def test_existing_create_path_still_works_with_initial(
-        self, store_request: Any
-    ) -> None:
+    def test_existing_create_path_still_works_with_initial(self, store_request: Any) -> None:
         """Regression: the standard ViewSet create path keeps working with initial() invoked."""
         invocation = SyncInvocation()
         result = invocation.invoke(_tool("create"), {"name": "x"}, store_request)
@@ -490,9 +485,7 @@ class TestErrorEnvelopeHygiene:
     envelope carries a single flat human-readable string.
     """
 
-    def test_permission_denied_with_string_detail_unwraps_cleanly(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_permission_denied_with_string_detail_unwraps_cleanly(self, rf: RequestFactory) -> None:
         """PermissionDenied with a plain-string detail produces a flat envelope."""
         from rest_framework.exceptions import (  # pylint: disable=import-outside-toplevel
             PermissionDenied,
@@ -576,9 +569,7 @@ class TestErrorEnvelopeHygiene:
         # Specifically NOT the previous nested form.
         assert message != "{'error': 'You do not have permission'}"
 
-    def test_validation_dict_detail_keeps_field_prefix(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_validation_dict_detail_keeps_field_prefix(self, rf: RequestFactory) -> None:
         """
         Real field names (not 'error'/'detail') stay prefixed for clarity.
 
@@ -618,9 +609,7 @@ class TestErrorEnvelopeHygiene:
         # Field name is preserved as a "field: message" prefix.
         assert "location: Restricted by tenant" in result.content["error"]
 
-    def test_plain_python_exception_falls_back_to_str(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_plain_python_exception_falls_back_to_str(self, rf: RequestFactory) -> None:
         """Non-DRF exceptions (no .detail) fall back to str(exc) unchanged."""
 
         class _RaisesPlain(ViewSet):
@@ -665,9 +654,7 @@ class _UserCheckSerializer(serializers.Serializer):  # type: ignore[type-arg]
         """Reject the payload when the request user is not authenticated."""
         request = self.context.get("request")
         if request is None or not getattr(request.user, "is_authenticated", False):
-            raise serializers.ValidationError(
-                {"__all__": "request.user is not authenticated"}
-            )
+            raise serializers.ValidationError({"__all__": "request.user is not authenticated"})
         validated = super().to_internal_value(data)
         validated["who"] = str(request.user)
         return validated
@@ -708,9 +695,7 @@ def _auth_check_tool() -> ToolDefinition:
 class TestOuterRequestUserPropagation:
     """The outer request's user reaches the inner DRF Request context."""
 
-    def test_authenticated_outer_request_reaches_serializer(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_authenticated_outer_request_reaches_serializer(self, rf: RequestFactory) -> None:
         """Authenticated outer request: request.user.is_authenticated is True in the serializer."""
         from django.contrib.auth.models import (  # pylint: disable=import-outside-toplevel
             AnonymousUser,
@@ -735,9 +720,7 @@ class TestOuterRequestUserPropagation:
         # Sanity: AnonymousUser is NOT what the serializer saw.
         assert result.content["who"] != str(AnonymousUser())
 
-    def test_anonymous_outer_request_propagates_anonymous_user(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_anonymous_outer_request_propagates_anonymous_user(self, rf: RequestFactory) -> None:
         """
         An anonymous outer request propagates AnonymousUser into the inner request.
 

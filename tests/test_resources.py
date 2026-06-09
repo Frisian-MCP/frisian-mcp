@@ -33,9 +33,7 @@ def _make_request() -> Any:
 def _post_rpc(method: str, params: dict[str, Any] | None = None) -> Any:
     req = _rf.post(
         "/mcp/",
-        data=json.dumps(
-            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
-        ),
+        data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}),
         content_type="application/json",
     )
     req.user = AnonymousUser()

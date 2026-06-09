@@ -126,6 +126,7 @@ class TestHttpGuards:
 
     def test_get_returns_200_sse_in_async_context(self, rf: RequestFactory) -> None:
         """GET returns 200 SSE stream when called from within a running event loop (ASGI)."""
+
         async def _call() -> Any:
             request = rf.get("/mcp/")
             request.user = _anon_user()
@@ -138,6 +139,7 @@ class TestHttpGuards:
 
     def test_get_sets_cache_control_in_async_context(self, rf: RequestFactory) -> None:
         """GET SSE response includes Cache-Control: no-cache (ASGI context)."""
+
         async def _call() -> Any:
             request = rf.get("/mcp/")
             request.user = _anon_user()
@@ -148,6 +150,7 @@ class TestHttpGuards:
 
     def test_get_sets_x_accel_buffering_in_async_context(self, rf: RequestFactory) -> None:
         """GET SSE response includes X-Accel-Buffering: no (ASGI context)."""
+
         async def _call() -> Any:
             request = rf.get("/mcp/")
             request.user = _anon_user()
@@ -158,6 +161,7 @@ class TestHttpGuards:
 
     def test_get_stream_first_chunk_is_keepalive(self, rf: RequestFactory) -> None:
         """GET SSE stream first yields an SSE keepalive comment (ASGI context)."""
+
         async def _call() -> str:
             request = rf.get("/mcp/")
             request.user = _anon_user()
@@ -166,6 +170,33 @@ class TestHttpGuards:
 
         first_chunk = asyncio.run(_call())
         assert first_chunk == ": keepalive\n\n"
+
+    @override_settings(FRISIAN_MCP_SSE_MAX_STREAM_SECONDS=0)
+    def test_wsgi_keepalive_terminates_after_lifetime(self, rf: RequestFactory) -> None:
+        """WSGI keepalive stream terminates after FRISIAN_MCP_SSE_MAX_STREAM_SECONDS."""
+        request = rf.get("/mcp/")
+        request.user = _anon_user()
+        response = _view(request)
+        assert isinstance(response, StreamingHttpResponse)
+        # max_stream_seconds=0 → exactly one keepalive then close
+        chunks = list(response.streaming_content)
+        assert chunks == [b": keepalive\n\n"]
+
+    @override_settings(FRISIAN_MCP_SSE_MAX_STREAM_SECONDS=0)
+    def test_async_keepalive_terminates_after_lifetime(self, rf: RequestFactory) -> None:
+        """Async keepalive stream terminates after FRISIAN_MCP_SSE_MAX_STREAM_SECONDS."""
+
+        async def _collect() -> list[str]:
+            request = rf.get("/mcp/")
+            request.user = _anon_user()
+            response = _view(request)
+            chunks: list[str] = []
+            async for chunk in response._iterator:  # pylint: disable=protected-access
+                chunks.append(chunk)
+            return chunks
+
+        chunks = asyncio.run(_collect())
+        assert chunks == [": keepalive\n\n"]
 
     def test_unsupported_method_returns_405(self, rf: RequestFactory) -> None:
         """Unsupported HTTP methods (e.g. PUT) return HTTP 405."""
@@ -442,8 +473,8 @@ class TestToolsCall:
         assert "tools/list" in data["error"]["data"]
         assert "manifest" in data["error"]["data"]
 
-    def test_tools_call_unknown_tool_includes_available_tools(self, rf: RequestFactory) -> None:
-        """tools/call -32601 error data lists available tool names."""
+    def test_tools_call_unknown_tool_does_not_list_all_tools(self, rf: RequestFactory) -> None:
+        """tools/call -32601 error does NOT enumerate all available tool names."""
         isolated = ToolRegistry()
         for name in ("beta", "alpha"):
             isolated.register(
@@ -458,36 +489,27 @@ class TestToolsCall:
                 _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
             )
 
-        assert "Available tools: alpha, beta." in data["error"]["data"]
+        error_data: str = data["error"]["data"]
+        assert "Available tools:" not in error_data
+        assert "alpha" not in error_data
+        assert "beta" not in error_data
 
-    def test_tools_call_available_tools_sorted(self, rf: RequestFactory) -> None:
-        """Available tools in -32601 data appear in sorted order."""
+    def test_tools_call_close_match_suggestions_still_present(self, rf: RequestFactory) -> None:
+        """Close-match suggestions still appear in the -32601 error data."""
         isolated = ToolRegistry()
-        for name in ("zebra", "apple", "mango"):
-            isolated.register(
-                name=name,
-                fn=lambda a, r: {},
-                description="",
-                input_schema={"type": "object", "properties": {}},
-            )
+        isolated.register(
+            name="devices_list",
+            fn=lambda a, r: {},
+            description="",
+            input_schema={"type": "object", "properties": {}},
+        )
 
         with patch("frisian_mcp.views.tool_registry", isolated):
-            data = _response_data(
-                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
-            )
+            # Typo close enough for difflib to suggest "devices_list"
+            data = _response_data(_call(rf, "tools/call", {"name": "device_list", "arguments": {}}))
 
-        assert "Available tools: apple, mango, zebra." in data["error"]["data"]
-
-    def test_tools_call_available_tools_empty_registry(self, rf: RequestFactory) -> None:
-        """Available tools section is present even when registry is empty."""
-        isolated = ToolRegistry()
-
-        with patch("frisian_mcp.views.tool_registry", isolated):
-            data = _response_data(
-                _call(rf, "tools/call", {"name": "no.such.tool", "arguments": {}})
-            )
-
-        assert "Available tools: ." in data["error"]["data"]
+        assert "Did you mean" in data["error"]["data"]
+        assert "devices_list" in data["error"]["data"]
 
     def test_tools_call_missing_name(self, rf: RequestFactory) -> None:
         """tools/call without a 'name' field returns INVALID_PARAMS."""

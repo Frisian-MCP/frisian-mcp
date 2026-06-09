@@ -153,16 +153,12 @@ class TestIgnoreModelPermissions:
         req = _make_request(rf)
         invocation = SyncInvocation()
 
-        result = invocation.invoke(
-            _tool(_DjangoObjectPermissionsViewSet), {}, req
-        )
+        result = invocation.invoke(_tool(_DjangoObjectPermissionsViewSet), {}, req)
 
         assert result.is_error is False
         assert result.content == {"count": 0, "results": []}
 
-    def test_non_superuser_no_object_permission_gets_200_not_403(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_non_superuser_no_object_permission_gets_200_not_403(self, rf: RequestFactory) -> None:
         """
         Non-superuser with has_perms()=False gets 200, not 403.
 
@@ -173,9 +169,7 @@ class TestIgnoreModelPermissions:
         assert req.user.has_perms(["myapp.view_mymodel"]) is False
 
         invocation = SyncInvocation()
-        result = invocation.invoke(
-            _tool(_DjangoObjectPermissionsViewSet), {}, req
-        )
+        result = invocation.invoke(_tool(_DjangoObjectPermissionsViewSet), {}, req)
 
         assert result.is_error is False
 
@@ -183,9 +177,7 @@ class TestIgnoreModelPermissions:
         """The result content does not contain an error key about permissions."""
         req = _make_request(rf, authenticated=True)
         invocation = SyncInvocation()
-        result = invocation.invoke(
-            _tool(_DjangoObjectPermissionsViewSet), {}, req
-        )
+        result = invocation.invoke(_tool(_DjangoObjectPermissionsViewSet), {}, req)
         content = result.content
         if isinstance(content, dict):
             error_str = str(content.get("error", "")).lower()
@@ -200,9 +192,7 @@ class TestIgnoreModelPermissions:
 class TestNonDjangoPermissionsStillEnforced:
     """IsAuthenticated and other non-DjangoObjectPermissions checks still fire."""
 
-    def test_unauthenticated_denied_by_is_authenticated(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_unauthenticated_denied_by_is_authenticated(self, rf: RequestFactory) -> None:
         """
         AnonymousUser is still denied by IsAuthenticated.
 
@@ -214,18 +204,14 @@ class TestNonDjangoPermissionsStillEnforced:
         result = invocation.invoke(_tool(_IsAuthenticatedViewSet), {}, req)
         assert result.is_error is True
 
-    def test_authenticated_user_passes_is_authenticated(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_authenticated_user_passes_is_authenticated(self, rf: RequestFactory) -> None:
         """Authenticated user passes IsAuthenticated and gets a result."""
         req = _make_request(rf, authenticated=True)
         invocation = SyncInvocation()
         result = invocation.invoke(_tool(_IsAuthenticatedViewSet), {}, req)
         assert result.is_error is False
 
-    def test_custom_non_django_permission_still_denies(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_custom_non_django_permission_still_denies(self, rf: RequestFactory) -> None:
         """
         Custom non-DjangoObjectPermissions permission classes still run.
 
@@ -272,9 +258,7 @@ class TestServiceAccountUser:
 
         assert result.is_error is False
 
-    def test_authenticated_user_not_replaced(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_authenticated_user_not_replaced(self, rf: RequestFactory, settings: Any) -> None:
         """When the request already has an authenticated user, it is never replaced."""
         settings.FRISIAN_MCP_SERVICE_ACCOUNT_USER = "some-service"
 
@@ -299,9 +283,7 @@ class TestServiceAccountUser:
         mock_model.DoesNotExist = _FakeDoesNotExistError
         mock_model.objects.get.side_effect = _FakeDoesNotExistError
 
-        with unittest.mock.patch(
-            "django.contrib.auth.get_user_model", return_value=mock_model
-        ):
+        with unittest.mock.patch("django.contrib.auth.get_user_model", return_value=mock_model):
             req = _make_request(rf, authenticated=False)
             resolved = SyncInvocation._resolve_effective_user(req)
 

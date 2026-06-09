@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 
@@ -194,9 +194,10 @@ class TestOAuthAccessTokenModel:
 
         # Re-fetch from the DB — plaintext_token should not be present.
         refetched = OAuthAccessToken.objects.get(pk=created.pk)
-        assert not hasattr(refetched, "plaintext_token") or getattr(
-            refetched, "plaintext_token", None
-        ) is None
+        assert (
+            not hasattr(refetched, "plaintext_token")
+            or getattr(refetched, "plaintext_token", None) is None
+        )
         # The stored token still matches the original raw value via HMAC.
         from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
             _hmac_secret,
@@ -414,9 +415,7 @@ class TestTokenView:
         response = _token_view(request)
         data = json.loads(response.content)
         # SEC-1: the response carries the raw token; the DB row stores HMAC(raw).
-        assert OAuthAccessToken.objects.filter(
-            token=_hmac_secret(data["access_token"])
-        ).exists()
+        assert OAuthAccessToken.objects.filter(token=_hmac_secret(data["access_token"])).exists()
 
     def test_wrong_grant_type_returns_400(self, rf: RequestFactory) -> None:
         """Unsupported grant_type returns 400 with error code."""
@@ -544,6 +543,100 @@ class TestTokenView:
         request = rf.get("/oauth/token/")
         response = _token_view(request)
         assert response.status_code == 405
+
+
+# ---------------------------------------------------------------------------
+# Token endpoint rate limiting (SEC-6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestTokenViewRateLimit:
+    """FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT throttles the token endpoint per IP."""
+
+    def setup_method(self) -> None:
+        """Clear the cache so rate limit counters don't bleed between tests."""
+        from django.core.cache import cache  # pylint: disable=import-outside-toplevel
+
+        cache.clear()
+
+    def test_no_rate_limit_by_default(self, rf: RequestFactory) -> None:
+        """Without the setting, repeated requests are never rate-limited."""
+        client = OAuthClient.objects.create(name="rl-agent")
+        for _ in range(5):
+            request = _post_token(
+                rf,
+                {
+                    "grant_type": "client_credentials",
+                    "client_id": client.client_id,
+                    "client_secret": client.plaintext_client_secret,
+                },
+            )
+            response = _token_view(request)
+            assert response.status_code == 200
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="2/minute")
+    def test_rate_limit_blocks_after_max_requests(self, rf: RequestFactory) -> None:
+        """Requests beyond the configured limit receive HTTP 429."""
+        client = OAuthClient.objects.create(name="rl-agent2")
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": client.client_id,
+            "client_secret": client.plaintext_client_secret,
+        }
+        # First two requests should succeed
+        for _ in range(2):
+            request = _post_token(rf, payload)
+            request.META["REMOTE_ADDR"] = "10.0.0.1"
+            response = _token_view(request)
+            assert response.status_code == 200
+        # Third request from same IP must be rate-limited
+        request = _post_token(rf, payload)
+        request.META["REMOTE_ADDR"] = "10.0.0.1"
+        response = _token_view(request)
+        assert response.status_code == 429
+        data = json.loads(response.content)
+        assert data["error"] == "rate_limit_exceeded"
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="1/minute")
+    def test_different_ips_have_independent_counters(self, rf: RequestFactory) -> None:
+        """Each client IP has its own rate limit counter."""
+        client = OAuthClient.objects.create(name="rl-agent3")
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": client.client_id,
+            "client_secret": client.plaintext_client_secret,
+        }
+        # Exhaust the limit for IP A
+        for ip in ("10.0.0.2", "10.0.0.3"):
+            request = _post_token(rf, payload)
+            request.META["REMOTE_ADDR"] = ip
+            response = _token_view(request)
+            assert response.status_code == 200
+
+        # IP A is now blocked but IP B still has capacity (fresh counter)
+        request_a = _post_token(rf, payload)
+        request_a.META["REMOTE_ADDR"] = "10.0.0.2"
+        assert _token_view(request_a).status_code == 429
+
+        request_b = _post_token(rf, payload)
+        request_b.META["REMOTE_ADDR"] = "10.0.0.3"
+        assert _token_view(request_b).status_code == 429
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="bad-value")
+    def test_misconfigured_rate_limit_fails_open(self, rf: RequestFactory) -> None:
+        """A malformed rate limit string never blocks requests (fail-open)."""
+        client = OAuthClient.objects.create(name="rl-agent4")
+        request = _post_token(
+            rf,
+            {
+                "grant_type": "client_credentials",
+                "client_id": client.client_id,
+                "client_secret": client.plaintext_client_secret,
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -912,9 +1005,7 @@ class TestOAuthConfigReady:
         with pytest.raises(ImproperlyConfigured, match="must be >= 0"):
             self._call_ready()
 
-    def test_locmem_cache_in_production_logs_warning(
-        self, settings: Any, caplog: Any
-    ) -> None:
+    def test_locmem_cache_in_production_logs_warning(self, settings: Any, caplog: Any) -> None:
         """LocMemCache + DEBUG=False emits a startup warning about multi-worker risk."""
         import logging  # pylint: disable=import-outside-toplevel
 
@@ -929,9 +1020,7 @@ class TestOAuthConfigReady:
         assert any("LocMemCache" in r.message for r in caplog.records)
         assert any("multi-worker" in r.message for r in caplog.records)
 
-    def test_shared_cache_in_production_no_warning(
-        self, settings: Any, caplog: Any
-    ) -> None:
+    def test_shared_cache_in_production_no_warning(self, settings: Any, caplog: Any) -> None:
         """A Redis cache backend in production does not trigger the LocMemCache warning."""
         import logging  # pylint: disable=import-outside-toplevel
 
@@ -1014,8 +1103,8 @@ class TestOAuthHmacKeySwitch:
 
     def test_custom_hmac_key_produces_different_digest(self, settings: Any) -> None:
         """Clients created with FRISIAN_MCP_HMAC_KEY use a different HMAC than SECRET_KEY."""
-        from frisian_mcp.contrib.oauth.models import (
-            _hmac_secret,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.models import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+            _hmac_secret,
         )
 
         raw = "supersecretvalue"
@@ -1068,9 +1157,7 @@ class TestAuthorizeView:
         the request's ``redirect_uri``.  Tests therefore must register a
         client up front rather than passing arbitrary ``client_id`` strings.
         """
-        return OAuthClient.objects.create(
-            name="authorize-test", redirect_uris=[redirect_uri]
-        )
+        return OAuthClient.objects.create(name="authorize-test", redirect_uris=[redirect_uri])
 
     def _valid_params(self, client_id: str = "test-client") -> dict[str, str]:
         return {
@@ -1082,9 +1169,7 @@ class TestAuthorizeView:
             "state": "xyz",
         }
 
-    def test_get_auto_approve_redirects_with_code(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_get_auto_approve_redirects_with_code(self, rf: RequestFactory, settings: Any) -> None:
         """GET with valid params + FRISIAN_MCP_OAUTH_AUTO_APPROVE=True redirects with a code."""
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1138,9 +1223,7 @@ class TestAuthorizeView:
         data = json.loads(response.content)
         assert "error" in data
 
-    def test_get_wrong_response_type_redirects_with_error(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_get_wrong_response_type_redirects_with_error(self, rf: RequestFactory) -> None:
         """GET with response_type=token redirects with error=unsupported_response_type."""
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1154,9 +1237,7 @@ class TestAuthorizeView:
         assert response.status_code == 302
         assert "error=unsupported_response_type" in response["Location"]
 
-    def test_get_wrong_code_challenge_method_redirects_error(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_get_wrong_code_challenge_method_redirects_error(self, rf: RequestFactory) -> None:
         """GET with code_challenge_method=plain redirects with error=invalid_request."""
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1275,9 +1356,7 @@ class TestAuthorizeViewSEC2:
         assert response.status_code == 400
         assert json.loads(response.content)["error"] == "invalid_client"
 
-    def test_redirect_uri_not_in_allowlist_returns_400(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_redirect_uri_not_in_allowlist_returns_400(self, rf: RequestFactory) -> None:
         """An exact-match against client.redirect_uris is required."""
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1335,9 +1414,7 @@ class TestAuthorizeViewSEC2:
         assert response.status_code == 302
         assert response["Location"].startswith("http://localhost:8080/cb")
 
-    def test_custom_native_scheme_accepted(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_custom_native_scheme_accepted(self, rf: RequestFactory, settings: Any) -> None:
         """Custom native-app scheme (e.g. ``com.example.app:/cb``) is allowed."""
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1396,9 +1473,7 @@ class TestAuthorizeViewSEC2:
         assert response.status_code == 400
         assert json.loads(response.content)["error"] == "invalid_redirect_uri"
 
-    def test_pkce_auto_register_skips_client_check(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_pkce_auto_register_skips_client_check(self, rf: RequestFactory, settings: Any) -> None:
         """
         When PKCE_AUTO_REGISTER is True, an unknown client_id is allowed through.
 
@@ -1429,9 +1504,7 @@ class TestAuthorizeViewSEC2:
 class TestAutoApproveDefault:
     """SEC-2: FRISIAN_MCP_OAUTH_AUTO_APPROVE defaults to bool(DEBUG)."""
 
-    def test_default_is_false_outside_debug(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_default_is_false_outside_debug(self, rf: RequestFactory, settings: Any) -> None:
         """With DEBUG False (or absent) and AUTO_APPROVE absent → consent template."""
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1459,9 +1532,7 @@ class TestAutoApproveDefault:
         # Consent template, not a redirect.
         assert response.status_code == 200
 
-    def test_default_is_true_when_debug_true(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_default_is_true_when_debug_true(self, rf: RequestFactory, settings: Any) -> None:
         """With DEBUG=True and AUTO_APPROVE absent → auto-approve redirect."""
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1529,9 +1600,7 @@ class TestRegistrationViewRedirectUris:
         )
         return view(request)
 
-    def test_registration_persists_redirect_uris(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_registration_persists_redirect_uris(self, rf: RequestFactory, settings: Any) -> None:
         """A registered client persists the supplied redirect_uris list."""
         settings.FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = True
         response = self._post(
@@ -1631,9 +1700,7 @@ class TestTokenViewAuthorizationCodeGrant:
         """Valid authorization_code + code_verifier returns access token."""
         client = OAuthClient.objects.create(name="pkce-client")
         code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        code = self._setup_code_in_cache(
-            client.client_id, "https://example.com/cb", code_verifier
-        )
+        code = self._setup_code_in_cache(client.client_id, "https://example.com/cb", code_verifier)
 
         request = rf.post(
             "/oauth/token/",
@@ -1655,9 +1722,7 @@ class TestTokenViewAuthorizationCodeGrant:
         """Wrong code_verifier returns 400 invalid_grant."""
         client = OAuthClient.objects.create(name="pkce-wrong")
         code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        code = self._setup_code_in_cache(
-            client.client_id, "https://example.com/cb", code_verifier
-        )
+        code = self._setup_code_in_cache(client.client_id, "https://example.com/cb", code_verifier)
 
         request = rf.post(
             "/oauth/token/",
@@ -1694,9 +1759,7 @@ class TestTokenViewAuthorizationCodeGrant:
         """Auth code cannot be reused; second exchange returns 400."""
         client = OAuthClient.objects.create(name="pkce-one-time")
         code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        code = self._setup_code_in_cache(
-            client.client_id, "https://example.com/cb", code_verifier
-        )
+        code = self._setup_code_in_cache(client.client_id, "https://example.com/cb", code_verifier)
         payload = {
             "grant_type": "authorization_code",
             "client_id": client.client_id,
@@ -1712,9 +1775,7 @@ class TestTokenViewAuthorizationCodeGrant:
         """OAuthAccessToken created via auth_code inherits the client's permission tier."""
         client = OAuthClient.objects.create(name="pkce-perm", permission="admin")
         code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        code = self._setup_code_in_cache(
-            client.client_id, "https://example.com/cb", code_verifier
-        )
+        code = self._setup_code_in_cache(client.client_id, "https://example.com/cb", code_verifier)
         request = rf.post(
             "/oauth/token/",
             data={
@@ -1768,9 +1829,7 @@ class TestWellKnownAuthorizationEndpoint:
         data = json.loads(response.content)
         assert "S256" in data["code_challenge_methods_supported"]
 
-    def test_custom_authorize_url_override(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_custom_authorize_url_override(self, rf: RequestFactory, settings: Any) -> None:
         """FRISIAN_MCP_OAUTH_AUTHORIZE_URL overrides the advertised authorization_endpoint."""
         settings.FRISIAN_MCP_OAUTH_AUTHORIZE_URL = "https://auth.example.com/authorize"
         request = rf.get("/.well-known/oauth-authorization-server")

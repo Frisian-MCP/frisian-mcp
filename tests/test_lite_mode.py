@@ -193,9 +193,7 @@ class TestLiteDispatcherHelp:
     ) -> None:
         """``lite: true`` reduces each action entry to a plain name string."""
         with patch("frisian_mcp.views.tool_registry", dispatcher_registry):
-            data = _response_data(
-                _call(rf, "tasks", {"action": "help", "lite": True})
-            )
+            data = _response_data(_call(rf, "tasks", {"action": "help", "lite": True}))
 
         assert "error" not in data
         content = _result_content(data)
@@ -223,9 +221,7 @@ class TestLiteDispatcherHelp:
     ) -> None:
         """``lite: false`` returns the full action listing untouched."""
         with patch("frisian_mcp.views.tool_registry", dispatcher_registry):
-            data = _response_data(
-                _call(rf, "tasks", {"action": "help", "lite": False})
-            )
+            data = _response_data(_call(rf, "tasks", {"action": "help", "lite": False}))
 
         content = _result_content(data)
         action_entries = content["actions"]
@@ -260,9 +256,7 @@ class TestLiteNonDispatcher:
     ) -> None:
         """``lite: true`` on a non-dispatcher call leaves the result untouched."""
         with patch("frisian_mcp.views.tool_registry", plain_registry):
-            data = _response_data(
-                _call(rf, "echo", {"msg": "hello", "lite": True})
-            )
+            data = _response_data(_call(rf, "echo", {"msg": "hello", "lite": True}))
 
         assert data["result"]["isError"] is False
         content = _result_content(data)
@@ -302,7 +296,9 @@ class TestLiteStrippedFromArguments:
         """A plain tool's fn receives arguments without the ``lite`` key."""
         seen: dict[str, Any] = {}
 
-        def _capturing_tool(arguments: dict[str, Any], request: Any) -> dict[str, Any]:  # noqa: ARG001
+        def _capturing_tool(
+            arguments: dict[str, Any], request: Any
+        ) -> dict[str, Any]:  # noqa: ARG001
             seen.update(arguments)
             return {"ok": True}
 
@@ -379,9 +375,7 @@ class TestLiteFailureEscapeHatch:
         )
 
         with patch("frisian_mcp.views.tool_registry", reg):
-            data = _response_data(
-                _call(rf, "needs_uuid", {"id": "not-a-uuid", "lite": True})
-            )
+            data = _response_data(_call(rf, "needs_uuid", {"id": "not-a-uuid", "lite": True}))
 
         assert data["result"]["isError"] is True
         content = _result_content(data)
@@ -389,9 +383,7 @@ class TestLiteFailureEscapeHatch:
         assert "inputSchema" in content
         assert content["inputSchema"]["properties"]["id"]["type"] == "string"
 
-    def test_lite_false_value_error_omits_input_schema(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_lite_false_value_error_omits_input_schema(self, rf: RequestFactory) -> None:
         """Without ``lite``, an isError content block does NOT carry inputSchema."""
         reg = ToolRegistry()
 

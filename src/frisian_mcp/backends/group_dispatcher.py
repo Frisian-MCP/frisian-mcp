@@ -54,7 +54,7 @@ def _parse_tool_name(
     if resource_prefixes:
         for prefix in resource_prefixes:
             if tool_name.startswith(f"{prefix}{sep}"):
-                return prefix, tool_name[len(prefix) + len(sep):]
+                return prefix, tool_name[len(prefix) + len(sep) :]
         return None
     parts = tool_name.split(sep, 1)
     return (parts[0], parts[1]) if len(parts) == 2 else None
@@ -71,9 +71,10 @@ def _resolve_request_tier(request: HttpRequest) -> str:
     """
     # Local import: avoids a hard module-load cycle with registry, which
     # imports backends.* lazily.  Cheap at call time.
-    from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
-        _resolve_request_tier as _registry_resolve,
-    )
+    # pylint: disable=import-outside-toplevel
+    from frisian_mcp.registry import _resolve_request_tier as _registry_resolve
+
+    # pylint: enable=import-outside-toplevel
 
     return _registry_resolve(request)
 
@@ -297,9 +298,7 @@ def make_group_invoke(  # pylint: disable=too-many-locals
         }
 
         if action is None or action == "help":
-            raw_hints: dict[str, str] = (
-                getattr(settings, "FRISIAN_MCP_TOOL_HINTS", None) or {}
-            )
+            raw_hints: dict[str, str] = getattr(settings, "FRISIAN_MCP_TOOL_HINTS", None) or {}
             group_hints = {k: v for k, v in raw_hints.items() if k in tool_names}
             # Apply Django-permission entry filter when FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY
             # is enabled, so action="help" respects the same filtering as tools/list.
@@ -316,9 +315,7 @@ def make_group_invoke(  # pylint: disable=too-many-locals
             )
 
         if resource is None:
-            raise ValueError(
-                f"resource is required for non-help actions on group {group_name!r}"
-            )
+            raise ValueError(f"resource is required for non-help actions on group {group_name!r}")
 
         target_name = f"{resource}{sep}{action}"
         if target_name not in tool_names:
@@ -329,9 +326,7 @@ def make_group_invoke(  # pylint: disable=too-many-locals
             )
             matches = difflib.get_close_matches(resource, available_resources, n=1)
             hint = f" Did you mean resource={matches[0]!r}?" if matches else ""
-            raise LookupError(
-                f"Unknown tool {target_name!r} in group {group_name!r}.{hint}"
-            )
+            raise LookupError(f"Unknown tool {target_name!r} in group {group_name!r}.{hint}")
 
         # Strip frisian-mcp protocol params before the underlying tool sees params.
         # `verify` is a write-path flag; `lite` is a protocol-level flag on all calls.

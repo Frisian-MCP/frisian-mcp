@@ -56,9 +56,7 @@ class TestRegisterProviderList:
         """Entries returned by list_fn appear in list_resources()."""
         reg = _registry()
         req = _request()
-        reg.register_provider(
-            list_fn=lambda _req: [{"uri": "dyn://a", "name": "A"}]
-        )
+        reg.register_provider(list_fn=lambda _req: [{"uri": "dyn://a", "name": "A"}])
         result = reg.list_resources(req)
         uris = [r["uri"] for r in result]
         assert "dyn://a" in uris
@@ -221,9 +219,7 @@ class TestResourcesListIntegration:
         """Post a resources/list JSON-RPC request through McpView with *reg* patched in."""
         req = _rf.post(
             "/mcp/",
-            data=json.dumps(
-                {"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}}
-            ),
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}}),
             content_type="application/json",
         )
         with patch("frisian_mcp.views.resource_registry", reg):
@@ -246,9 +242,7 @@ class TestResourcesListIntegration:
         """Both static and provider entries appear in resources/list response."""
         reg = _registry()
         reg.register(_static_def("file://combined.txt"))
-        reg.register_provider(
-            list_fn=lambda _req: [{"uri": "dyn://combined", "name": "Combined"}]
-        )
+        reg.register_provider(list_fn=lambda _req: [{"uri": "dyn://combined", "name": "Combined"}])
         data = self._post(reg)
         uris = [r["uri"] for r in data["result"]["resources"]]
         assert "file://combined.txt" in uris

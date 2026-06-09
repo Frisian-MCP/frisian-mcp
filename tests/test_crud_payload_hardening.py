@@ -233,9 +233,7 @@ class TestAllowedPayloadShapes:
         )
         assert result == {"data": {"email": "a@b.com"}}
 
-    def test_multi_key_payload_with_data_not_blocked(
-        self, write_registry: ToolRegistry
-    ) -> None:
+    def test_multi_key_payload_with_data_not_blocked(self, write_registry: ToolRegistry) -> None:
         """A payload with multiple keys including 'data' is not the wrapper pattern."""
         result = write_registry.dispatch(
             _build_request(),

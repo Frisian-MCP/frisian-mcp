@@ -250,9 +250,10 @@ class TestWritePathDefaultLean:
 
         isolated = _build_write_registry("device.create", _create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "device.create", {"name": "spine-1"})
 
@@ -279,9 +280,10 @@ class TestWritePathDefaultLean:
 
         isolated = _build_write_registry("obj.create", _create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "obj.create", {"name": "y"})
 
@@ -299,9 +301,10 @@ class TestWritePathDefaultLean:
 
         isolated = _build_write_registry("item.create", _create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             _call_tool(rf, "item.create", {"name": "x", "verify": False})
 
@@ -316,9 +319,10 @@ class TestWritePathDefaultLean:
 
         isolated = _build_write_registry("device.destroy", _destroy)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "device.destroy", {"id": "device-uuid-99"})
 
@@ -349,9 +353,10 @@ class TestWritePathVerifyFull:
 
         isolated = _build_write_registry("device.create", _create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "device.create", {"name": "leaf-1", "verify": True})
 
@@ -377,9 +382,10 @@ class TestWritePathVerifyFull:
 
         isolated = _build_write_registry("item.create", _create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             _call_tool(rf, "item.create", {"name": "x", "verify": True})
 
@@ -395,9 +401,10 @@ class TestWritePathVerifyFull:
 
         isolated = _build_write_registry("item.create", _create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             _call_tool(rf, "item.create", {"name": "x", "verify": True})
 
@@ -449,9 +456,10 @@ class TestWritePathBulkCreate:
 
         isolated = _build_write_registry("devices.bulk_create", _bulk_create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             objects = [{"name": f"spine-{i}"} for i in range(60)]
             response = _call_tool(rf, "devices.bulk_create", {"objects": objects})
@@ -487,9 +495,10 @@ class TestWritePathBulkCreate:
         isolated = _build_write_registry("devices.bulk_create", _bulk_create)
 
         # Measure lean envelope size.
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             objects = [{"name": f"spine-{i}"} for i in range(60)]
             response = _call_tool(rf, "devices.bulk_create", {"objects": objects})
@@ -530,9 +539,10 @@ class TestWritePathBulkCreate:
 
         isolated = _build_write_registry("devices.bulk_create", _bulk_create)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "devices.bulk_create", {})
 
@@ -572,9 +582,10 @@ class TestContinuationTokenRetrieval:
         def _cache_get(key: str) -> Any:
             return cache_store.get(key)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
 
@@ -586,9 +597,10 @@ class TestContinuationTokenRetrieval:
         assert token is not None
 
         # Call 2: retrieve full result using the token.
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
             resp2 = _call_tool(rf, "device.create", {"continuation_token": token, "mode": "full"})
@@ -615,17 +627,19 @@ class TestContinuationTokenRetrieval:
             return cache_store.get(key)
 
         # Path A: verify=True.
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
             resp_verify = _call_tool(rf, "router.create", {"name": "router-x", "verify": True})
 
         # Path B: lean → token → mode=full.
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
             resp_lean = _call_tool(rf, "router.create", {"name": "router-x"})
@@ -633,9 +647,10 @@ class TestContinuationTokenRetrieval:
         lean = _tool_result(resp_lean)
         token = lean["continuation_token"]
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
             resp_cont = _call_tool(
@@ -666,9 +681,10 @@ class TestMcpHeavyPrecedence:
         # Register with BOTH is_write=True and is_heavy=True.
         isolated = _build_write_registry("hw.create", _create, is_heavy=True)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "hw.create", {"name": "heavy-write"})
 
@@ -703,9 +719,10 @@ class TestReadPathUnaffected:
 
         isolated = _build_read_registry("items.list", _list)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "items.list", {})
 
@@ -729,9 +746,10 @@ class TestReadPathUnaffected:
 
         isolated = _build_read_registry("item.retrieve", _retrieve)
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response_no_verify = _call_tool(rf, "item.retrieve", {})
             response_with_verify = _call_tool(rf, "item.retrieve", {"verify": True})
@@ -742,9 +760,7 @@ class TestReadPathUnaffected:
         # Both should return the same full result.
         assert result_no == result_yes == full_data
 
-    def test_write_lean_filtering_does_not_affect_mcp_heavy_read(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_write_lean_filtering_does_not_affect_mcp_heavy_read(self, rf: RequestFactory) -> None:
         """A read-only @mcp_heavy tool still returns a probe envelope, not a lean write envelope."""
         from frisian_mcp.decorators import mcp_heavy  # pylint: disable=import-outside-toplevel
 
@@ -760,9 +776,10 @@ class TestReadPathUnaffected:
             def _fn(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
                 return [{"id": str(i)} for i in range(20)]
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(rf, "heavy.readonly", {})
 
@@ -859,9 +876,10 @@ class TestDispatcherGroupWritePath:
 
         isolated = self._build_dispatcher_registry({"device_create": (_create, True)})
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(
                 rf,
@@ -894,9 +912,10 @@ class TestDispatcherGroupWritePath:
 
         isolated = self._build_dispatcher_registry({"device_create": (_create, True)})
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(
                 rf,
@@ -924,9 +943,10 @@ class TestDispatcherGroupWritePath:
 
         isolated = self._build_dispatcher_registry({"device_create": (_create, True)})
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             _call_tool(
                 rf,
@@ -950,9 +970,10 @@ class TestDispatcherGroupWritePath:
 
         isolated = self._build_dispatcher_registry({"device_destroy": (_destroy, True)})
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(
                 rf,
@@ -978,9 +999,10 @@ class TestDispatcherGroupWritePath:
 
         isolated = self._build_dispatcher_registry({"device_list": (_list, False)})
 
-        with patch("frisian_mcp.views.tool_registry", isolated), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             response = _call_tool(
                 rf, "dcim", {"resource": "device", "action": "list", "params": {}}

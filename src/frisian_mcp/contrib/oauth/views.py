@@ -54,7 +54,77 @@ from .models import OAuthAccessToken, OAuthClient, _hmac_secret
 _AUTH_CODE_CACHE_PREFIX = "frisian_mcp:oauth_code:"
 _AUTH_CODE_TTL = 300  # 5 minutes
 
+_TOKEN_RL_PREFIX = "frisian_mcp:oauth_token_rl:"  # noqa: S105  # cache key prefix, not a password
+_RATE_LIMIT_PERIODS: dict[str, int] = {
+    "second": 1,
+    "minute": 60,
+    "hour": 3600,
+    "day": 86400,
+}
+
 logger = logging.getLogger(__name__)
+
+
+def _get_client_ip(request: HttpRequest) -> str:
+    """
+    Return the best-guess client IP address.
+
+    Respects ``FRISIAN_MCP_TRUSTED_PROXY_COUNT``: when set, reads the
+    ``X-Forwarded-For`` header and returns the entry just before the
+    rightmost *N* proxy-added entries (which are attacker-injectable
+    upstream of the trust boundary).  Falls back to ``REMOTE_ADDR`` when
+    no proxy count is configured.
+    """
+    proxy_count: int = getattr(settings, "FRISIAN_MCP_TRUSTED_PROXY_COUNT", 0)
+    if proxy_count > 0:
+        xff = str(request.META.get("HTTP_X_FORWARDED_FOR", "")).strip()
+        if xff:
+            parts = [p.strip() for p in xff.split(",")]
+            # The rightmost proxy_count entries are set by trusted proxies;
+            # the entry just before them is the real originating client.
+            index = max(0, len(parts) - proxy_count)
+            return parts[index]
+    return str(request.META.get("REMOTE_ADDR", ""))
+
+
+def _token_rate_limit_exceeded(request: HttpRequest) -> bool:
+    """
+    Return ``True`` when the token endpoint rate limit is exceeded for this IP.
+
+    Reads ``FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT`` (format ``"N/period"``,
+    e.g. ``"10/minute"``).  Supported periods: ``second``, ``minute``,
+    ``hour``, ``day``.
+
+    Returns ``False`` (not exceeded) when the setting is absent, ``None``,
+    or malformed — fail-open to avoid breaking token issuance on cache
+    failure or misconfiguration.
+
+    **Deployment note:** enable this in production to mitigate brute-force
+    and credential-stuffing against client secrets.  A value of
+    ``"20/minute"`` is a reasonable starting point for most deployments;
+    tighten based on observed legitimate traffic.  Nginx / load-balancer
+    rate limiting is a complementary layer and does not replace this.
+    """
+    rate_limit: str | None = getattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT", None)
+    if not rate_limit:
+        return False
+    try:
+        count_str, period = rate_limit.split("/", 1)
+        max_count = int(count_str.strip())
+        period_seconds = _RATE_LIMIT_PERIODS[period.strip().lower()]
+    except (ValueError, KeyError):
+        return False  # Misconfigured — fail open
+
+    ip = _get_client_ip(request)
+    cache_key = f"{_TOKEN_RL_PREFIX}{ip}"
+    try:
+        # add() is a no-op when the key already exists — sets counter to 0
+        # with TTL only on the first request in the window.
+        django_cache.add(cache_key, 0, period_seconds)
+        count = django_cache.incr(cache_key)
+    except Exception:  # pylint: disable=broad-except  # cache backend unavailable
+        return False  # Fail open — do not block token issuance on cache errors
+    return count > max_count
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -119,9 +189,7 @@ def _pkce_permission_for_uri(redirect_uri: str) -> str:
             "com.example.admin:/": "admin",
         }
     """
-    tier_map: dict[str, str] = getattr(
-        settings, "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP", {}
-    )
+    tier_map: dict[str, str] = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP", {})
     for prefix, tier in tier_map.items():
         if redirect_uri.startswith(prefix):
             return tier
@@ -203,6 +271,16 @@ class TokenView(View):
 
     def post(self, request: HttpRequest) -> JsonResponse:
         """Issue a new access token for valid client credentials."""
+        if _token_rate_limit_exceeded(request):
+            return JsonResponse(
+                {
+                    "error": "rate_limit_exceeded",
+                    "error_description": (
+                        "Too many token requests from this client. Please retry later."
+                    ),
+                },
+                status=429,
+            )
         data = _parse_body(request)
         grant_type = _str_field(data, "grant_type")
         client_id = _str_field(data, "client_id")
@@ -372,9 +450,7 @@ class TokenView(View):
             if pkce_auto and client.permission != effective_permission:
                 _tier_rank = ["read", "read_write", "admin"]
                 existing_rank = (
-                    _tier_rank.index(client.permission)
-                    if client.permission in _tier_rank
-                    else 0
+                    _tier_rank.index(client.permission) if client.permission in _tier_rank else 0
                 )
                 effective_rank = (
                     _tier_rank.index(effective_permission)
@@ -427,9 +503,7 @@ class TokenView(View):
                     status=400,
                 )
 
-        access_token = OAuthAccessToken.objects.create(
-            client=client, permission=client.permission
-        )
+        access_token = OAuthAccessToken.objects.create(client=client, permission=client.permission)
         expiry: int = getattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS", 3600)
 
         logger.info("oauth_token_issued_code_flow", extra={"client_name": client.name})
@@ -758,10 +832,50 @@ class AuthorizeView(View):
     Optional:
         * ``state`` — opaque value echoed back in the redirect
 
-    Behaviour is controlled by ``FRISIAN_MCP_OAUTH_AUTO_APPROVE``.  Defaults
-    to ``True`` only when ``settings.DEBUG`` is also ``True``; production
-    deployments default to consent (False) per SEC-2 to prevent silent
-    code issuance.
+    **Design: no session authentication gate (intentional)**
+
+    This endpoint intentionally does **not** require ``request.user.is_authenticated``
+    or ``@login_required``.  The primary use case is machine-to-machine (M2M)
+    authorization: the "principal" being authorized is the OAuth *client*
+    (identified by ``client_id`` + PKCE), not a logged-in human user.  Requiring a
+    Django session would break automated agent flows where no browser session exists.
+
+    The security boundary is the PKCE code challenge / code verifier exchange — the
+    client proves possession of the secret at token-exchange time (RFC 7636 §4.6)
+    rather than via a session cookie.
+
+    **Host apps that need user-consent flows:**
+
+    If your application needs a human user to approve an OAuth client before an
+    authorization code is issued (e.g. a third-party integration), you have two
+    options:
+
+    1. **Wrap the URL with ``login_required``** in your own ``urlconf`` instead of
+       including ``frisian_mcp.contrib.oauth.urls`` directly::
+
+           from django.contrib.auth.decorators import login_required
+           from frisian_mcp.contrib.oauth.views import AuthorizeView
+
+           urlpatterns = [
+               path(
+                   "oauth/authorize/",
+                   login_required(AuthorizeView.as_view()),
+                   name="oauth_authorize",
+               ),
+           ]
+
+    2. **Set ``FRISIAN_MCP_OAUTH_AUTO_APPROVE = False``** (the production default)
+       and override ``frisian_mcp/oauth/authorize.html`` in your project's template
+       directory.  Your template can render inside a layout that already enforces
+       authentication (e.g. wrapped in a ``{% if user.is_authenticated %}`` guard or
+       rendered by a view mixin that redirects to login).  The POST handler
+       re-validates all parameters, so the session check only needs to live in
+       the template or the URL wrapper — not duplicated in this view.
+
+    **Behaviour controlled by FRISIAN_MCP_OAUTH_AUTO_APPROVE:**
+
+    Defaults to ``True`` only when ``settings.DEBUG`` is also ``True``; production
+    deployments default to ``False`` per SEC-2 to prevent silent code issuance.
 
     * ``True``: immediately redirects to *redirect_uri* with an authorization code.
       Appropriate for developer / machine-to-machine flows.
@@ -793,9 +907,7 @@ class AuthorizeView(View):
             return JsonResponse({"error": error}, status=400)
 
         if getattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE", _auto_approve_default()):
-            return self._issue_code_redirect(
-                client_id, redirect_uri, code_challenge, state
-            )
+            return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state)
 
         # Render consent page
         return render(
@@ -918,9 +1030,7 @@ class AuthorizeView(View):
             params["state"] = state
         return _OAuthRedirect(f"{redirect_uri}?{urlencode(params)}")
 
-    def _error_redirect(
-        self, redirect_uri: str, error: str, state: str
-    ) -> HttpResponseRedirect:
+    def _error_redirect(self, redirect_uri: str, error: str, state: str) -> HttpResponseRedirect:
         """Redirect to redirect_uri with an error parameter."""
         params: dict[str, str] = {"error": error}
         if state:

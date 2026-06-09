@@ -148,9 +148,7 @@ class RateLimitMiddleware:
 
             backend_path: str | None = config.get("backend")
             self._backend = (
-                _load_backend(backend_path)
-                if backend_path
-                else InMemoryRateLimitBackend()
+                _load_backend(backend_path) if backend_path else InMemoryRateLimitBackend()
             )
 
     # ------------------------------------------------------------------

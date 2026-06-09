@@ -85,7 +85,9 @@ class OAuthServicePrincipal:
     # Required by host apps that call permission methods on request.user.
     # ------------------------------------------------------------------
 
-    def get_all_permissions(self, obj: object = None) -> set[str]:  # pylint: disable=unused-argument
+    def get_all_permissions(  # pylint: disable=unused-argument
+        self, obj: object = None
+    ) -> set[str]:
         """Return an empty set; MCP tier filtering is the real permission gate."""
         return set()
 

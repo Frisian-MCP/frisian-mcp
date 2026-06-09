@@ -29,6 +29,7 @@ means host projects can gate the MCP surface using standard DRF mechanisms:
   backwards compatibility.  Tool-level ``permission_classes`` are enforced
   separately by :data:`~frisian_mcp.registry.tool_registry`.
 """
+
 # pylint: disable=too-many-lines
 
 import asyncio
@@ -82,8 +83,7 @@ _HEAVY_CACHE_PREFIX = "frisian_mcp:heavy:"
 _HEAVY_CACHE_TTL: int = 300  # seconds; tokens expire after 5 minutes
 
 _REFRESH_HINT = (
-    " Call tools/list to refresh your available tools"
-    " — the server manifest may have changed."
+    " Call tools/list to refresh your available tools — the server manifest may have changed."
 )
 
 #: Substrings used to detect instructional scaffolding text that the
@@ -239,8 +239,7 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
             # Static API keys (_ApiKeyAuth) have no PK; fall back to the
             # type + permission tier so two distinct tiers don't collide.
             auth_id = (
-                f"{type(auth_obj).__name__}:tier="
-                f"{getattr(auth_obj, 'permission', 'unknown')}"
+                f"{type(auth_obj).__name__}:tier=" f"{getattr(auth_obj, 'permission', 'unknown')}"
             )
 
     user = getattr(request, "user", None)
@@ -258,15 +257,10 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
     session_id = (request.META or {}).get("HTTP_MCP_SESSION_ID", "")
     session_part = f":session={session_id}" if session_id else ""
 
-    return (
-        f"tool={tool_name}:auth={auth_id}:tier={tier}"
-        f"{user_part}{conn_part}{session_part}"
-    )
+    return f"tool={tool_name}:auth={auth_id}:tier={tier}" f"{user_part}{conn_part}{session_part}"
 
 
-def _build_heavy_cache_entry(
-    result: Any, request: Any, tool_name: str
-) -> dict[str, Any]:
+def _build_heavy_cache_entry(result: Any, request: Any, tool_name: str) -> dict[str, Any]:
     """Wrap *result* with the SEC-3 owner-binding metadata for the cache."""
     return {
         "result": result,
@@ -315,9 +309,13 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
 
     if mode == "paginated":
         page: int = max(1, int(arguments.get("page", 1)))
+        _default_page_size: int = getattr(settings, "FRISIAN_MCP_HEAVY_PAGE_SIZE", 20)
+        _max_page_size: int = getattr(
+            settings, "FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE", _default_page_size
+        )
         page_size: int = max(
             1,
-            int(arguments.get("page_size", getattr(settings, "FRISIAN_MCP_HEAVY_PAGE_SIZE", 20))),
+            min(int(arguments.get("page_size", _default_page_size)), _max_page_size),
         )
         if isinstance(result, list):
             start = (page - 1) * page_size
@@ -341,9 +339,7 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
             return {k: v for k, v in result.items() if k in filter_keys}
         if isinstance(result, list) and filter_keys:
             return [
-                {k: item[k] for k in filter_keys if k in item}
-                if isinstance(item, dict)
-                else item
+                {k: item[k] for k in filter_keys if k in item} if isinstance(item, dict) else item
                 for item in result
             ]
         return result
@@ -413,9 +409,7 @@ def _lite_enrich_error_content(
     return {**content, "inputSchema": entry.input_schema}
 
 
-def _lite_enrich_error(
-    response: JsonResponse, tool_name: str, lite: bool
-) -> JsonResponse:
+def _lite_enrich_error(response: JsonResponse, tool_name: str, lite: bool) -> JsonResponse:
     """
     Attach the failing tool's ``inputSchema`` to a JSON-RPC error response.
 
@@ -721,9 +715,7 @@ def _resolve_agent_connection_state(request: Any) -> tuple[Any | None, bool]:
             )
 
             if isinstance(auth, OAuthAccessToken):
-                queryset = auth.client.agent_connections.select_related(
-                    "token", "oauth_client"
-                )
+                queryset = auth.client.agent_connections.select_related("token", "oauth_client")
         except ImportError:
             pass
 
@@ -787,9 +779,7 @@ def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse | Streaming
     def _stream() -> Generator[str, None, None]:
         yield f"data: {body}\n\n"
 
-    sse: StreamingHttpResponse = StreamingHttpResponse(
-        _stream(), content_type="text/event-stream"
-    )
+    sse: StreamingHttpResponse = StreamingHttpResponse(_stream(), content_type="text/event-stream")
     sse["Cache-Control"] = "no-cache"
     for header, value in response.items():
         if header.lower() not in ("content-type", "content-length"):
@@ -802,9 +792,7 @@ def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse | Streaming
 # ---------------------------------------------------------------------------
 
 
-def _tool_registry_dispatch(
-    request: HttpRequest, tool_name: str, arguments: dict[str, Any]
-) -> Any:
+def _tool_registry_dispatch(request: HttpRequest, tool_name: str, arguments: dict[str, Any]) -> Any:
     """Inner dispatch callable passed to the middleware chain."""
     return tool_registry.dispatch(request, tool_name, arguments)
 
@@ -919,9 +907,7 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
     # shared tier-based cache ensures different users see only their own tools.
     perm_aware: bool = getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False)
     use_cache = (
-        cache_ttl is not None
-        and (conn is None or conn.allowed_tools is None)
-        and not perm_aware
+        cache_ttl is not None and (conn is None or conn.allowed_tools is None) and not perm_aware
     )
 
     # Resolve per-user filters when permission-aware discovery is on.
@@ -1147,9 +1133,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             _dispatch_arguments = {k: v for k, v in arguments.items() if k != "verify"}
 
     try:
-        result = build_middleware_chain(
-            _tool_registry_dispatch, get_middleware_instances()
-        )(request, tool_name, _dispatch_arguments)
+        result = build_middleware_chain(_tool_registry_dispatch, get_middleware_instances())(
+            request, tool_name, _dispatch_arguments
+        )
     except ToolNotFoundError as exc:
         # JSON-RPC 2.0: -32601 METHOD_NOT_FOUND is the correct code for an unknown
         # tool name.  -32602 INVALID_PARAMS is reserved for structural argument
@@ -1157,7 +1143,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # call format is wrong rather than the tool name.
         #
         # Append close-match suggestions so agents can self-correct without an
-        # extra tools/list round-trip.
+        # extra tools/list round-trip.  The full tool list is intentionally
+        # omitted — listing all names in the error leaks the discovery surface
+        # to callers who have not made an explicit tools/list call.
         known_names = [
             t["name"] for t in tool_registry.list_tools(max_tier=_get_token_permission(request))
         ]
@@ -1165,7 +1153,6 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         data = str(exc)
         if suggestions:
             data += f". Did you mean: {', '.join(suggestions)}?"
-        data += f" Available tools: {', '.join(sorted(known_names))}."
         data += _REFRESH_HINT
         # Lite-mode escape hatch is a no-op here: the tool is unknown so the
         # registry has no inputSchema to re-include.  The close-match
@@ -1244,9 +1231,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # Surface Django model/form validation errors as structured isError=True content
         # so agents receive actionable feedback in the same format as DRFValidationError.
         msg = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
-        content = _lite_enrich_error_content(
-            {"error": msg, "status_code": 400}, tool_name, _lite
-        )
+        content = _lite_enrich_error_content({"error": msg, "status_code": 400}, tool_name, _lite)
         return _jsonrpc_success(
             request_id,
             {
@@ -1313,8 +1298,10 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # Write-path lean default: cache the full result and return a compact
     # confirmation envelope unless the caller passed verify=True.  @mcp_heavy
     # takes precedence when a tool is decorated with both.
-    if _write_entry is not None and _write_entry.is_write and not (
-        _write_entry is not None and _write_entry.is_heavy
+    if (
+        _write_entry is not None
+        and _write_entry.is_write
+        and not (_write_entry is not None and _write_entry.is_heavy)
     ):
         if _verify:
             return _jsonrpc_success(
@@ -1324,6 +1311,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
             _extract_lean_envelope,
         )
+
         _w_token = secrets.token_urlsafe(16)
         _lean = _extract_lean_envelope(result, _w_token, _http_status)
         if "continuation_token" in _lean:
@@ -1363,6 +1351,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
                 _extract_lean_envelope,
             )
+
             _w_token = secrets.token_urlsafe(16)
             _d_lean = _extract_lean_envelope(result, _w_token, _http_status)
             if "continuation_token" in _d_lean:
@@ -1662,10 +1651,19 @@ class McpView(APIView):
         POST responses through a long-lived per-client SSE stream.
 
         When ``FRISIAN_MCP_SSE_CHANNEL`` is ``True`` (default), a keepalive
-        comment is sent every 15 seconds to prevent proxy and client timeouts.
+        comment is sent every 15 seconds (WSGI) or 3 seconds (ASGI) to prevent
+        proxy and client timeouts.
+
+        ``FRISIAN_MCP_SSE_MAX_STREAM_SECONDS`` (default ``300``) caps how long
+        a single SSE connection is held open.  After the deadline the stream
+        closes and the MCP client reconnects.  This bounds the number of WSGI
+        worker threads pinned by long-lived keepalive connections.  Set to ``0``
+        to close immediately after the first keepalive (useful in tests).
         """
         if not getattr(settings, "FRISIAN_MCP_SSE_CHANNEL", True):
             return HttpResponse(status=405)
+
+        max_stream_seconds: int = getattr(settings, "FRISIAN_MCP_SSE_MAX_STREAM_SECONDS", 300)
 
         try:
             asyncio.get_running_loop()
@@ -1676,10 +1674,18 @@ class McpView(APIView):
             # open. This is preferable to returning 405 because some clients
             # (e.g. Cursor) do not fall back to POST-only on 405 and instead
             # treat it as a hard connection failure even though POST calls work.
+            #
+            # FRISIAN_MCP_SSE_MAX_STREAM_SECONDS caps the worker hold time (default
+            # 300 s).  After the deadline the stream closes cleanly; the client
+            # reconnects.  Set to 0 to yield one keepalive and close immediately.
             def _wsgi_keepalive() -> Generator[str, None, None]:
+                deadline = time.monotonic() + max_stream_seconds
                 while True:
                     yield ": keepalive\n\n"
-                    time.sleep(15)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(15.0, remaining))
 
             resp = StreamingHttpResponse(_wsgi_keepalive(), content_type="text/event-stream")
             resp["Cache-Control"] = "no-cache"
@@ -1687,9 +1693,14 @@ class McpView(APIView):
             return resp
 
         async def _keepalive_stream() -> AsyncGenerator[str, None]:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + max_stream_seconds
             while True:
                 yield ": keepalive\n\n"
-                await asyncio.sleep(3)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(3.0, remaining))
 
         resp = StreamingHttpResponse(_keepalive_stream(), content_type="text/event-stream")
         resp["Cache-Control"] = "no-cache"

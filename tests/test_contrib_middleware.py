@@ -60,9 +60,7 @@ class TestRateLimitMiddlewareNotConfigured:
 
     def test_missing_setting_passes_through(self) -> None:
         """Missing FRISIAN_MCP_RATE_LIMIT setting calls call_next unconditionally."""
-        with patch.object(
-            type(RateLimitMiddleware()), "__init__", RateLimitMiddleware.__init__
-        ):
+        with patch.object(type(RateLimitMiddleware()), "__init__", RateLimitMiddleware.__init__):
             pass  # just verify no error on import
         mw = RateLimitMiddleware()
         result = mw(_make_request(), "tool", {}, _noop_next)

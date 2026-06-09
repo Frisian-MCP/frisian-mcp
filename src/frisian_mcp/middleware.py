@@ -109,9 +109,7 @@ def build_middleware_chain(
             current: Callable[[HttpRequest, str, dict[str, Any]], Any],
             middleware: Any,
         ) -> Callable[[HttpRequest, str, dict[str, Any]], Any]:
-            def wrapped(
-                request: HttpRequest, tool_name: str, arguments: dict[str, Any]
-            ) -> Any:
+            def wrapped(request: HttpRequest, tool_name: str, arguments: dict[str, Any]) -> Any:
                 return middleware(request, tool_name, arguments, current)
 
             return wrapped

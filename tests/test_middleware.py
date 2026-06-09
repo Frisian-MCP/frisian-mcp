@@ -164,17 +164,13 @@ class TestLoadMiddleware:
         with pytest.raises(ImproperlyConfigured, match="valid dotted"):
             load_middleware()
 
-    @override_settings(
-        FRISIAN_MCP_TOOL_MIDDLEWARE=["frisian_mcp.nonexistent_module.SomeClass"]
-    )
+    @override_settings(FRISIAN_MCP_TOOL_MIDDLEWARE=["frisian_mcp.nonexistent_module.SomeClass"])
     def test_nonexistent_module_raises(self) -> None:
         """An import-error path raises ImproperlyConfigured."""
         with pytest.raises(ImproperlyConfigured, match="could not import"):
             load_middleware()
 
-    @override_settings(
-        FRISIAN_MCP_TOOL_MIDDLEWARE=[f"{__name__}._SampleMiddleware"]
-    )
+    @override_settings(FRISIAN_MCP_TOOL_MIDDLEWARE=[f"{__name__}._SampleMiddleware"])
     def test_valid_path_instantiates_class(self) -> None:
         """A valid dotted path is imported and the class is instantiated."""
         result = load_middleware()

@@ -110,9 +110,7 @@ def _extract_list_body(body_args: dict[str, Any]) -> list[Any] | None:
     return None
 
 
-def _normalize_fk_arguments(
-    arguments: dict[str, Any], schema: dict[str, Any]
-) -> dict[str, Any]:
+def _normalize_fk_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     """
     Normalize bare non-UUID string values for FK and M2M fields in *arguments*.
 
@@ -152,9 +150,7 @@ def _normalize_fk_arguments(
             continue
         if _is_fk_property(prop_schema):
             result[field_name] = _normalize_fk_value(value)
-        elif prop_schema.get("type") == "array" and _is_fk_property(
-            prop_schema.get("items", {})
-        ):
+        elif prop_schema.get("type") == "array" and _is_fk_property(prop_schema.get("items", {})):
             if isinstance(value, list):
                 result[field_name] = [_normalize_fk_value(item) for item in value]
     return result
@@ -263,9 +259,7 @@ def _action_http_method(view_class: type, action_name: str) -> str:
     return "post"
 
 
-def _extract_lean_envelope(
-    result: Any, token: str, http_status: int = 200
-) -> dict[str, Any]:
+def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> dict[str, Any]:
     """
     Build the lean write-confirmation envelope from a fully-serialised result.
 
@@ -613,6 +607,13 @@ class SyncInvocation(BaseInvocationBackend):
         a token — frisian-mcp's tier / max-tier system remains the primary access
         gate; this only satisfies the host-app authentication layer.
 
+        **Security:** ``FRISIAN_MCP_SERVICE_ACCOUNT_USER`` must point to a
+        dedicated low-privilege service account.  If the named account is
+        ``is_staff`` or ``is_superuser``, every anonymous MCP caller inherits
+        that user's Django object-permissions at the host-app layer, which may
+        exceed what the MCP tier gate intends.  Run
+        ``manage.py mcp_doctor --security`` to audit the configured account.
+
         Falls back to ``AnonymousUser`` when the setting is absent or the named
         user does not exist.
         """
@@ -622,9 +623,7 @@ class SyncInvocation(BaseInvocationBackend):
         if user is not None and getattr(user, "is_authenticated", False):
             return user
 
-        service_username: str | None = getattr(
-            _settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER", None
-        )
+        service_username: str | None = getattr(_settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER", None)
         if not service_username:
             return user if user is not None else AnonymousUser()
 

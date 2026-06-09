@@ -59,6 +59,7 @@ class Command(BaseCommand):
             self.stdout.write("")
             self.stdout.write(self.style.HTTP_INFO("  — Extended security audit —"))
             self._check_oauth_service_user(warnings)
+            self._check_service_account_user_privilege(warnings)
             self._check_body_size_limit(warnings)
             self._check_pkce_auto_register(warnings)
             self._check_oauth_registration_vs_wellknown(warnings)
@@ -146,12 +147,8 @@ class Command(BaseCommand):
 
     def _check_auth_wiring(self, warnings: list[str]) -> None:
         """Check authentication and permission class wiring."""
-        auth_classes: list[str] = list(
-            getattr(settings, "FRISIAN_MCP_AUTHENTICATION_CLASSES", [])
-        )
-        perm_classes: list[str] = list(
-            getattr(settings, "FRISIAN_MCP_PERMISSION_CLASSES", [])
-        )
+        auth_classes: list[str] = list(getattr(settings, "FRISIAN_MCP_AUTHENTICATION_CLASSES", []))
+        perm_classes: list[str] = list(getattr(settings, "FRISIAN_MCP_PERMISSION_CLASSES", []))
 
         tokens_installed = "frisian_mcp.contrib.tokens" in getattr(settings, "INSTALLED_APPS", [])
         oauth_installed = "frisian_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
@@ -180,9 +177,7 @@ class Command(BaseCommand):
             self._ok("OAuthTokenAuthentication wired in FRISIAN_MCP_AUTHENTICATION_CLASSES")
 
         if not auth_classes and not perm_classes:
-            self._ok(
-                "Auth classes empty — gateway is open (intentional for demo/internal use)"
-            )
+            self._ok("Auth classes empty — gateway is open (intentional for demo/internal use)")
 
     def _check_security_settings(self, warnings: list[str]) -> None:
         """Check security-relevant settings."""
@@ -391,6 +386,48 @@ class Command(BaseCommand):
                 "FRISIAN_MCP_OAUTH_SERVICE_USER is not set — OAuth-authenticated requests "
                 "use OAuthServicePrincipal (no real Django User).  Set this to a dedicated "
                 "service account username if host models require a User FK for audit logging.",
+            )
+
+    def _check_service_account_user_privilege(self, warnings: list[str]) -> None:
+        """Warn when FRISIAN_MCP_SERVICE_ACCOUNT_USER names a privileged Django user."""
+        service_user: str | None = getattr(settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER", None)
+        if not service_user:
+            self._ok(
+                "FRISIAN_MCP_SERVICE_ACCOUNT_USER not set — anonymous callers use AnonymousUser"
+            )
+            return
+
+        from django.contrib.auth import get_user_model  # pylint: disable=import-outside-toplevel
+
+        user_model = get_user_model()
+        try:
+            user = user_model.objects.get(username=service_user)
+        except user_model.DoesNotExist:
+            self._warn_msg(
+                warnings,
+                f"FRISIAN_MCP_SERVICE_ACCOUNT_USER='{service_user}' not found in the database. "
+                "Anonymous MCP callers will fall back to AnonymousUser.",
+            )
+            return
+
+        if user.is_superuser:
+            self._warn_msg(
+                warnings,
+                f"FRISIAN_MCP_SERVICE_ACCOUNT_USER='{service_user}' is a superuser. "
+                "Anonymous MCP callers will receive superuser permissions at the host-app layer. "
+                "Use a dedicated low-privilege service account instead.",
+            )
+        elif user.is_staff:
+            self._warn_msg(
+                warnings,
+                f"FRISIAN_MCP_SERVICE_ACCOUNT_USER='{service_user}' is a staff user. "
+                "Anonymous MCP callers will receive staff-level permissions at the host-app layer. "
+                "Use a dedicated low-privilege service account instead.",
+            )
+        else:
+            self._ok(
+                f"FRISIAN_MCP_SERVICE_ACCOUNT_USER='{service_user}'"
+                " — account is not staff/superuser"
             )
 
     def _check_body_size_limit(self, warnings: list[str]) -> None:

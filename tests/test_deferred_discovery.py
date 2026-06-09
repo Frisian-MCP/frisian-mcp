@@ -95,9 +95,7 @@ def _fire_deferred_only() -> None:
     # hash.  Match by lookup[0] alone (the dispatch_uid slot) since we
     # don't constrain sender; this is robust across Django versions where
     # the receivers tuple width varies.
-    request_started.receivers = [
-        entry for entry in saved if entry[0][0] == _DEFERRED_DISCOVERY_UID
-    ]
+    request_started.receivers = [entry for entry in saved if entry[0][0] == _DEFERRED_DISCOVERY_UID]
     request_started.sender_receivers_cache.clear()
     try:
         request_started.send(sender=None)
@@ -131,12 +129,15 @@ class TestDiscoveryDeferredFromReady:
                 calls.append("discover_tools")
                 return []
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends",
-            return_value=[_TrackingBackend()],
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch(
+                "frisian_mcp.backends.get_discovery_backends",
+                return_value=[_TrackingBackend()],
+            ),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
 
@@ -172,12 +173,15 @@ class TestDiscoveryDeferredFromReady:
                     )
                 ]
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends",
-            return_value=[_TrackingBackend()],
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch(
+                "frisian_mcp.backends.get_discovery_backends",
+                return_value=[_TrackingBackend()],
+            ),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             # Simulate Django's per-request signal at the start of the next request.
@@ -205,12 +209,15 @@ class TestDiscoveryDeferredFromReady:
                 calls.append("discover_tools")
                 return []
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends",
-            return_value=[_TrackingBackend()],
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch(
+                "frisian_mcp.backends.get_discovery_backends",
+                return_value=[_TrackingBackend()],
+            ),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             _fire_deferred_only()
@@ -258,12 +265,15 @@ class TestLateRegisteredUrlsDiscovered:
                 """Snapshot plugin_tools at call time, simulating late URL binding."""
                 return list(plugin_tools)
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends",
-            return_value=[_LateBindingBackend()],
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch(
+                "frisian_mcp.backends.get_discovery_backends",
+                return_value=[_LateBindingBackend()],
+            ),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
 
@@ -284,8 +294,7 @@ class TestLateRegisteredUrlsDiscovered:
 
         names = {t["name"] for t in isolated_registry.list_tools()}
         assert "plugin_resource.list" in names, (
-            "PKG-21 regression: late-bound plugin tools must appear once any "
-            "request fires"
+            "PKG-21 regression: late-bound plugin tools must appear once any " "request fires"
         )
 
 
@@ -314,12 +323,15 @@ class TestDeferredDiscoveryIdempotency:
                 calls.append("discover_tools")
                 return []
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends",
-            return_value=[_TrackingBackend()],
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch(
+                "frisian_mcp.backends.get_discovery_backends",
+                return_value=[_TrackingBackend()],
+            ),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             fresh_app_config._run_deferred_discovery()
@@ -355,12 +367,15 @@ class TestAutodiscoverDisabled:
                 calls.append("discover_tools")
                 return []
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends",
-            return_value=[_TrackingBackend()],
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch(
+                "frisian_mcp.backends.get_discovery_backends",
+                return_value=[_TrackingBackend()],
+            ),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             _fire_deferred_only()

@@ -185,8 +185,7 @@ class TestInstallHealthcheckUrls:
         try:
             _install_healthcheck_urls()
             sentinels = [
-                getattr(p, _HEALTHCHECK_AUTO_URL_ATTR, None)
-                for p in resolver.url_patterns
+                getattr(p, _HEALTHCHECK_AUTO_URL_ATTR, None) for p in resolver.url_patterns
             ]
             assert "backend/healthcheck" in sentinels
         finally:
@@ -224,8 +223,7 @@ class TestInstallHealthcheckUrls:
             result = _install_healthcheck_urls()
             assert result == 2
             sentinels = {
-                getattr(p, _HEALTHCHECK_AUTO_URL_ATTR, None)
-                for p in resolver.url_patterns
+                getattr(p, _HEALTHCHECK_AUTO_URL_ATTR, None) for p in resolver.url_patterns
             }
             assert "custom/health" in sentinels
             assert "api/ping" in sentinels

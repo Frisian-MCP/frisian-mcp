@@ -181,9 +181,12 @@ class TestFieldToSchema:
 
     def test_content_type_m2m_not_normalized(self) -> None:
         """content_types strings must NOT be wrapped as {"name": ...} by the normalization layer."""
-        schema = {"type": "object", "properties": {
-            "content_types": {"type": "array", "items": {"type": "string"}},
-        }}
+        schema = {
+            "type": "object",
+            "properties": {
+                "content_types": {"type": "array", "items": {"type": "string"}},
+            },
+        }
         args = {"content_types": ["inventory.asset", "inventory.container", "ipam.prefix"]}
         result = _normalize_fk_arguments(args, schema)
         assert result["content_types"] == ["inventory.asset", "inventory.container", "ipam.prefix"]
@@ -438,9 +441,7 @@ class TestNormalizeFkArguments:
 
     def test_unknown_field_passes_through(self) -> None:
         """An argument not in the schema properties is left unchanged."""
-        result = _normalize_fk_arguments(
-            {"unknown_field": "some-value"}, _NORMALIZATION_SCHEMA
-        )
+        result = _normalize_fk_arguments({"unknown_field": "some-value"}, _NORMALIZATION_SCHEMA)
         assert result["unknown_field"] == "some-value"
 
     def test_empty_schema_returns_args_unchanged(self) -> None:

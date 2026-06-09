@@ -341,23 +341,17 @@ class TestPerAgentToolsList:
         names = {t["name"] for t in tools}
         assert names == {"users.list", "users.create"}
 
-    def test_null_allowed_tools_returns_all(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_null_allowed_tools_returns_all(self, rf: RequestFactory, settings: Any) -> None:
         """AgentConnection.allowed_tools = None → all tools returned (unrestricted)."""
         _use_token_auth(settings)
         token = FrisianMcpToken.objects.create(name="agent-token")
-        AgentConnection.objects.create(
-            name="unrestricted", token=token, allowed_tools=None
-        )
+        AgentConnection.objects.create(name="unrestricted", token=token, allowed_tools=None)
         reg = _isolated_registry("users.list", "users.create")
         tools = self._call_tools_list(rf, reg, bearer=token.plaintext_token)
         names = {t["name"] for t in tools}
         assert names == {"users.list", "users.create"}
 
-    def test_allowed_tools_filters_list(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_allowed_tools_filters_list(self, rf: RequestFactory, settings: Any) -> None:
         """AgentConnection.allowed_tools = [...] → only those tools returned."""
         _use_token_auth(settings)
         token = FrisianMcpToken.objects.create(name="agent-token")
@@ -371,9 +365,7 @@ class TestPerAgentToolsList:
         names = {t["name"] for t in tools}
         assert names == {"users.list"}
 
-    def test_inactive_only_connection_fails_closed(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_inactive_only_connection_fails_closed(self, rf: RequestFactory, settings: Any) -> None:
         """
         SEC-5: when every linked AgentConnection is inactive, tools/list is empty.
 
@@ -427,9 +419,7 @@ class TestPerAgentToolsList:
         # The active connection's allowed_tools applies; inactive sibling ignored.
         assert names == {"users.list"}
 
-    def test_oauth_auth_filters_list(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_oauth_auth_filters_list(self, rf: RequestFactory, settings: Any) -> None:
         """Per-agent filtering works when request.auth is an OAuthAccessToken."""
         from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
             OAuthAccessToken,
@@ -478,30 +468,22 @@ class TestPerAgentToolsCall:
             response = _view(request)
         return json.loads(response.content)
 
-    def test_tool_blocked_when_not_in_allowlist(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_tool_blocked_when_not_in_allowlist(self, rf: RequestFactory, settings: Any) -> None:
         """Calling a tool not in allowed_tools returns isError=True."""
         _use_token_auth(settings)
         token = FrisianMcpToken.objects.create(name="agent-token")
-        AgentConnection.objects.create(
-            name="restricted", token=token, allowed_tools=["users.list"]
-        )
+        AgentConnection.objects.create(name="restricted", token=token, allowed_tools=["users.list"])
         reg = _isolated_registry("users.list", "users.create")
         data = self._call_tool(rf, reg, "users.create", bearer=token.plaintext_token)
         assert data["result"]["isError"] is True
         content = json.loads(data["result"]["content"][0]["text"])
         assert "not permitted" in content["error"]
 
-    def test_tool_allowed_when_in_allowlist(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_tool_allowed_when_in_allowlist(self, rf: RequestFactory, settings: Any) -> None:
         """Calling a tool in allowed_tools succeeds normally."""
         _use_token_auth(settings)
         token = FrisianMcpToken.objects.create(name="agent-token")
-        AgentConnection.objects.create(
-            name="restricted", token=token, allowed_tools=["users.list"]
-        )
+        AgentConnection.objects.create(name="restricted", token=token, allowed_tools=["users.list"])
         reg = _isolated_registry("users.list", "users.create")
         data = self._call_tool(rf, reg, "users.list", bearer=token.plaintext_token)
         assert data["result"]["isError"] is False
@@ -512,15 +494,11 @@ class TestPerAgentToolsCall:
         data = self._call_tool(rf, reg, "users.create")
         assert data["result"]["isError"] is False
 
-    def test_null_allowed_tools_allows_all_calls(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_null_allowed_tools_allows_all_calls(self, rf: RequestFactory, settings: Any) -> None:
         """allowed_tools=None means no restriction; all tools are callable."""
         _use_token_auth(settings)
         token = FrisianMcpToken.objects.create(name="agent-token")
-        AgentConnection.objects.create(
-            name="unrestricted", token=token, allowed_tools=None
-        )
+        AgentConnection.objects.create(name="unrestricted", token=token, allowed_tools=None)
         reg = _isolated_registry("users.list", "users.create")
         data = self._call_tool(rf, reg, "users.create", bearer=token.plaintext_token)
         assert data["result"]["isError"] is False
@@ -561,9 +539,7 @@ class TestPerAgentToolsCall:
 class TestLastSeenAt:
     """last_seen_at is stamped on tools/call for a matched AgentConnection."""
 
-    def test_last_seen_at_updated_on_tools_call(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_last_seen_at_updated_on_tools_call(self, rf: RequestFactory, settings: Any) -> None:
         """AgentConnection.last_seen_at is set after a tools/call request."""
         _use_token_auth(settings)
         token = FrisianMcpToken.objects.create(name="tracking-token")
@@ -588,9 +564,7 @@ class TestLastSeenAt:
         conn.refresh_from_db()
         assert conn.last_seen_at is not None
 
-    def test_last_seen_at_not_set_without_connection(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_last_seen_at_not_set_without_connection(self, rf: RequestFactory) -> None:
         """No AgentConnection → no last_seen_at side-effect (no DB rows to update)."""
         reg = _isolated_registry("users.list")
         payload = {

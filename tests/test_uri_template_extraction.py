@@ -217,9 +217,7 @@ class TestReadResourceTemplateMatching:
         """ResourceNotFoundError is raised when no handler or provider matches."""
         registry = ResourceRegistry()
         request = _req()
-        registry.register(
-            ResourceDefinition("file://docs/{name}", "by-name", lambda _u, _r: "")
-        )
+        registry.register(ResourceDefinition("file://docs/{name}", "by-name", lambda _u, _r: ""))
 
         with pytest.raises(ResourceNotFoundError):
             registry.read_resource("other://completely/different", request)

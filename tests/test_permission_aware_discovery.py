@@ -1,4 +1,5 @@
 """Tests for permission-aware discovery, backend_action, and E003 checks."""
+
 # pylint: disable=redefined-outer-name
 from __future__ import annotations
 
@@ -234,9 +235,7 @@ class TestListToolsEntryFilter:
             perm_model="prefix",
             perm_drf_action="list",
         )
-        dcim_only = reg.list_tools(
-            entry_filter=lambda e: e.perm_app_label == "dcim"
-        )
+        dcim_only = reg.list_tools(entry_filter=lambda e: e.perm_app_label == "dcim")
         assert len(dcim_only) == 1
         assert dcim_only[0]["name"] == "dcim_device_list"
 
@@ -317,9 +316,7 @@ class TestPermEntryFilter:
             ("unknown_action", "view"),  # unknown → conservative default
         ],
     )
-    def test_drf_action_to_perm_verb_mapping(
-        self, drf_action: str, expected_verb: str
-    ) -> None:
+    def test_drf_action_to_perm_verb_mapping(self, drf_action: str, expected_verb: str) -> None:
         """DRF action names map to the correct Django permission verb."""
         from frisian_mcp.views import _make_perm_entry_filter
 
@@ -533,8 +530,11 @@ class TestGroupDispatcherVisibility:
         from frisian_mcp.registry import tool_registry
 
         for name in (
-            self._CHILD_VIEW, self._CHILD_WRITE, self._GROUP,
-            self._OTHER_CHILD, self._OTHER_GROUP,
+            self._CHILD_VIEW,
+            self._CHILD_WRITE,
+            self._GROUP,
+            self._OTHER_CHILD,
+            self._OTHER_GROUP,
         ):
             tool_registry._tools.pop(name, None)
 
@@ -665,9 +665,9 @@ class TestGroupDispatcherVisibility:
             req = _build_request(perms=set())
             body = self._post_tools_list(req)
             names = [t["name"] for t in body["result"]["tools"]]
-            assert group_name not in names, (
-                "Group should be hidden when user lacks capabilities for perm-aware children"
-            )
+            assert (
+                group_name not in names
+            ), "Group should be hidden when user lacks capabilities for perm-aware children"
 
             # User has the matching permission → group visible.
             req2 = _build_request(perms={"net.view_network"})
@@ -818,6 +818,7 @@ def _make_dispatcher_entry(
 
 def _crud_actions() -> dict[str, ActionEntry]:
     """Return a minimal set of CRUD ActionEntry objects."""
+
     def _m(*_: Any) -> dict:  # noqa: ANN202
         return {}
 
@@ -914,9 +915,7 @@ class TestPermActionFilterFactory:
         factory = _make_perm_action_filter_factory(frozenset({"dcim.view_device"}))
         predicate = factory(entry)
 
-        schema = _build_dispatcher_input_schema(
-            entry.dispatcher_meta, action_filter=predicate
-        )
+        schema = _build_dispatcher_input_schema(entry.dispatcher_meta, action_filter=predicate)
         visible = schema["properties"]["action"]["enum"]
         assert "list" in visible
         assert "retrieve" in visible
@@ -931,18 +930,18 @@ class TestPermActionFilterFactory:
 
         actions = _crud_actions()
         entry = _make_dispatcher_entry("dcim", "device", actions)
-        caps = frozenset({
-            "dcim.view_device",
-            "dcim.add_device",
-            "dcim.change_device",
-            "dcim.delete_device",
-        })
+        caps = frozenset(
+            {
+                "dcim.view_device",
+                "dcim.add_device",
+                "dcim.change_device",
+                "dcim.delete_device",
+            }
+        )
         factory = _make_perm_action_filter_factory(caps)
         predicate = factory(entry)
 
-        schema = _build_dispatcher_input_schema(
-            entry.dispatcher_meta, action_filter=predicate
-        )
+        schema = _build_dispatcher_input_schema(entry.dispatcher_meta, action_filter=predicate)
         visible = set(schema["properties"]["action"]["enum"])
         assert visible == {"list", "retrieve", "create", "update", "destroy"}
 
@@ -956,9 +955,7 @@ class TestPermActionFilterFactory:
         factory = _make_perm_action_filter_factory(frozenset())
         predicate = factory(entry)
 
-        schema = _build_dispatcher_input_schema(
-            entry.dispatcher_meta, action_filter=predicate
-        )
+        schema = _build_dispatcher_input_schema(entry.dispatcher_meta, action_filter=predicate)
         assert schema["properties"]["action"]["enum"] == []
 
     @override_settings(
@@ -1008,9 +1005,7 @@ class TestPermActionFilterFactory:
             entry_filter=lambda _e: True,
             action_filter_factory=lambda e: action_filter_factory(e),
         )
-        dispatcher_tool = next(
-            (t for t in tools if t["name"] == "_paf_test_dispatcher"), None
-        )
+        dispatcher_tool = next((t for t in tools if t["name"] == "_paf_test_dispatcher"), None)
         assert dispatcher_tool is not None
         enum = dispatcher_tool["inputSchema"]["properties"]["action"]["enum"]
         assert "list" in enum
@@ -1204,8 +1199,10 @@ class TestHelpBypassFix:
         reg = ToolRegistry()
         # Use "zone_<action>" so the default "_" separator splits as (resource="zone", action=...).
         for act, drf in [
-            ("list", "list"), ("retrieve", "retrieve"),
-            ("create", "create"), ("destroy", "destroy"),
+            ("list", "list"),
+            ("retrieve", "retrieve"),
+            ("create", "create"),
+            ("destroy", "destroy"),
         ]:
             reg.register(
                 name=f"zone_{act}",
@@ -1242,8 +1239,10 @@ class TestHelpBypassFix:
 
         reg = ToolRegistry()
         for act, drf in [
-            ("list", "list"), ("retrieve", "retrieve"),
-            ("create", "create"), ("destroy", "destroy"),
+            ("list", "list"),
+            ("retrieve", "retrieve"),
+            ("create", "create"),
+            ("destroy", "destroy"),
         ]:
             reg.register(
                 name=f"zone_{act}",
@@ -1507,4 +1506,3 @@ class TestServicePrincipalBypass:
         names = {t["name"] for t in tools}
         assert "device_list" in names
         assert "prefix_list" in names
-
