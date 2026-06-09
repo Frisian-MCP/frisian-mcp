@@ -135,8 +135,8 @@ class OAuthClient(models.Model):
             "Allowed OAuth 2.0 grant types for this client (RFC 7591 §2).  "
             "An empty list means no restriction — all supported grant types "
             "(``client_credentials``, ``authorization_code``) are permitted.  "
-            "Set to ``[\\\"client_credentials\\\"]`` for service-to-service clients "
-            "that should never use the PKCE flow, or ``[\\\"authorization_code\\\"]`` "
+            'Set to ``[\\"client_credentials\\"]`` for service-to-service clients '
+            'that should never use the PKCE flow, or ``[\\"authorization_code\\"]`` '
             "for browser/native clients that should not use client_credentials."
         ),
     )
@@ -165,7 +165,9 @@ class OAuthClient(models.Model):
             self.client_id = secrets.token_hex(16)  # 32 hex chars — public identifier
         if not self.client_secret:
             raw = secrets.token_hex(32)
-            self.plaintext_client_secret: str = raw  # pylint: disable=attribute-defined-outside-init
+            self.plaintext_client_secret: str = (  # pylint: disable=attribute-defined-outside-init
+                raw
+            )
             self.client_secret = _hmac_secret(raw)
         super().save(*args, **kwargs)
 

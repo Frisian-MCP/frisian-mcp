@@ -59,7 +59,7 @@ class ExemptViewPermissionAdapter(DjangoPermissionAdapter):
                 if (meta.app_label, meta.model_name) not in exclude:
                     extra.add(f"{meta.app_label}.view_{meta.model_name}")
         else:
-            for model_label in (exempt or []):
+            for model_label in exempt or []:
                 parts = str(model_label).split(".", 1)
                 if len(parts) == 2:
                     app_label, model_name = parts

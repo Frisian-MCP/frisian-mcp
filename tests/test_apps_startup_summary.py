@@ -115,9 +115,7 @@ def empty_urlconf() -> Generator[str, None, None]:
 
 
 @pytest.fixture()
-def reset_resolver(
-    empty_urlconf: str, settings: Any
-) -> Generator[None, None, None]:
+def reset_resolver(empty_urlconf: str, settings: Any) -> Generator[None, None, None]:
     """
     Point ROOT_URLCONF at the empty fixture and clear the resolver.
 
@@ -166,11 +164,12 @@ class TestStartupSummaryPrint:
         """Even when discovery finds no tools, the summary line is printed."""
         # Patch discovery to return zero tools so we exercise the 0-tool branch
         # without depending on the test URLconf to expose anything.
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends", return_value=[]
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch("frisian_mcp.backends.get_discovery_backends", return_value=[]),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             # PKG-21: discovery is now deferred to the first request.
@@ -208,11 +207,12 @@ class TestStartupSummaryPrint:
             def discover_tools(self) -> list[ToolDefinition]:
                 return [fake_tool]
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch("frisian_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             # PKG-21: discovery is now deferred to the first request.
@@ -235,11 +235,12 @@ class TestStartupSummaryPrint:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """The printed path reflects FRISIAN_MCP_PATH after slash stripping."""
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends", return_value=[]
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch("frisian_mcp.backends.get_discovery_backends", return_value=[]),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             # PKG-21: discovery is now deferred to the first request.
@@ -280,11 +281,12 @@ class TestStartupSummaryLoggerIndependence:
         for handler in original_handlers:
             frisian_logger.removeHandler(handler)
         try:
-            with patch(
-                "frisian_mcp.backends.get_discovery_backends", return_value=[]
-            ), patch(
-                "frisian_mcp.backends.get_invocation_backend",
-                return_value=_StubInvocation(),
+            with (
+                patch("frisian_mcp.backends.get_discovery_backends", return_value=[]),
+                patch(
+                    "frisian_mcp.backends.get_invocation_backend",
+                    return_value=_StubInvocation(),
+                ),
             ):
                 fresh_app_config.ready()
                 # PKG-21: discovery is now deferred to the first request.
@@ -351,11 +353,12 @@ class TestDispatchGroupSummary:
         # _install_dispatch_groups reads from frisian_mcp.registry.tool_registry,
         # so the isolated_registry fixture (which patches that name) is what
         # the dispatcher will inspect after ready() registers the flat tools.
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch("frisian_mcp.backends.get_discovery_backends", return_value=[_StubBackend()]),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             # PKG-21: discovery is now deferred to the first request.
@@ -380,11 +383,12 @@ class TestDispatchGroupSummary:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Without FRISIAN_MCP_DISPATCH_GROUPS no group summary line is emitted."""
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends", return_value=[]
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend",
-            return_value=_StubInvocation(),
+        with (
+            patch("frisian_mcp.backends.get_discovery_backends", return_value=[]),
+            patch(
+                "frisian_mcp.backends.get_invocation_backend",
+                return_value=_StubInvocation(),
+            ),
         ):
             fresh_app_config.ready()
             # PKG-21: discovery is now deferred to the first request.

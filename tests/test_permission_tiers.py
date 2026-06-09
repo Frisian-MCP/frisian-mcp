@@ -667,9 +667,7 @@ class TestDispatcherHelpResponseTierFiltering:
                     return {}
 
                 @mcp_action("delete_all", description="Delete all.", admin=True)
-                def delete_all(
-                    self, request: Any, params: dict[str, Any]
-                ) -> dict[str, Any]:
+                def delete_all(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
                     return {}
 
         return reg
@@ -733,9 +731,7 @@ class TestDispatcherHelpResponseTierFiltering:
                     description="Read status.",
                     params={"id": "Resource id."},
                 )
-                def status(
-                    self, request: Any, _params: dict[str, Any]
-                ) -> dict[str, Any]:
+                def status(self, request: Any, _params: dict[str, Any]) -> dict[str, Any]:
                     """Read-tier action; body is irrelevant for this test."""
                     return {}
 
@@ -745,9 +741,7 @@ class TestDispatcherHelpResponseTierFiltering:
                     params={"target": "Annihilate this resource."},
                     write=True,
                 )
-                def annihilate(
-                    self, request: Any, _params: dict[str, Any]
-                ) -> dict[str, Any]:
+                def annihilate(self, request: Any, _params: dict[str, Any]) -> dict[str, Any]:
                     """Write-tier action; must be filtered out for read callers."""
                     return {}
 
@@ -757,9 +751,7 @@ class TestDispatcherHelpResponseTierFiltering:
                     params={"user": "Grant godmode to user."},
                     admin=True,
                 )
-                def godmode(
-                    self, request: Any, _params: dict[str, Any]
-                ) -> dict[str, Any]:
+                def godmode(self, request: Any, _params: dict[str, Any]) -> dict[str, Any]:
                     """Admin-tier action; must be filtered out for read callers."""
                     return {}
 
@@ -787,16 +779,12 @@ class TestDispatcherHelpResponseTierFiltering:
             @mcp_dispatcher("svc", description="Service operations.")
             class _Svc:  # pylint: disable=unused-variable
                 @mcp_action("ping", description="Ping.")
-                def ping(
-                    self, request: Any, _params: dict[str, Any]
-                ) -> dict[str, Any]:
+                def ping(self, request: Any, _params: dict[str, Any]) -> dict[str, Any]:
                     """Read-tier action used to prove the dispatcher is built."""
                     return {}
 
                 @mcp_action("destroy", description="Destroy.", admin=True)
-                def destroy(
-                    self, request: Any, _params: dict[str, Any]
-                ) -> dict[str, Any]:
+                def destroy(self, request: Any, _params: dict[str, Any]) -> dict[str, Any]:
                     """Admin-tier action whose name must not leak into schema text."""
                     return {}
 

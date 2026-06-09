@@ -285,8 +285,8 @@ class TestHmacKeySwitch:
         raw2 = t2.plaintext_token
 
         # Same raw value → different HMAC because the key changed
-        from frisian_mcp.contrib.tokens.models import (
-            _hmac_token,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.tokens.models import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+            _hmac_token,
         )
 
         settings.FRISIAN_MCP_HMAC_KEY = ""
@@ -299,9 +299,7 @@ class TestHmacKeySwitch:
         settings.FRISIAN_MCP_HMAC_KEY = "dedicated-hmac-secret"
         assert _hmac_token(raw2) == t2.token
 
-    def test_auth_uses_hmac_key_at_lookup_time(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_auth_uses_hmac_key_at_lookup_time(self, rf: RequestFactory, settings: Any) -> None:
         """Authentication reads the token HMAC using the current FRISIAN_MCP_HMAC_KEY."""
         settings.FRISIAN_MCP_HMAC_KEY = "my-dedicated-key"
         token = FrisianMcpToken.objects.create(name="hmac-auth-test")

@@ -129,9 +129,7 @@ class TestGetDiscoveryBackendsPlural:
         settings.FRISIAN_MCP_DISCOVERY_BACKENDS = [
             "tests.test_discovery_backends._AlphaBackend",
         ]
-        settings.FRISIAN_MCP_DISCOVERY_BACKEND = (
-            "tests.test_discovery_backends._BetaBackend"
-        )
+        settings.FRISIAN_MCP_DISCOVERY_BACKEND = "tests.test_discovery_backends._BetaBackend"
         result = get_discovery_backends()
         assert len(result) == 1
         assert isinstance(result[0], _AlphaBackend)
@@ -155,9 +153,7 @@ class TestGetDiscoveryBackendsSingularLegacy:
         """Singular setting produces a single-element list."""
         if hasattr(settings, "FRISIAN_MCP_DISCOVERY_BACKENDS"):
             delattr(settings, "FRISIAN_MCP_DISCOVERY_BACKENDS")
-        settings.FRISIAN_MCP_DISCOVERY_BACKEND = (
-            "tests.test_discovery_backends._AlphaBackend"
-        )
+        settings.FRISIAN_MCP_DISCOVERY_BACKEND = "tests.test_discovery_backends._AlphaBackend"
         result = get_discovery_backends()
         assert len(result) == 1
         assert isinstance(result[0], _AlphaBackend)
@@ -166,9 +162,7 @@ class TestGetDiscoveryBackendsSingularLegacy:
         """The singular get_discovery_backend() function still returns a single backend."""
         if hasattr(settings, "FRISIAN_MCP_DISCOVERY_BACKENDS"):
             delattr(settings, "FRISIAN_MCP_DISCOVERY_BACKENDS")
-        settings.FRISIAN_MCP_DISCOVERY_BACKEND = (
-            "tests.test_discovery_backends._AlphaBackend"
-        )
+        settings.FRISIAN_MCP_DISCOVERY_BACKEND = "tests.test_discovery_backends._AlphaBackend"
         result = get_discovery_backend()
         assert isinstance(result, _AlphaBackend)
 

@@ -37,9 +37,7 @@ def _jsonrpc(method: str, params: dict[str, Any] | None = None) -> dict[str, Any
     return msg
 
 
-def _build_call_tool_request(
-    rf: RequestFactory, name: str, arguments: dict[str, Any]
-) -> Any:
+def _build_call_tool_request(rf: RequestFactory, name: str, arguments: dict[str, Any]) -> Any:
     """
     Build the same request that ``_call_tool`` would dispatch — but without firing the view.
 
@@ -305,10 +303,8 @@ class TestServeHeavyMode:
         assert served["page_size"] == 50
         assert len(served["items"]) == 50
 
-    def test_paginated_page_size_cap_defaults_to_heavy_page_size(
-        self, settings: Any
-    ) -> None:
-        """When FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE is absent, cap defaults to FRISIAN_MCP_HEAVY_PAGE_SIZE."""
+    def test_paginated_page_size_cap_defaults_to_heavy_page_size(self, settings: Any) -> None:
+        """When MAX_PAGE_SIZE is absent, the cap defaults to FRISIAN_MCP_HEAVY_PAGE_SIZE."""
         settings.FRISIAN_MCP_HEAVY_PAGE_SIZE = 10
         if hasattr(settings, "FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE"):
             del settings.FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE
@@ -365,8 +361,9 @@ class TestMcpHeavyIntegration:
     def test_call1_returns_probe_envelope(self, rf: RequestFactory) -> None:
         """Call 1 (no continuation_token) returns a probe envelope."""
         isolated = ToolRegistry()
-        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
-            "frisian_mcp.views.tool_registry", isolated
+        with (
+            patch("frisian_mcp.decorators.tool_registry", isolated),
+            patch("frisian_mcp.views.tool_registry", isolated),
         ):
 
             @mcp_heavy(
@@ -397,8 +394,9 @@ class TestMcpHeavyIntegration:
         token = "testtoken123"
 
         isolated = ToolRegistry()
-        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
-            "frisian_mcp.views.tool_registry", isolated
+        with (
+            patch("frisian_mcp.decorators.tool_registry", isolated),
+            patch("frisian_mcp.views.tool_registry", isolated),
         ):
 
             @mcp_heavy(
@@ -439,8 +437,9 @@ class TestMcpHeavyIntegration:
         token = "sumtoken"
 
         isolated = ToolRegistry()
-        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
-            "frisian_mcp.views.tool_registry", isolated
+        with (
+            patch("frisian_mcp.decorators.tool_registry", isolated),
+            patch("frisian_mcp.views.tool_registry", isolated),
         ):
 
             @mcp_heavy(
@@ -472,8 +471,9 @@ class TestMcpHeavyIntegration:
     def test_expired_token_returns_error(self, rf: RequestFactory) -> None:
         """An expired or unknown continuation_token returns isError=True."""
         isolated = ToolRegistry()
-        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
-            "frisian_mcp.views.tool_registry", isolated
+        with (
+            patch("frisian_mcp.decorators.tool_registry", isolated),
+            patch("frisian_mcp.views.tool_registry", isolated),
         ):
 
             @mcp_heavy(
@@ -501,8 +501,9 @@ class TestMcpHeavyIntegration:
         from frisian_mcp.decorators import mcp_tool
 
         isolated = ToolRegistry()
-        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
-            "frisian_mcp.views.tool_registry", isolated
+        with (
+            patch("frisian_mcp.decorators.tool_registry", isolated),
+            patch("frisian_mcp.views.tool_registry", isolated),
         ):
 
             @mcp_tool(
@@ -527,8 +528,9 @@ class TestMcpHeavyIntegration:
         from frisian_mcp.decorators import mcp_tool
 
         isolated = ToolRegistry()
-        with patch("frisian_mcp.decorators.tool_registry", isolated), patch(
-            "frisian_mcp.views.tool_registry", isolated
+        with (
+            patch("frisian_mcp.decorators.tool_registry", isolated),
+            patch("frisian_mcp.views.tool_registry", isolated),
         ):
 
             @mcp_tool(
@@ -583,9 +585,10 @@ class TestHeavyContinuationOwnerBinding:
         payload = {"big": list(range(20))}
         reg = self._isolated_registry_with_heavy("sec3.heavy1", payload)
 
-        with patch("frisian_mcp.views.tool_registry", reg), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = None
             _call_tool(rf, "sec3.heavy1", {})
 
@@ -595,9 +598,7 @@ class TestHeavyContinuationOwnerBinding:
         assert written["result"] == payload
         assert written["tool_name"] == "sec3.heavy1"
         # The owner key matches the canonical helper for the same request shape.
-        expected = _heavy_owner_key(
-            _build_call_tool_request(rf, "sec3.heavy1", {}), "sec3.heavy1"
-        )
+        expected = _heavy_owner_key(_build_call_tool_request(rf, "sec3.heavy1", {}), "sec3.heavy1")
         assert written["owner_key"] == expected
 
     def test_call2_owner_mismatch_returns_is_error(self, rf: RequestFactory) -> None:
@@ -609,9 +610,10 @@ class TestHeavyContinuationOwnerBinding:
         """
         reg = self._isolated_registry_with_heavy("sec3.heavy2", {"x": 1})
 
-        with patch("frisian_mcp.views.tool_registry", reg), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = {
                 "result": {"x": 1},
                 # Deliberately-foreign owner — different tier.
@@ -628,9 +630,7 @@ class TestHeavyContinuationOwnerBinding:
         assert "error" in result
         assert "does not belong to this caller" in result["error"]
 
-    def test_call2_tool_name_mismatch_returns_is_error(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_call2_tool_name_mismatch_returns_is_error(self, rf: RequestFactory) -> None:
         """
         A token issued for tool A cannot be replayed against tool B.
 
@@ -670,9 +670,10 @@ class TestHeavyContinuationOwnerBinding:
             _build_call_tool_request(rf, "sec3.heavy3", {}), "sec3.heavy3"
         )
 
-        with patch("frisian_mcp.views.tool_registry", reg), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = {
                 "result": {"sensitive": "data"},
                 "owner_key": owner_for_heavy3,
@@ -689,9 +690,7 @@ class TestHeavyContinuationOwnerBinding:
         assert "error" in result
         assert "does not belong to this caller" in result["error"]
 
-    def test_call2_legacy_raw_entry_treated_as_expired(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_call2_legacy_raw_entry_treated_as_expired(self, rf: RequestFactory) -> None:
         """
         A pre-fix raw cache entry (no owner_key) is treated as expired.
 
@@ -702,9 +701,10 @@ class TestHeavyContinuationOwnerBinding:
         """
         reg = self._isolated_registry_with_heavy("sec3.heavy4", {"legacy": True})
 
-        with patch("frisian_mcp.views.tool_registry", reg), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             # Legacy shape: raw result, no wrapper.
             mock_cache.get.return_value = {"legacy": True}
             response = _call_tool(
@@ -717,22 +717,19 @@ class TestHeavyContinuationOwnerBinding:
         assert "error" in result
         assert "expired or not found" in result["error"]
 
-    def test_call2_owner_match_serves_cached_result(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_call2_owner_match_serves_cached_result(self, rf: RequestFactory) -> None:
         """The happy path: matching owner_key → cached result is served."""
         from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
         reg = self._isolated_registry_with_heavy("sec3.heavy5", {"ok": True})
-        owner = _heavy_owner_key(
-            _build_call_tool_request(rf, "sec3.heavy5", {}), "sec3.heavy5"
-        )
+        owner = _heavy_owner_key(_build_call_tool_request(rf, "sec3.heavy5", {}), "sec3.heavy5")
 
-        with patch("frisian_mcp.views.tool_registry", reg), patch(
-            "frisian_mcp.views.django_cache"
-        ) as mock_cache:
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
             mock_cache.get.return_value = {
                 "result": {"ok": True},
                 "owner_key": owner,

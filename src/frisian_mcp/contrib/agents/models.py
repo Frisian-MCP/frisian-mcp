@@ -62,6 +62,7 @@ def validate_tool_name_list(value: Any) -> None:
                 params={"i": i},
             )
 
+
 AGENT_TYPE_CHOICES: list[tuple[str, str]] = [
     ("claude-code", "Claude Code"),
     ("cursor", "Cursor"),
@@ -98,8 +99,7 @@ class AgentConnection(models.Model):
     name = models.CharField(
         max_length=200,
         help_text=(
-            "Human-readable label for this agent connection "
-            "(e.g. 'Claude Code — production')."
+            "Human-readable label for this agent connection " "(e.g. 'Claude Code — production')."
         ),
     )
     agent_type = models.CharField(
@@ -120,7 +120,7 @@ class AgentConnection(models.Model):
         blank=True,
         validators=[validate_tool_name_list],
         help_text=(
-            'Optional JSON array of tool names this agent may see and call '
+            "Optional JSON array of tool names this agent may see and call "
             '(e.g. ["users.list", "items.create"]). '
             "Leave blank to allow all registered tools."
         ),
@@ -143,8 +143,7 @@ class AgentConnection(models.Model):
         on_delete=models.SET_NULL,
         related_name="agent_connections",
         help_text=(
-            "OAuth 2.0 client credential for this agent. "
-            "Set either this or token — not both."
+            "OAuth 2.0 client credential for this agent. " "Set either this or token — not both."
         ),
     )
     last_seen_at = models.DateTimeField(

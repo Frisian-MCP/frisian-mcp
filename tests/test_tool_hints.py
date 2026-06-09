@@ -26,7 +26,9 @@ from frisian_mcp.registry import ToolRegistry
 def _stub_tool(value: str) -> Any:
     """Return a callable that echoes its tag."""
 
-    def _fn(arguments: dict[str, Any], request: Any) -> dict[str, Any]:  # pylint: disable=unused-argument
+    def _fn(
+        arguments: dict[str, Any], request: Any
+    ) -> dict[str, Any]:  # pylint: disable=unused-argument
         return {"called": value}
 
     return _fn

@@ -45,9 +45,10 @@ def _suppress_dispatcher_shadowed(
     for tool_def in tool_defs:
         matched: str | None = None
         for dname in dispatcher_names:
-            if tool_def.name == dname or tool_def.name.startswith(f"{dname}{sep}") or (
-                dname.endswith("s")
-                and tool_def.name.startswith(f"{dname[:-1]}{sep}")
+            if (
+                tool_def.name == dname
+                or tool_def.name.startswith(f"{dname}{sep}")
+                or (dname.endswith("s") and tool_def.name.startswith(f"{dname[:-1]}{sep}"))
             ):
                 matched = dname
                 break
@@ -245,10 +246,7 @@ def _install_extra_mcp_paths() -> int:
     injected = 0
     for raw_path in extra_paths:
         clean = raw_path.strip("/")
-        already = any(
-            getattr(p, _MCP_EXTRA_URL_ATTR, None) == clean
-            for p in resolver.url_patterns
-        )
+        already = any(getattr(p, _MCP_EXTRA_URL_ATTR, None) == clean for p in resolver.url_patterns)
         if already:
             continue
         pattern = re.escape(clean)
@@ -439,8 +437,7 @@ def _install_healthcheck_urls() -> int:
         clean = raw_path.strip("/")
         # Skip if already injected in a prior call.
         already = any(
-            getattr(p, _HEALTHCHECK_AUTO_URL_ATTR, None) == clean
-            for p in resolver.url_patterns
+            getattr(p, _HEALTHCHECK_AUTO_URL_ATTR, None) == clean for p in resolver.url_patterns
         )
         if already:
             continue
@@ -465,9 +462,7 @@ def _install_healthcheck_urls() -> int:
 _API_PATH_SEGMENT_RE = re.compile(r"(^|/)api/")
 
 
-def _prefer_api_tool(
-    existing: ToolDefinition | None, candidate: ToolDefinition
-) -> ToolDefinition:
+def _prefer_api_tool(existing: ToolDefinition | None, candidate: ToolDefinition) -> ToolDefinition:
     """
     Resolve a basename collision between two discovered ToolDefinitions.
 
@@ -499,9 +494,7 @@ def _prefer_api_tool(
     return existing
 
 
-def _find_group_members(
-    all_names: list[str], prefix_set: frozenset[str], sep: str
-) -> set[str]:
+def _find_group_members(all_names: list[str], prefix_set: frozenset[str], sep: str) -> set[str]:
     """Return the subset of *all_names* whose resource prefix is in *prefix_set*."""
     members: set[str] = set()
     for tool_name in all_names:
@@ -533,9 +526,7 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
         tool counted once even if matched by multiple groups).
 
     """
-    groups: dict[str, list[str]] | None = getattr(
-        settings, "FRISIAN_MCP_DISPATCH_GROUPS", None
-    )
+    groups: dict[str, list[str]] | None = getattr(settings, "FRISIAN_MCP_DISPATCH_GROUPS", None)
     if not groups:
         return 0, 0
 
@@ -568,7 +559,8 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
             for prefix in sorted(prefix_set):
                 norm = sep_re.sub("", prefix).lower()
                 similar = [
-                    r for r in registered_resources
+                    r
+                    for r in registered_resources
                     if sep_re.sub("", r).lower().startswith(norm[:5])
                 ][:4]
                 if similar:
@@ -846,9 +838,7 @@ class FrisianMcpConfig(AppConfig):
         merged: dict[str, Any] = {}
         for discovery in get_discovery_backends():
             for tool_def in _apply_tool_filters(discovery.discover_tools()):
-                merged[tool_def.name] = _prefer_api_tool(
-                    merged.get(tool_def.name), tool_def
-                )
+                merged[tool_def.name] = _prefer_api_tool(merged.get(tool_def.name), tool_def)
 
         tool_defs = _suppress_dispatcher_shadowed(list(merged.values()), dispatcher_names)
 
@@ -902,8 +892,7 @@ class FrisianMcpConfig(AppConfig):
         group_count, bundled_count = _install_dispatch_groups()
         if group_count and startup_print:
             print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
-                f"[frisian-mcp] {group_count} dispatch group(s) bundling "
-                f"{bundled_count} tools",
+                f"[frisian-mcp] {group_count} dispatch group(s) bundling " f"{bundled_count} tools",
                 flush=True,
             )
 

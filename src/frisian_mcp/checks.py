@@ -56,8 +56,8 @@ import re
 from typing import Any
 
 from django.conf import settings
-from django.core.checks import (  # noqa: A004 — Django's Warning, not builtins  # pylint: disable=redefined-builtin
-    Error,  # noqa: A004
+from django.core.checks import (  # pylint: disable=redefined-builtin
+    Error,
     Tags,
     Warning,
     register,

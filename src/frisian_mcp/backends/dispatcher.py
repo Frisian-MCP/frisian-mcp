@@ -1,4 +1,5 @@
 """Runtime support for @mcp_dispatcher class-based tool dispatchers."""
+
 # pylint: disable=cyclic-import
 
 from __future__ import annotations
@@ -71,11 +72,7 @@ def _visible_actions(
         }
     if action_filter is None:
         return candidates
-    return {
-        name: entry
-        for name, entry in candidates.items()
-        if action_filter(name, entry)
-    }
+    return {name: entry for name, entry in candidates.items() if action_filter(name, entry)}
 
 
 def _build_dispatcher_input_schema(
@@ -170,10 +167,10 @@ def _resolve_request_tier(request: HttpRequest) -> str:
     # ToolRegistry.list_tools() to avoid a hard cycle, so reaching the other
     # direction at module load would create one.  Resolving here at call time
     # is cheap and keeps both modules importable in any order.
-    from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
-        _resolve_request_tier as _registry_resolve,
-    )
+    # pylint: disable=import-outside-toplevel
+    from frisian_mcp.registry import _resolve_request_tier as _registry_resolve
 
+    # pylint: enable=import-outside-toplevel
     return _registry_resolve(request)
 
 
@@ -213,9 +210,7 @@ def _build_perm_action_filter_from_request(
     return action_filter
 
 
-def _make_dispatcher_invoke(
-    cls: type, meta: DispatcherMeta
-) -> Callable[..., dict[str, Any]]:
+def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., dict[str, Any]]:
     """Build the invoke callable for *cls*, closing over *meta*."""
     instance = cls()
     action_map = meta.actions

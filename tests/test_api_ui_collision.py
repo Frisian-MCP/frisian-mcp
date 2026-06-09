@@ -220,10 +220,9 @@ class TestDiscoveryMergeApiPreference:
         # UI tool first in the backend's returned order.
         backend = _StubBackend([ui_tool, api_tool])
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends", return_value=[backend]
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend", return_value=_StubInvocation()
+        with (
+            patch("frisian_mcp.backends.get_discovery_backends", return_value=[backend]),
+            patch("frisian_mcp.backends.get_invocation_backend", return_value=_StubInvocation()),
         ):
             fresh_app_config.ready()
             fresh_app_config._run_deferred_discovery()
@@ -269,10 +268,9 @@ class TestDiscoveryMergeApiPreference:
         # API tool first this time.
         backend = _StubBackend([api_tool, ui_tool])
 
-        with patch(
-            "frisian_mcp.backends.get_discovery_backends", return_value=[backend]
-        ), patch(
-            "frisian_mcp.backends.get_invocation_backend", return_value=_StubInvocation()
+        with (
+            patch("frisian_mcp.backends.get_discovery_backends", return_value=[backend]),
+            patch("frisian_mcp.backends.get_invocation_backend", return_value=_StubInvocation()),
         ):
             fresh_app_config.ready()
             fresh_app_config._run_deferred_discovery()
@@ -323,12 +321,12 @@ class TestUrlPathPopulated:
         tools = DRFSyncDiscovery().discover_tools()
         assert tools, "expected at least one discovered tool"
         for t in tools:
-            assert "^" not in t.url_path, (
-                f"tool {t.name!r} url_path {t.url_path!r} contains a '^' anchor"
-            )
-            assert "$" not in t.url_path, (
-                f"tool {t.name!r} url_path {t.url_path!r} contains a '$' anchor"
-            )
+            assert (
+                "^" not in t.url_path
+            ), f"tool {t.name!r} url_path {t.url_path!r} contains a '^' anchor"
+            assert (
+                "$" not in t.url_path
+            ), f"tool {t.name!r} url_path {t.url_path!r} contains a '$' anchor"
 
     def test_anchor_strip_preserves_api_segment_match(self) -> None:
         """

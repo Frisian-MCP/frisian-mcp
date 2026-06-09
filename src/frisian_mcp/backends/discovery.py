@@ -27,14 +27,16 @@ from rest_framework.serializers import ListSerializer
 from rest_framework.viewsets import ViewSetMixin
 
 try:
-    from django_filters.rest_framework import (  # pylint: disable=import-error
-        DjangoFilterBackend as _DjangoFilterBackend,
+    from django_filters.rest_framework import (
+        DjangoFilterBackend as _DjangoFilterBackend,  # pylint: disable=import-error
     )
 except ImportError:
     _DjangoFilterBackend = None
 
 try:
-    from rest_framework.renderers import JSONRenderer as _JSONRenderer  # noqa: I001  # pylint: disable=ungrouped-imports
+    from rest_framework.renderers import (  # noqa: I001  # pylint: disable=ungrouped-imports
+        JSONRenderer as _JSONRenderer,
+    )
 except ImportError:  # pragma: no cover
     _JSONRenderer = None  # type: ignore[assignment,misc]
 
@@ -114,12 +116,11 @@ def _tool_name_separator() -> str:
     """Return the configured tool name separator (default ``'_'``)."""
     return getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
 
+
 # URL path segments that represent API versioning or routing prefixes rather than resource names.
 # _resource_from_path skips these when searching for the resource name from the right.
 # Override via FRISIAN_MCP_VERSION_SEGMENTS (list) or FRISIAN_MCP_VERSION_SEGMENT_PATTERN (regex).
-_DEFAULT_VERSION_SEGMENTS: frozenset[str] = frozenset(
-    {"api", "rest", "v1", "v2", "v3", "v4", "v5"}
-)
+_DEFAULT_VERSION_SEGMENTS: frozenset[str] = frozenset({"api", "rest", "v1", "v2", "v3", "v4", "v5"})
 
 
 def _is_version_segment(segment: str) -> bool:
@@ -150,6 +151,7 @@ def _is_version_segment(segment: str) -> bool:
     if custom is not None:
         return segment in frozenset(custom)
     return segment in _DEFAULT_VERSION_SEGMENTS
+
 
 # Actions that do not require request body data (read-only actions).
 _READ_ONLY_ACTIONS: frozenset[str] = frozenset({"list", "retrieve"})
@@ -338,8 +340,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             explicit_renderers: list[type] | None = getattr(cls, "renderer_classes", None)
             if explicit_renderers:
                 has_json = any(
-                    isinstance(r, type) and issubclass(r, _JSONRenderer)
-                    for r in explicit_renderers
+                    isinstance(r, type) and issubclass(r, _JSONRenderer) for r in explicit_renderers
                 )
                 if not has_json:
                     logger.debug(
@@ -634,11 +635,8 @@ def _schema_from_filter_backends(view_class: type) -> dict[str, Any]:
                     prop["enum"] = variants
                 properties["ordering"] = prop
             elif (
-                _DjangoFilterBackend is not None
-                and issubclass(backend_class, _DjangoFilterBackend)
-            ) or (
-                _DjangoFilterBackend is None and name == "DjangoFilterBackend"
-            ):
+                _DjangoFilterBackend is not None and issubclass(backend_class, _DjangoFilterBackend)
+            ) or (_DjangoFilterBackend is None and name == "DjangoFilterBackend"):
                 properties.update(_filterset_properties(view_class))
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning(
@@ -793,9 +791,7 @@ def _action_description(view_class: type, action: str, resource: str | None = No
     # class name.  Guard against an empty result (e.g. a class named "ViewSet")
     # by falling back to the full class name.
     if resource is None:
-        resource = (
-            view_class.__name__.replace("ViewSet", "") or view_class.__name__
-        )
+        resource = view_class.__name__.replace("ViewSet", "") or view_class.__name__
     action_labels: dict[str, str] = {
         "list": f"List {resource} objects",
         "retrieve": f"Retrieve a {resource} object by ID",
@@ -929,10 +925,7 @@ def _infer_required(field: Any, field_name: str) -> bool:
     source = getattr(field, "source", None) or field_name
     try:
         model_field = model._meta.get_field(source)  # pylint: disable=protected-access
-        return (
-            not getattr(model_field, "null", True)
-            and not model_field.has_default()
-        )
+        return not getattr(model_field, "null", True) and not model_field.has_default()
     except Exception:  # pylint: disable=broad-exception-caught
         return False
 

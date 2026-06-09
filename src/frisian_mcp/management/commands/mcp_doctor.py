@@ -147,12 +147,8 @@ class Command(BaseCommand):
 
     def _check_auth_wiring(self, warnings: list[str]) -> None:
         """Check authentication and permission class wiring."""
-        auth_classes: list[str] = list(
-            getattr(settings, "FRISIAN_MCP_AUTHENTICATION_CLASSES", [])
-        )
-        perm_classes: list[str] = list(
-            getattr(settings, "FRISIAN_MCP_PERMISSION_CLASSES", [])
-        )
+        auth_classes: list[str] = list(getattr(settings, "FRISIAN_MCP_AUTHENTICATION_CLASSES", []))
+        perm_classes: list[str] = list(getattr(settings, "FRISIAN_MCP_PERMISSION_CLASSES", []))
 
         tokens_installed = "frisian_mcp.contrib.tokens" in getattr(settings, "INSTALLED_APPS", [])
         oauth_installed = "frisian_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
@@ -181,9 +177,7 @@ class Command(BaseCommand):
             self._ok("OAuthTokenAuthentication wired in FRISIAN_MCP_AUTHENTICATION_CLASSES")
 
         if not auth_classes and not perm_classes:
-            self._ok(
-                "Auth classes empty — gateway is open (intentional for demo/internal use)"
-            )
+            self._ok("Auth classes empty — gateway is open (intentional for demo/internal use)")
 
     def _check_security_settings(self, warnings: list[str]) -> None:
         """Check security-relevant settings."""
@@ -399,8 +393,7 @@ class Command(BaseCommand):
         service_user: str | None = getattr(settings, "FRISIAN_MCP_SERVICE_ACCOUNT_USER", None)
         if not service_user:
             self._ok(
-                "FRISIAN_MCP_SERVICE_ACCOUNT_USER not set"
-                " — anonymous callers use AnonymousUser"
+                "FRISIAN_MCP_SERVICE_ACCOUNT_USER not set — anonymous callers use AnonymousUser"
             )
             return
 

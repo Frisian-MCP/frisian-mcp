@@ -35,7 +35,9 @@ def _make_request(user: Any = None, auth: Any = None) -> Any:
         pass
 
     req = _Req()
-    req.user = user if user is not None else AnonymousUser()  # pylint: disable=attribute-defined-outside-init
+    req.user = (
+        user if user is not None else AnonymousUser()
+    )  # pylint: disable=attribute-defined-outside-init
     req.auth = auth  # pylint: disable=attribute-defined-outside-init
     return req
 

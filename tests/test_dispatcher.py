@@ -49,7 +49,9 @@ def isolated_registry() -> ToolRegistry:
                 return {"created": params.get("title")}
 
             @mcp_action("list", description="List tasks.", params={})
-            def list(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+            def list(
+                self, request: Any, params: dict[str, Any]
+            ) -> dict[str, Any]:  # pylint: disable=unused-argument
                 """List all tasks."""
                 return {"tasks": []}
 
@@ -113,9 +115,7 @@ class TestDispatcherRegistration:
 class TestDispatcherHelpMode:
     """Tests that help mode returns the expected structured response."""
 
-    def test_help_mode_no_action(
-        self, isolated_registry: ToolRegistry, rf: RequestFactory
-    ) -> None:
+    def test_help_mode_no_action(self, isolated_registry: ToolRegistry, rf: RequestFactory) -> None:
         """Calling invoke with action=None returns help:True response."""
         entry = isolated_registry.get_entry("tasks")
         assert entry is not None
@@ -167,9 +167,7 @@ class TestDispatcherHelpMode:
 class TestDispatcherKnownAction:
     """Tests that known actions are dispatched correctly."""
 
-    def test_create_action(
-        self, isolated_registry: ToolRegistry, rf: RequestFactory
-    ) -> None:
+    def test_create_action(self, isolated_registry: ToolRegistry, rf: RequestFactory) -> None:
         """action='create' with valid params returns {'created': 'My Task'}."""
         entry = isolated_registry.get_entry("tasks")
         assert entry is not None
@@ -177,9 +175,7 @@ class TestDispatcherKnownAction:
         result = entry.fn({"action": "create", "params": {"title": "My Task"}}, request)
         assert result == {"created": "My Task"}
 
-    def test_list_action(
-        self, isolated_registry: ToolRegistry, rf: RequestFactory
-    ) -> None:
+    def test_list_action(self, isolated_registry: ToolRegistry, rf: RequestFactory) -> None:
         """action='list' with empty params returns {'tasks': []}."""
         entry = isolated_registry.get_entry("tasks")
         assert entry is not None
@@ -187,9 +183,7 @@ class TestDispatcherKnownAction:
         result = entry.fn({"action": "list", "params": {}}, request)
         assert result == {"tasks": []}
 
-    def test_delete_action(
-        self, isolated_registry: ToolRegistry, rf: RequestFactory
-    ) -> None:
+    def test_delete_action(self, isolated_registry: ToolRegistry, rf: RequestFactory) -> None:
         """action='delete' with id param returns {'deleted': '42'}."""
         entry = isolated_registry.get_entry("tasks")
         assert entry is not None
@@ -211,7 +205,9 @@ class TestDispatcherKnownAction:
                 """Probe dispatcher for request pass-through testing."""
 
                 @mcp_action("check", description="Capture request.")
-                def check(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                def check(
+                    self, request: Any, params: dict[str, Any]
+                ) -> dict[str, Any]:  # pylint: disable=unused-argument
                     """Capture request."""
                     received.append(request)
                     return {}
@@ -319,7 +315,9 @@ class TestDispatcherCoexistence:
         with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="plain.tool", description="A plain tool.", input_schema={})
-            def _plain_tool(arguments: dict[str, Any], request: Any) -> dict[str, Any]:  # pylint: disable=unused-argument
+            def _plain_tool(
+                arguments: dict[str, Any], request: Any
+            ) -> dict[str, Any]:  # pylint: disable=unused-argument
                 """Plain tool function."""
                 return {}
 
@@ -328,7 +326,9 @@ class TestDispatcherCoexistence:
                 """Combo dispatcher for coexistence testing."""
 
                 @mcp_action("ping", description="Ping.")
-                def ping(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                def ping(
+                    self, request: Any, params: dict[str, Any]
+                ) -> dict[str, Any]:  # pylint: disable=unused-argument
                     """Ping action."""
                     return {"pong": True}
 
@@ -347,7 +347,9 @@ class TestDispatcherCoexistence:
         with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(name="flag.tool", description="Flag test.", input_schema={})
-            def _flag_tool(arguments: dict[str, Any], request: Any) -> dict[str, Any]:  # pylint: disable=unused-argument
+            def _flag_tool(
+                arguments: dict[str, Any], request: Any
+            ) -> dict[str, Any]:  # pylint: disable=unused-argument
                 """Flag tool."""
                 return {}
 
@@ -403,9 +405,7 @@ class TestDispatcherHelpModeViaRegistry:
         action_names = {a["name"] for a in result["actions"]}
         assert action_names == {"create", "list", "delete"}
 
-    def test_help_action_on_plain_mcp_tool_still_raises(
-        self, rf: RequestFactory
-    ) -> None:
+    def test_help_action_on_plain_mcp_tool_still_raises(self, rf: RequestFactory) -> None:
         """action='help' on a regular @mcp_tool with an enum schema still raises ToolInputError."""
         reg = ToolRegistry()
         schema_with_enum = {
@@ -413,7 +413,9 @@ class TestDispatcherHelpModeViaRegistry:
             "properties": {"action": {"type": "string", "enum": ["go"]}},
         }
 
-        def _plain(arguments: Any, request: Any) -> dict[str, Any]:  # pylint: disable=unused-argument
+        def _plain(
+            arguments: Any, request: Any
+        ) -> dict[str, Any]:  # pylint: disable=unused-argument
             return {}
 
         reg.register(
@@ -463,7 +465,9 @@ class TestDispatcherPermissionClasses:
                 """Open dispatcher."""
 
                 @mcp_action("ping", description="Ping.")
-                def ping(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                def ping(
+                    self, request: Any, params: dict[str, Any]
+                ) -> dict[str, Any]:  # pylint: disable=unused-argument
                     """Ping action."""
                     return {"ok": True}
 
@@ -491,7 +495,9 @@ class TestDispatcherPermissionClasses:
                 """Guarded dispatcher."""
 
                 @mcp_action("ping", description="Ping.")
-                def ping(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                def ping(
+                    self, request: Any, params: dict[str, Any]
+                ) -> dict[str, Any]:  # pylint: disable=unused-argument
                     """Ping action."""
                     return {}
 
@@ -519,7 +525,9 @@ class TestDispatcherPermissionClasses:
                 """Secured dispatcher."""
 
                 @mcp_action("go", description="Go.")
-                def go(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:  # pylint: disable=unused-argument
+                def go(
+                    self, request: Any, params: dict[str, Any]
+                ) -> dict[str, Any]:  # pylint: disable=unused-argument
                     """Go action."""
                     return {}
 

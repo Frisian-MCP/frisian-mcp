@@ -51,9 +51,7 @@ class TestProductionMisconfiguration:
         assert warnings[0].id == W001_NO_PERMISSION_CLASSES
 
     @override_settings(DEBUG=False, FRISIAN_MCP_PERMISSION_CLASSES=[])
-    def test_warning_message_mentions_frisian_mcp_setting(
-        self, settings: Any
-    ) -> None:
+    def test_warning_message_mentions_frisian_mcp_setting(self, settings: Any) -> None:
         """The warning message names the setting so operators can find it."""
         if hasattr(settings, "FRISIAN_MCP_ALLOW_UNAUTHENTICATED"):
             del settings.FRISIAN_MCP_ALLOW_UNAUTHENTICATED
@@ -191,7 +189,7 @@ class TestApiKeysHashedCheck:
         assert not check_api_keys_are_hashed()
 
     def test_uppercase_hex_treated_as_raw(self, settings: Any) -> None:
-        """64-char string with uppercase hex is treated as not a valid digest (digest is lowercase)."""
+        """Uppercase hex is treated as raw — valid digests are lowercase only."""
         settings.FRISIAN_MCP_API_KEYS = {"A" * 64: "read"}
         warnings = check_api_keys_are_hashed()
         assert len(warnings) == 1

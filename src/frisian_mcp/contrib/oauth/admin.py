@@ -28,8 +28,11 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_filter = ("is_active", "permission")
     search_fields = ("name", "client_id")
     readonly_fields = (
-        "client_id", "client_secret", "created_at",
-        "connector_sign_in_url", "connector_mcp_url",
+        "client_id",
+        "client_secret",
+        "created_at",
+        "connector_sign_in_url",
+        "connector_mcp_url",
     )
     fieldsets = (
         (

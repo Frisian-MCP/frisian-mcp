@@ -131,14 +131,10 @@ class TestResolveTierHook:
 
     def test_dotted_path_resolves(self, rf: RequestFactory, settings: Any) -> None:
         """A dotted-path string is import_string()-resolved."""
-        settings.FRISIAN_MCP_RESOLVE_TIER = (
-            "tests.test_token_tier_resolution._hook_returns_admin"
-        )
+        settings.FRISIAN_MCP_RESOLVE_TIER = "tests.test_token_tier_resolution._hook_returns_admin"
         assert _resolve_request_tier(_build_request(rf, auth=None)) == "admin"
 
-    def test_hook_returning_none_falls_through(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_hook_returning_none_falls_through(self, rf: RequestFactory, settings: Any) -> None:
         """When the hook returns None, the next layer is consulted."""
         settings.FRISIAN_MCP_RESOLVE_TIER = _hook_returns_none
         auth = MagicMock()
@@ -200,18 +196,14 @@ class TestTokenTierMap:
         req = _build_request(rf, auth=auth, user=_user(is_staff=True))
         assert _resolve_request_tier(req) == "read_write"
 
-    def test_authenticated_user_gets_default(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_authenticated_user_gets_default(self, rf: RequestFactory, settings: Any) -> None:
         """Plain authenticated users (no superuser/staff) get the 'default' entry."""
         settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"default": "read_write"}
         auth = MagicMock(spec=["__class__"])
         req = _build_request(rf, auth=auth, user=_user(is_authenticated=True))
         assert _resolve_request_tier(req) == "read_write"
 
-    def test_anonymous_does_not_get_default(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_anonymous_does_not_get_default(self, rf: RequestFactory, settings: Any) -> None:
         """Unauthenticated callers must NOT receive the role-map default."""
         settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"default": "admin"}
         settings.FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
@@ -261,9 +253,7 @@ class TestResolutionOrder:
         req = _build_request(rf, auth=auth, user=_user(is_authenticated=True))
         assert _resolve_request_tier(req) == "admin"
 
-    def test_hook_falls_through_to_role_map(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_hook_falls_through_to_role_map(self, rf: RequestFactory, settings: Any) -> None:
         """Hook returning None lets the role map resolve."""
         settings.FRISIAN_MCP_RESOLVE_TIER = _hook_returns_none
         settings.FRISIAN_MCP_TOKEN_TIER_MAP = {"superuser": "admin"}
@@ -271,9 +261,7 @@ class TestResolutionOrder:
         req = _build_request(rf, auth=auth, user=_user(is_superuser=True))
         assert _resolve_request_tier(req) == "admin"
 
-    def test_full_fallback_when_nothing_set(
-        self, rf: RequestFactory, settings: Any
-    ) -> None:
+    def test_full_fallback_when_nothing_set(self, rf: RequestFactory, settings: Any) -> None:
         """No hook + no token attr + no role map + no user → 'read'."""
         # Ensure no settings linger from prior tests.
         for attr in ("FRISIAN_MCP_RESOLVE_TIER", "FRISIAN_MCP_TOKEN_TIER_MAP"):

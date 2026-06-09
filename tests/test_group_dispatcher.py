@@ -125,9 +125,7 @@ class TestBuildGroupHelp:
         assert "create" not in help_payload["resources"].get("item", [])
         assert "list" in help_payload["resources"]["item"]
 
-    def test_help_unfiltered_includes_write_actions(
-        self, populated_registry: ToolRegistry
-    ) -> None:
+    def test_help_unfiltered_includes_write_actions(self, populated_registry: ToolRegistry) -> None:
         """Without a max_tier, every action is listed."""
         help_payload = build_group_help(
             "svc",
@@ -253,16 +251,14 @@ class TestMakeGroupInvoke:
 class TestInstallDispatchGroups:
     """End-to-end behaviour when FRISIAN_MCP_DISPATCH_GROUPS is set."""
 
-    def test_no_setting_is_noop(
-        self, populated_registry: ToolRegistry, settings: Any
-    ) -> None:
+    def test_no_setting_is_noop(self, populated_registry: ToolRegistry, settings: Any) -> None:
         """Without the setting the registry is left untouched."""
         if hasattr(settings, "FRISIAN_MCP_DISPATCH_GROUPS"):
             del settings.FRISIAN_MCP_DISPATCH_GROUPS
-        with patch("frisian_mcp.apps.tool_registry", populated_registry, create=True), \
-             patch(
-                 "frisian_mcp.registry.tool_registry", populated_registry
-             ):
+        with (
+            patch("frisian_mcp.apps.tool_registry", populated_registry, create=True),
+            patch("frisian_mcp.registry.tool_registry", populated_registry),
+        ):
             group_count, bundled_count = _install_dispatch_groups()
         assert group_count == 0
         assert bundled_count == 0
@@ -321,9 +317,7 @@ class TestInstallDispatchGroups:
         settings.FRISIAN_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
         with patch("frisian_mcp.registry.tool_registry", populated_registry):
             _install_dispatch_groups()
-        result = populated_registry.dispatch(
-            _request(rf, permission="read"), "item_list", {}
-        )
+        result = populated_registry.dispatch(_request(rf, permission="read"), "item_list", {})
         assert result["called"] == "item.list"
 
     def test_empty_group_logs_warning_and_skips(
@@ -336,8 +330,10 @@ class TestInstallDispatchGroups:
         import logging
 
         settings.FRISIAN_MCP_DISPATCH_GROUPS = {"empty": ["doesnotexist"]}
-        with patch("frisian_mcp.registry.tool_registry", populated_registry), \
-             caplog.at_level(logging.WARNING, logger="frisian_mcp.apps"):
+        with (
+            patch("frisian_mcp.registry.tool_registry", populated_registry),
+            caplog.at_level(logging.WARNING, logger="frisian_mcp.apps"),
+        ):
             group_count, bundled_count = _install_dispatch_groups()
         assert group_count == 0
         assert bundled_count == 0

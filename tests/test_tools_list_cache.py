@@ -203,9 +203,7 @@ class TestToolsListCacheBypassForAgentFilter:
         ):
             req = _rf.post(
                 "/mcp/",
-                data=json.dumps(
-                    {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-                ),
+                data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
                 content_type="application/json",
                 HTTP_AUTHORIZATION=f"Bearer {token.plaintext_token}",
             )
@@ -242,9 +240,7 @@ class TestToolsListCacheBypassForAgentFilter:
             mock_cache.get.return_value = None
             req = _rf.post(
                 "/mcp/",
-                data=json.dumps(
-                    {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-                ),
+                data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
                 content_type="application/json",
                 HTTP_AUTHORIZATION=f"Bearer {token.plaintext_token}",
             )

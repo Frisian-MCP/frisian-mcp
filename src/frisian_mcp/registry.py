@@ -25,9 +25,7 @@ _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
 #: (or bulk-update/destroy) bodies.  When detected in :meth:`ToolRegistry.dispatch`
 #: the required-field schema validation is skipped — the host serializer validates
 #: each item individually.  Mirrors ``_LIST_BODY_KEYS`` in ``backends.invocation``.
-_BULK_LIST_BODY_KEYS: frozenset[str] = frozenset(
-    {"objects", "data", "items", "_items", "body"}
-)
+_BULK_LIST_BODY_KEYS: frozenset[str] = frozenset({"objects", "data", "items", "_items", "body"})
 
 #: Recognised role-keys for ``FRISIAN_MCP_TOKEN_TIER_MAP`` lookup.  Probed in
 #: this order against ``request.user`` attributes — the first match wins.
@@ -55,9 +53,7 @@ def _resolve_tier_hook() -> Callable[[Any], str | None] | None:
         try:
             return import_string(raw)  # type: ignore[no-any-return]
         except (ImportError, AttributeError):
-            logger.exception(
-                "FRISIAN_MCP_RESOLVE_TIER %r could not be imported; ignoring", raw
-            )
+            logger.exception("FRISIAN_MCP_RESOLVE_TIER %r could not be imported; ignoring", raw)
             return None
     logger.error(
         "FRISIAN_MCP_RESOLVE_TIER must be a callable or dotted-path string, got %r", type(raw)
@@ -376,9 +372,7 @@ class ToolRegistry:
     def list_dispatcher_names(self) -> frozenset[str]:
         """Return the names of all tools registered via ``@mcp_dispatcher``."""
         with self._lock:
-            return frozenset(
-                entry.name for entry in self._tools.values() if entry.is_dispatcher
-            )
+            return frozenset(entry.name for entry in self._tools.values() if entry.is_dispatcher)
 
     def list_names(self) -> list[str]:
         """Return a snapshot of all currently-registered tool names."""
@@ -474,9 +468,7 @@ class ToolRegistry:
                         and self._tools[t].perm_app_label is not None
                         and self._tools[t].perm_model is not None
                     ]
-                    if perm_children and not any(
-                        entry_filter(c) for c in perm_children
-                    ):
+                    if perm_children and not any(entry_filter(c) for c in perm_children):
                         continue
 
                 # Plain (non-dispatcher) tool: include the registered schema
@@ -629,7 +621,7 @@ class ToolRegistry:
             ):
                 _expected = sorted((entry.input_schema.get("properties") or {}).keys())
                 raise ToolInputError(
-                    f'Payload must be flat: fields should be top-level arguments, '
+                    f"Payload must be flat: fields should be top-level arguments, "
                     f'not wrapped in "{_wrap_key}": {{...}}. '
                     f"Send the fields directly as: {_expected}."
                 )

@@ -239,9 +239,7 @@ class TestInstallTrailingSlashMiddleware:
         assert inserted is False
         assert settings.MIDDLEWARE == before
 
-    @override_settings(
-        MIDDLEWARE=["django.middleware.common.CommonMiddleware"]
-    )
+    @override_settings(MIDDLEWARE=["django.middleware.common.CommonMiddleware"])
     def test_double_call_does_not_duplicate(self) -> None:
         """Calling the installer twice in a row leaves only a single entry."""
         from django.conf import settings

@@ -55,8 +55,7 @@ def _handler_accepts_variables(fn: Callable[..., Any]) -> bool:
     positional = [
         p
         for p in sig.parameters.values()
-        if p.kind
-        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
     ]
     return len(positional) >= 3
 

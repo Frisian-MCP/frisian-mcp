@@ -133,9 +133,7 @@ class TestMixedRegistration:
         assert "auto.tool" in names
         assert "manual.tool" in names
 
-    def test_manual_tool_dispatch_does_not_affect_others(
-        self, registry: ToolRegistry
-    ) -> None:
+    def test_manual_tool_dispatch_does_not_affect_others(self, registry: ToolRegistry) -> None:
         """Dispatching a manually registered tool doesn't affect other tools."""
         results: list[str] = []
 

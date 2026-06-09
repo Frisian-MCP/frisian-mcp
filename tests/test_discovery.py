@@ -629,11 +629,11 @@ class TestSchemaFromFilterBackends:
 
     def test_subclassed_filter_backend_detected(self, monkeypatch: Any) -> None:
         """A DjangoFilterBackend subclass is detected via issubclass, not name match."""
-        from rest_framework.response import (
-            Response,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        from rest_framework.response import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+            Response,
         )
-        from rest_framework.viewsets import (
-            ViewSet,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        from rest_framework.viewsets import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+            ViewSet,
         )
 
         import frisian_mcp.backends.discovery as _disc  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
@@ -659,8 +659,8 @@ class TestSchemaFromFilterBackends:
 
     def test_declared_filters_fallback(self) -> None:
         """_filterset_properties() uses declared_filters when base_filters is absent."""
-        from rest_framework.viewsets import (
-            ViewSet,  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        from rest_framework.viewsets import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+            ViewSet,
         )
 
         class _Filter:
@@ -830,9 +830,7 @@ class TestSuppressDispatcherShadowed:
             _tool_def("programs_list"),
             _tool_def("orders_list"),
         ]
-        result = _suppress_dispatcher_shadowed(
-            tools, frozenset({"records", "programs"})
-        )
+        result = _suppress_dispatcher_shadowed(tools, frozenset({"records", "programs"}))
         assert [t.name for t in result] == ["orders_list"]
 
     def test_non_dotted_tool_exact_match(self) -> None:

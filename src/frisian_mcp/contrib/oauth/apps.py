@@ -53,9 +53,7 @@ class OAuthConfig(AppConfig):
             )
 
         _locmem = "django.core.cache.backends.locmem.LocMemCache"
-        cache_backend = (
-            getattr(settings, "CACHES", {}).get("default", {}).get("BACKEND", "")
-        )
+        cache_backend = getattr(settings, "CACHES", {}).get("default", {}).get("BACKEND", "")
         if not getattr(settings, "DEBUG", False) and cache_backend == _locmem:
             logger.warning(
                 "frisian_mcp.contrib.oauth: CACHES['default'] is LocMemCache. "
