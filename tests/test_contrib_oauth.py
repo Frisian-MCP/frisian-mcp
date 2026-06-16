@@ -324,11 +324,10 @@ class TestOAuthTokenAuthentication:
         assert auth_user.permission == "admin"
         assert auth_user.is_superuser is False
 
-    def test_invalid_token_raises_auth_failed(self) -> None:
-        """Unrecognised token string raises AuthenticationFailed."""
+    def test_invalid_token_returns_none(self) -> None:
+        """Unrecognised token string falls through to the next authenticator."""
         req = self._fake_request(_bearer("notarealtoken"))
-        with pytest.raises(AuthenticationFailed):
-            self._auth().authenticate(req)
+        assert self._auth().authenticate(req) is None
 
     def test_expired_token_raises_auth_failed(self) -> None:
         """Expired token raises AuthenticationFailed."""
@@ -768,6 +767,123 @@ class TestWellKnownEndpoints:
         assert "mcp:read" in data["scopes_supported"]
         assert "mcp:write" in data["scopes_supported"]
 
+    def test_authorization_server_returns_json_404_when_discovery_off(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """PUBLIC_DISCOVERY=False hides the authorization-server metadata behind a JSON 404."""
+        settings.FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False
+        request = rf.get("/.well-known/oauth-authorization-server")
+        response = _auth_server_view(request)
+        assert response.status_code == 404
+        # Parseable JSON, not a host HTML 404 page — discovery clients must
+        # fall back cleanly to their configured static Bearer.
+        body = json.loads(response.content)
+        assert body == {"error": "not_found"}
+
+    def test_protected_resource_returns_json_404_when_discovery_off(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """PUBLIC_DISCOVERY=False hides the protected-resource metadata behind a JSON 404."""
+        settings.FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False
+        request = rf.get("/.well-known/oauth-protected-resource")
+        response = _protected_resource_view(request)
+        assert response.status_code == 404
+        body = json.loads(response.content)
+        assert body == {"error": "not_found"}
+
+    def test_public_discovery_default_is_true(self, rf: RequestFactory) -> None:
+        """With no setting, well-known continues to serve metadata (back-compat default)."""
+        # No FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY in settings → getattr default True.
+        request = rf.get("/.well-known/oauth-authorization-server")
+        response = _auth_server_view(request)
+        assert response.status_code == 200
+
+    def test_authorization_server_path_scoped_variant_returns_metadata(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        Path-scoped variant returns the same metadata as the bare URL.
+
+        Regression: a path capture of ``<path:resource>`` previously raised
+        ``TypeError: OAuthAuthorizationServerView.get() got an unexpected
+        keyword argument 'resource'`` because ``get()`` did not accept
+        ``**kwargs``.  Discovery-first MCP clients that probe the path-scoped
+        variant must receive a parseable response, not a 500.
+        """
+        request = rf.get("/.well-known/oauth-authorization-server/breakingprod")
+        response = _auth_server_view(request, resource="breakingprod")
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert "issuer" in data
+        assert "token_endpoint" in data
+
+    def test_authorization_server_path_scoped_variant_honours_discovery_off(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """Path-scoped variant also JSON-404s when PUBLIC_DISCOVERY=False."""
+        settings.FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False
+        request = rf.get("/.well-known/oauth-authorization-server/breakingprod")
+        response = _auth_server_view(request, resource="breakingprod")
+        assert response.status_code == 404
+        assert json.loads(response.content) == {"error": "not_found"}
+
+
+# ---------------------------------------------------------------------------
+# Discovery-cascade fallback stubs (openid-configuration, bare /register)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestDiscoveryFallbackStubs:
+    """JSON-404 stubs that keep the discovery cascade parseable end-to-end."""
+
+    def test_openid_configuration_returns_json_404(self, rf: RequestFactory) -> None:
+        """``/.well-known/openid-configuration`` always returns a JSON 404."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            OpenIDConfigurationView,
+        )
+
+        view = OpenIDConfigurationView.as_view()
+        response = view(rf.get("/.well-known/openid-configuration"))
+        assert response.status_code == 404
+        assert json.loads(response.content) == {"error": "not_found"}
+
+    def test_openid_configuration_path_scoped_variant(self, rf: RequestFactory) -> None:
+        """Path-scoped openid-configuration variant also JSON-404s."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            OpenIDConfigurationView,
+        )
+
+        view = OpenIDConfigurationView.as_view()
+        response = view(
+            rf.get("/.well-known/openid-configuration/breakingprod"),
+            resource="breakingprod",
+        )
+        assert response.status_code == 404
+        assert json.loads(response.content) == {"error": "not_found"}
+
+    def test_bare_register_get_returns_json_404(self, rf: RequestFactory) -> None:
+        """``GET /register`` returns a JSON 404 (canonical endpoint is /oauth/register/)."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            BareRegisterView,
+        )
+
+        view = BareRegisterView.as_view()
+        response = view(rf.get("/register"))
+        assert response.status_code == 404
+        assert json.loads(response.content) == {"error": "not_found"}
+
+    def test_bare_register_post_returns_json_404(self, rf: RequestFactory) -> None:
+        """``POST /register`` (RFC 7591 default) returns a JSON 404, not host HTML."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            BareRegisterView,
+        )
+
+        view = BareRegisterView.as_view()
+        response = view(rf.post("/register", data="{}", content_type="application/json"))
+        assert response.status_code == 404
+        assert json.loads(response.content) == {"error": "not_found"}
+
 
 # ---------------------------------------------------------------------------
 # Integration: McpView + OAuthTokenAuthentication + IsAuthenticated
@@ -843,6 +959,45 @@ class TestMcpViewOAuthIntegration:
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["result"] == {}
+
+    def test_db_token_authenticates_when_chained_behind_oauth(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        Static FrisianMcpToken Bearer authenticates with OAuth FIRST and FrisianMcpToken SECOND.
+
+        Mirror of the FrisianMcpToken-first regression test.  NetBox configures
+        ``FRISIAN_MCP_AUTHENTICATION_CLASSES`` with OAuth first so that
+        OAuth-issued access tokens hit their validator before the DB-token
+        authenticator.  For that order to be safe, ``OAuthTokenAuthentication``
+        must return ``None`` on lookup-miss instead of raising
+        ``AuthenticationFailed`` — otherwise a static MCP token Bearer dead-ends
+        at the OAuth class before reaching ``FrisianMcpTokenAuthentication``.
+        """
+        # pylint: disable=import-outside-toplevel
+        from django.contrib.auth import get_user_model
+
+        from frisian_mcp.contrib.tokens.models import FrisianMcpToken
+
+        user_model = get_user_model()
+        user = user_model.objects.create_user(username="db-token-principal", password="pw")
+        db_token = FrisianMcpToken.objects.create(name="netbox-agent", user=user)
+
+        settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
+            "frisian_mcp.contrib.oauth.authentication.OAuthTokenAuthentication",
+            "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication",
+        ]
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+
+        isolated = ToolRegistry()
+        isolated.register("ping", lambda a, r: {}, "Ping", {})
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+        with patch("frisian_mcp.views.tool_registry", isolated):
+            request = _post_mcp(rf, payload, _bearer(db_token.plaintext_token))
+            response = _mcp_view(request)
+
+        assert response.status_code == 200, response.content
 
 
 # ---------------------------------------------------------------------------

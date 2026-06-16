@@ -153,6 +153,7 @@ _MCP_EXTRA_URL_ATTR: str = "_frisian_mcp_extra_url"
 _OAUTH_AUTO_URL_ATTR: str = "_frisian_mcp_oauth_auto_url"
 _WELLKNOWN_AUTO_URL_ATTR: str = "_frisian_mcp_wellknown_auto_url"
 _HEALTHCHECK_AUTO_URL_ATTR: str = "_frisian_mcp_healthcheck_auto_url"
+_BARE_REGISTER_AUTO_URL_ATTR: str = "_frisian_mcp_bare_register_auto_url"
 
 #: Stable ``dispatch_uid`` for the PKG-21 deferred discovery signal handler so
 #: connect / disconnect calls reliably target the same registration even when
@@ -386,6 +387,49 @@ def _install_wellknown_urls() -> bool:
     auto_resolver = path(".well-known/", include("frisian_mcp.contrib.oauth.wellknown_urls"))
     setattr(auto_resolver, _WELLKNOWN_AUTO_URL_ATTR, True)
     resolver.url_patterns.insert(0, auto_resolver)
+    clear_url_caches()
+    return True
+
+
+def _install_bare_register_url() -> bool:
+    """
+    Auto-register a JSON-404 stub at bare ``/register`` (RFC 7591 default path).
+
+    Discovery-first MCP clients (e.g. Claude Code) fall back to
+    ``POST /register`` when ``registration_endpoint`` is absent from the
+    authorization-server metadata.  The canonical dynamic-registration
+    endpoint in this package is ``/oauth/register/``; the bare path is not
+    implemented.  Without this stub the request falls through to the host
+    application's HTML 404 page, which discovery clients cannot parse as
+    JSON (``SyntaxError: Unrecognized token '<'``).  Mounting a JSON-404
+    stub here keeps the discovery cascade parseable end-to-end.
+
+    Idempotent — no-op if the pattern is already present.
+    """
+    from django.apps import apps  # pylint: disable=import-outside-toplevel
+
+    if not apps.is_installed("frisian_mcp.contrib.oauth"):
+        return False
+    if not getattr(settings, "ROOT_URLCONF", None):
+        return False
+
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        path,
+    )
+
+    from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+        BareRegisterView,
+    )
+
+    resolver = get_resolver()
+    if any(getattr(p, _BARE_REGISTER_AUTO_URL_ATTR, False) for p in resolver.url_patterns):
+        return False
+
+    pattern = path("register", BareRegisterView.as_view(), name="frisian_mcp_oauth_bare_register")
+    setattr(pattern, _BARE_REGISTER_AUTO_URL_ATTR, True)
+    resolver.url_patterns.insert(0, pattern)
     clear_url_caches()
     return True
 
@@ -749,6 +793,9 @@ class FrisianMcpConfig(AppConfig):
 
         if _install_wellknown_urls():
             logger.debug("frisian_mcp: auto-registered well-known URLs at /.well-known/")
+
+        if _install_bare_register_url():
+            logger.debug("frisian_mcp: auto-registered JSON-404 stub at /register")
 
         hc_count = _install_healthcheck_urls()
         if hc_count:

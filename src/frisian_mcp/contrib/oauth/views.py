@@ -654,10 +654,24 @@ class OAuthAuthorizationServerView(View):
     types, and (if enabled) the registration endpoint.
 
     Canonical path: ``GET /.well-known/oauth-authorization-server``
+
+    Hidden behind ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY`` (default ``True``):
+    when ``False``, returns a JSON 404 so discovery-first MCP clients do not
+    receive metadata advertising a closed authorization server.  Pre-shared
+    OAuth clients continue to work with hard-coded endpoint URLs.
     """
 
-    def get(self, request: HttpRequest) -> JsonResponse:
-        """Return OAuth 2.0 Authorization Server Metadata (RFC 8414)."""
+    def get(self, request: HttpRequest, **kwargs: object) -> JsonResponse:
+        """
+        Return OAuth 2.0 Authorization Server Metadata (RFC 8414).
+
+        ``**kwargs`` absorbs the optional ``<path:resource>`` URL capture from
+        the RFC 8414 §3 path-scoped variant.  All resources behind the same
+        issuer share one authorization server, so the response is identical
+        whether or not a resource suffix was supplied.
+        """
+        if not getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
+            return JsonResponse({"error": "not_found"}, status=404)
         base = _get_base_url(request)
         token_path: str = getattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_PATH", "/oauth/token/")
         token_endpoint = f"{base}{token_path}"
@@ -705,10 +719,16 @@ class OAuthProtectedResourceView(View):
     MCP clients can discover the authorization server.
 
     Canonical path: ``GET /.well-known/oauth-protected-resource``
+
+    Hidden behind ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY`` (default ``True``):
+    when ``False``, returns a JSON 404 so the same setting controls both
+    well-known endpoints together.
     """
 
     def get(self, request: HttpRequest, **kwargs: object) -> JsonResponse:
         """Return MCP OAuth Protected Resource Metadata."""
+        if not getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
+            return JsonResponse({"error": "not_found"}, status=404)
         base = _get_base_url(request)
         mcp_path: str = str(
             getattr(settings, "FRISIAN_MCP_PROTECTED_PATH", None)
@@ -724,6 +744,51 @@ class OAuthProtectedResourceView(View):
                 "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
             }
         )
+
+
+class OpenIDConfigurationView(View):
+    """
+    Stub for ``/.well-known/openid-configuration`` (OIDC discovery).
+
+    Discovery-first MCP clients (e.g. Claude Code) probe this URL in addition
+    to RFC 8414's ``oauth-authorization-server``.  This package does not
+    implement OIDC, so the view always returns a JSON 404 ``{"error":
+    "not_found"}``.  Claiming the URL at the package level prevents the
+    request from falling through to the host application's HTML 404 page,
+    which clients parsing the response as JSON cannot handle (``SyntaxError:
+    Unrecognized token '<'``).
+    """
+
+    def get(self, request: HttpRequest, **kwargs: object) -> JsonResponse:
+        """Return a JSON 404 so the discovery cascade fails parseably."""
+        return JsonResponse({"error": "not_found"}, status=404)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class BareRegisterView(View):
+    """
+    Stub for the bare ``/register`` path (RFC 7591 default location).
+
+    Clients that do not find ``registration_endpoint`` in the authorization
+    server metadata may fall back to ``POST /register`` per RFC 7591 §3.
+    The canonical registration endpoint in this package is ``/oauth/register/``;
+    the bare path is intentionally not implemented.  Returning a JSON 404 here
+    keeps the discovery cascade parseable instead of leaking the host's HTML
+    404 page.
+
+    ``GET`` and ``POST`` both return the same JSON 404.
+    """
+
+    def _json_404(self) -> JsonResponse:
+        return JsonResponse({"error": "not_found"}, status=404)
+
+    def get(self, request: HttpRequest, **kwargs: object) -> JsonResponse:
+        """Return a JSON 404."""
+        return self._json_404()
+
+    def post(self, request: HttpRequest, **kwargs: object) -> JsonResponse:
+        """Return a JSON 404 — dynamic registration lives at ``/oauth/register/``."""
+        return self._json_404()
 
 
 # ---------------------------------------------------------------------------

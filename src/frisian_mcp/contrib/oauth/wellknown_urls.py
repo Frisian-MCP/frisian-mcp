@@ -9,7 +9,11 @@ Mount at ``"/.well-known/"`` in your project's ``urls.py``::
 
 from django.urls import path
 
-from .views import OAuthAuthorizationServerView, OAuthProtectedResourceView
+from .views import (
+    OAuthAuthorizationServerView,
+    OAuthProtectedResourceView,
+    OpenIDConfigurationView,
+)
 
 app_name = "frisian_mcp_oauth_wellknown"
 
@@ -36,5 +40,17 @@ urlpatterns = [
         "oauth-authorization-server/<path:resource>",
         OAuthAuthorizationServerView.as_view(),
         name="oauth_authorization_server_path",
+    ),
+    # OIDC discovery — not implemented; respond with a JSON 404 so the
+    # discovery cascade does not fall through to the host's HTML 404 page.
+    path(
+        "openid-configuration",
+        OpenIDConfigurationView.as_view(),
+        name="openid_configuration",
+    ),
+    path(
+        "openid-configuration/<path:resource>",
+        OpenIDConfigurationView.as_view(),
+        name="openid_configuration_path",
     ),
 ]

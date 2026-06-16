@@ -23,9 +23,11 @@ Wire both into the MCP gateway via settings::
         "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication",
     ]
 
-``FrisianMcpApiKeyAuthentication`` should come first so that static keys are
-recognised before ``FrisianMcpTokenAuthentication`` (which raises
-``AuthenticationFailed`` for tokens it does not recognise).
+Both classes return ``None`` when the Bearer value is absent **or** when it
+does not match any stored token, so either can be safely chained ahead of
+another Bearer authenticator (e.g.
+``frisian_mcp.contrib.oauth.authentication.OAuthTokenAuthentication``)
+without short-circuiting the chain on a lookup miss.
 
 """
 
@@ -38,7 +40,6 @@ from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
-from rest_framework.exceptions import AuthenticationFailed
 
 from .models import FrisianMcpToken, _hmac_token
 
@@ -55,8 +56,12 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
     associated with the token, or :class:`~django.contrib.auth.models.AnonymousUser`
     for service tokens with no linked user.
 
-    On failure (token not found or inactive), raises
-    :class:`~rest_framework.exceptions.AuthenticationFailed`.
+    On failure (header absent, wrong scheme, or token not found / inactive),
+    returns ``None`` so that DRF can try the next configured authenticator.
+    A Bearer value that does not match any stored ``FrisianMcpToken`` row may
+    legitimately belong to another authenticator in the chain (for example an
+    OAuth-issued access token), so an unrecognised value is a fall-through
+    rather than a hard rejection.
 
     Updates ``FrisianMcpToken.last_used_at`` on every successful authentication
     using a queryset update (no full model save, no post_save signals).
@@ -67,9 +72,12 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
         """
         Authenticate the request from a Bearer token.
 
-        Returns ``(user, token)`` on success, ``None`` when the header is
-        absent, or raises :class:`~rest_framework.exceptions.AuthenticationFailed`
-        when the token is invalid or inactive.
+        Returns ``(user, token)`` on success, or ``None`` when the header is
+        absent, the scheme is not Bearer, or the Bearer value does not match
+        an active ``FrisianMcpToken``.  Never raises ``AuthenticationFailed``:
+        unrecognised tokens are passed through to the next authenticator in
+        ``FRISIAN_MCP_AUTHENTICATION_CLASSES`` rather than short-circuiting
+        the chain.
 
         """
         auth_header: str = request.META.get("HTTP_AUTHORIZATION", "")
@@ -83,7 +91,9 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
                 is_active=True,
             )
         except FrisianMcpToken.DoesNotExist:
-            raise AuthenticationFailed("Invalid or inactive MCP token.") from None
+            # Fall through so chained authenticators (e.g. OAuthTokenAuthentication)
+            # can validate the Bearer value against their own token store.
+            return None
 
         # Update last_used_at without triggering a full model save or signals.
         FrisianMcpToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
