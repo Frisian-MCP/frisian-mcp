@@ -349,7 +349,7 @@ def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> d
                 for key in extra_keys:
                     if key in result and key not in envelope:
                         envelope[key] = result[key]
-        except Exception:  # noqa: BLE001 — never break existing behaviour
+        except Exception:  # noqa: BLE001, S110 — never break existing behaviour
             pass
 
     return envelope

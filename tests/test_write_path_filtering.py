@@ -1054,6 +1054,8 @@ def _build_envelope_with_meta(
     result: dict[str, Any], light_key: list[str] | None, tool_name: str = "items.create"
 ) -> dict[str, Any]:
     """
+    Drive ``_extract_lean_envelope`` through the frame-introspection path.
+
     Wire up a real ``tool_registry`` entry whose ``fn`` closure exposes a
     fake ToolDefinition with a fake ViewSet → Serializer → Meta chain,
     then call ``_extract_lean_envelope`` with ``tool_name`` in the caller's
