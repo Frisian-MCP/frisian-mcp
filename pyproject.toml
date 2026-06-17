@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "frisian-mcp"
-version = "1.0.11"
+version = "1.0.12"
 description = "The Django MCP gateway that discovers your API automatically — zero boilerplate, auto-discovery, dispatcher pattern, OAuth 2.0"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
-    { name = "Jeremy Friese", email = "jeremy@thefriese.com" },
+    { name = "frisian-mcp maintainers", email = "developer@frisian-mcp.com" },
+]
+maintainers = [
+    { name = "Jeremy Friese", email = "developer@frisian-mcp.com" },
 ]
 keywords = ["mcp", "django", "model-context-protocol", "agentic-ai", "drf"]
 classifiers = [
@@ -50,9 +53,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Jeremy-Friese/frisian-mcp"
-Repository = "https://github.com/Jeremy-Friese/frisian-mcp"
-"Bug Tracker" = "https://github.com/Jeremy-Friese/frisian-mcp/issues"
+Homepage = "https://frisian-mcp.com/"
+Repository = "https://github.com/Frisian-MCP/frisian-mcp"
+"Bug Tracker" = "https://github.com/Frisian-MCP/frisian-mcp/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
