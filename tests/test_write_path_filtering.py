@@ -1015,3 +1015,114 @@ class TestDispatcherGroupWritePath:
         assert isinstance(result, list)
         assert len(result) == 3
         assert result[0]["extra"] == "included"
+
+
+# ---------------------------------------------------------------------------
+# Meta.mcp_light_key extension (P4.2.1 — restored behavior)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMeta:
+    """Stand-in for ``Serializer.Meta`` with an ``mcp_light_key`` attribute."""
+
+    def __init__(self, light_key: list[str]) -> None:
+        self.mcp_light_key = light_key
+
+
+class _FakeSerializer:
+    """Stand-in for a DRF ``Serializer`` with a ``Meta`` inner class."""
+
+    def __init__(self, light_key: list[str]) -> None:
+        self.Meta = _FakeMeta(light_key)
+
+
+class _FakeViewSet:
+    """Stand-in for a DRF ``ViewSet`` exposing a ``serializer_class``."""
+
+    def __init__(self, serializer_class: Any) -> None:
+        self.serializer_class = serializer_class
+
+
+class _FakeToolDef:
+    """Stand-in for a ToolDefinition; only ``view_class`` is consulted."""
+
+    def __init__(self, view_class: Any) -> None:
+        self.view_class = view_class
+
+
+def _build_envelope_with_meta(
+    result: dict[str, Any], light_key: list[str] | None, tool_name: str = "items.create"
+) -> dict[str, Any]:
+    """
+    Wire up a real ``tool_registry`` entry whose ``fn`` closure exposes a
+    fake ToolDefinition with a fake ViewSet → Serializer → Meta chain,
+    then call ``_extract_lean_envelope`` with ``tool_name`` in the caller's
+    frame locals so the frame-introspection path can resolve the
+    serializer.
+    """
+    from frisian_mcp.registry import tool_registry as _registry
+
+    if light_key is None:
+        view_class: Any = None
+    else:
+        view_class = _FakeViewSet(_FakeSerializer(list(light_key)))
+    tool_def = _FakeToolDef(view_class)
+
+    def _make_fn(td: _FakeToolDef) -> Any:
+        def _invoke(arguments: dict[str, Any], request: Any) -> Any:  # pragma: no cover
+            return td
+
+        return _invoke
+
+    _registry.register(
+        name=tool_name,
+        fn=_make_fn(tool_def),
+        description="fake",
+        input_schema={"type": "object"},
+        permission_classes=[],
+    )
+    try:
+        return _extract_lean_envelope(result, "tok")
+    finally:
+        _registry._tools.pop(tool_name, None)  # noqa: SLF001 — test cleanup
+
+
+class TestMcpLightKeyExtension:
+    """Coverage for the ``Meta.mcp_light_key`` extension restored in P4.2.1."""
+
+    def test_a_meta_absent_preserves_existing_behaviour(self) -> None:
+        """View resolves but has no Meta.mcp_light_key — envelope unchanged."""
+        result = {"id": "x", "name": "n", "sku": "SKU-1", "extra": "v"}
+        envelope = _build_envelope_with_meta(result, light_key=None)
+        # Existing extraction order kicks in (id, name); extras NOT present.
+        assert envelope["id"] == "x"
+        assert envelope["name"] == "n"
+        assert "sku" not in envelope
+        assert "extra" not in envelope
+
+    def test_b_meta_present_promotes_named_fields(self) -> None:
+        """Meta.mcp_light_key = ['sku', 'reorder_point'] surfaces both fields."""
+        result = {
+            "id": "x",
+            "name": "n",
+            "sku": "SKU-1",
+            "reorder_point": 5,
+            "noise": "skip",
+        }
+        envelope = _build_envelope_with_meta(result, light_key=["sku", "reorder_point"])
+        assert envelope["id"] == "x"
+        assert envelope["name"] == "n"
+        assert envelope["sku"] == "SKU-1"
+        assert envelope["reorder_point"] == 5
+        assert "noise" not in envelope
+
+    def test_c_meta_lists_nonexistent_field_skipped_gracefully(self) -> None:
+        """Listing a key that isn't in the serialized result is a silent skip."""
+        result = {"id": "x", "name": "n", "sku": "SKU-1"}
+        envelope = _build_envelope_with_meta(
+            result, light_key=["sku", "does_not_exist", "also_missing"]
+        )
+        assert envelope["id"] == "x"
+        assert envelope["sku"] == "SKU-1"
+        assert "does_not_exist" not in envelope
+        assert "also_missing" not in envelope
