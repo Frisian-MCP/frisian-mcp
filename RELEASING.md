@@ -96,21 +96,34 @@ Actions UI.  Click approve → the prod publish runs.
 ## When the smoke step fails
 
 The `testpypi-smoke` job installs the freshly-uploaded wheel from TestPyPI
-and imports it.  Failures here typically mean one of:
+and imports it.  The job sleeps 5 minutes before the first install attempt
+and then retries up to five times with 60-second backoffs, so transient
+indexing lag is handled.  Failures here typically mean one of:
 
 - **Missing files in the wheel** — usually a `MANIFEST.in` / `pyproject.toml`
   `[tool.setuptools.packages.find]` mismatch.  Fix locally, bump the rc
-  number (`rc1` → `rc2` — you cannot reuse the same version on TestPyPI),
-  re-tag.
+  number (`rc1` → `rc2`), re-tag.  TestPyPI itself allows reusing the same
+  version (the publish step uses `skip-existing: true`), but bumping the
+  rc number keeps the publish history honest about which wheel is current.
 - **Version mismatch** — `frisian_mcp.__version__` does not equal the tag.
-  Indicates pyproject and `src/frisian_mcp/__init__.py` drifted; the
+  Indicates `pyproject.toml` and `src/frisian_mcp/__init__.py` drifted; the
   smoke job catches this before prod ever runs.
-- **TestPyPI not yet indexed** — the workflow sleeps 60 s before installing.
-  If the smoke still fails on first install, bump the sleep or re-run the
-  workflow.
+- **Real indexing outage** — five 60-second retries past the initial five
+  minutes is over ten minutes total.  If that's not enough, TestPyPI is
+  having a bad day.  Wait, then "Re-run failed jobs" from the Actions UI;
+  the wheel is already published, so only the smoke step needs to repeat.
 
 In all cases the prod publish does NOT run, because `pypi-publish` depends
 on `testpypi-smoke` succeeding.
+
+### Re-running a failed run
+
+The TestPyPI publish step uses `skip-existing: true`, so re-pushing the
+same tag (or re-running the workflow) is safe — the second publish is a
+no-op when the version already exists on TestPyPI.  Production PyPI does
+**not** use `skip-existing`; prod must fail loudly if the wheel was
+somehow already there, because that would mean something has gone wrong
+with version discipline.
 
 ## Tag protection (recommended)
 

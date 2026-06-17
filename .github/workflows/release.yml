@@ -81,6 +81,12 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # TestPyPI is a sanity-check channel.  Allow re-runs of the same
+          # version (e.g. re-tagging the same commit) to succeed silently
+          # instead of failing on "File already exists" — the smoke step is
+          # the real gate.  Production PyPI publish below intentionally
+          # does NOT carry this flag — prod must never silently skip.
+          skip-existing: true
 
   testpypi-smoke:
     name: Install from TestPyPI and import
@@ -92,17 +98,36 @@ jobs:
           python-version: '3.13'
 
       - name: Wait for TestPyPI to index the upload
-        run: sleep 60
+        # 5 minutes covers all the indexing lag we've observed in practice;
+        # 60s was racy and caused intermittent smoke failures even when the
+        # upload itself succeeded.  Cheap insurance against false negatives
+        # blocking the prod publish.
+        run: sleep 300
 
-      - name: Install from TestPyPI
+      - name: Install from TestPyPI (with retries)
         env:
           PEP440_VERSION: ${{ needs.build.outputs.version }}
         run: |
           python -m pip install --upgrade pip
-          python -m pip install \
-            --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
-            "frisian-mcp==${PEP440_VERSION}"
+          # Retry the install up to 5 times with a 60s backoff.  Each attempt
+          # is cheap; the simple-index occasionally lags even past 5 minutes,
+          # and we'd rather burn a few minutes here than re-trigger the whole
+          # workflow.
+          for attempt in 1 2 3 4 5; do
+            if python -m pip install \
+                --index-url https://test.pypi.org/simple/ \
+                --extra-index-url https://pypi.org/simple/ \
+                "frisian-mcp==${PEP440_VERSION}"; then
+              echo "Install succeeded on attempt ${attempt}."
+              break
+            fi
+            if [[ "${attempt}" == "5" ]]; then
+              echo "Install failed after 5 attempts; smoke gate failing." >&2
+              exit 1
+            fi
+            echo "Install attempt ${attempt} failed; sleeping 60s and retrying."
+            sleep 60
+          done
 
       - name: Smoke-import
         env:
