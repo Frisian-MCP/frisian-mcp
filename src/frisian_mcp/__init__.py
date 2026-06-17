@@ -19,7 +19,7 @@ from frisian_mcp.registry import (
 )
 from frisian_mcp.resources import ResourceNotFoundError, ResourceRegistry, resource_registry
 
-__version__ = "1.0.11"
+__version__ = "1.0.11rc1"
 
 # ``invalidate_tools_list_cache`` is exposed via ``__getattr__`` (PEP 562),
 # not as a top-level binding — pylint cannot statically resolve such entries.
