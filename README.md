@@ -4,11 +4,17 @@
 
 frisian-mcp turns your existing Django REST Framework ViewSets into [Model Context Protocol](https://spec.modelcontextprotocol.io/) tools with zero boilerplate. Add the package, include one URL, and every ViewSet action becomes a callable MCP tool — name, description, and input schema derived from your serializers automatically.
 
+**Designed for token-efficient agent workflows.** A 50-action Django app loads in 500–2,000 tokens of `tools/list` schema instead of the 15,000–25,000 conventional flat MCP would emit; a 60-device bulk-write response is 24 tokens instead of ~10,800 of full echo. Same surface, two orders of magnitude less context burned before the agent has done any reasoning. Full numbers in [Token efficiency](#token-efficiency).
+
 **Version:** 1.0.11 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
 
 ```bash
 pip install frisian-mcp
 ```
+
+**Project site:** <https://frisian-mcp.com/>
+
+A live MCP server is hosted at `https://frisian-mcp.com/` for hands-on evaluation — point any MCP-compatible client at it to see the dispatcher pattern and lean envelope behavior against a real surface. The same site serves the project documentation through an MCP-consumable dispatcher, so coding agents (Claude Code, Codex, Gemini CLI, etc.) can connect to it directly and consume installation, configuration, and decorator reference material as part of their working context while integrating frisian-mcp into your own project.
 
 ---
 
@@ -35,6 +41,25 @@ pip install frisian-mcp
 | **Pluggable backends** | Custom discovery and invocation backends via dotted-path settings |
 | **SSE support** | `Accept: text/event-stream` wraps any response in a single SSE event |
 | **MCP `2025-03-26`** | Streamable HTTP; `ping`, `initialize`, `tools/list`, `tools/call`, `resources/list` |
+
+---
+
+## Token efficiency
+
+The dispatcher pattern and the lean write envelope exist for one reason: agent context windows are finite, and the conventional MCP shape (one tool per ViewSet action; full serialized echo on every write) burns through that budget before the agent has done anything useful.
+
+Measured numbers from real integrations:
+
+| Scenario | Default MCP shape | frisian-mcp | Reduction |
+|---|---|---|---|
+| `tools/list` for a 50-action Django app | ~15,000–25,000 tokens | 500–2,000 tokens with `FRISIAN_MCP_DISPATCH_GROUPS` | ~95% |
+| `tools/list` for a Nautobot 3.x deployment | 1,737 flat tools | 15 dispatcher tools | tool surface reduced ~99% |
+| 60-device bulk-create response | ~10,798 tokens (full echo) | 24 tokens (lean envelope) | 99.8% |
+| 200-device bulk-create response | ~36,000 tokens | 24 tokens (constant) | 99.9% |
+
+The bulk-write savings are constant regardless of batch size — the lean envelope is fixed-shape and the full response is reachable via the continuation token without re-running the write. The dispatcher reduction is opt-in through `FRISIAN_MCP_DISPATCH_GROUPS` (autodiscovery alone gives the conventional flat shape).
+
+See [docs/Guide/the-token-problem.md](docs/Guide/the-token-problem.md), [docs/Guide/dispatcher-pattern.md](docs/Guide/dispatcher-pattern.md), and [docs/Guide/write-path-response-filtering.md](docs/Guide/write-path-response-filtering.md) for the design rationale and full measurements.
 
 ---
 
@@ -171,7 +196,7 @@ For high-volume APIs, `FRISIAN_MCP_DISPATCH_GROUPS` can automatically bundle exi
 
 ---
 
-## Authentication
+## Authentication and security
 
 frisian-mcp delegates authentication to DRF — any DRF authentication class works out of the box via `FRISIAN_MCP_AUTHENTICATION_CLASSES`. Three ready-to-use contrib modules cover the most common cases:
 
@@ -183,8 +208,24 @@ frisian-mcp delegates authentication to DRF — any DRF authentication class wor
 
 Gateway-level access is controlled by `FRISIAN_MCP_PERMISSION_CLASSES`. Tool-level access is controlled by permission tiers (`read` / `write` / `admin`) mapped via `FRISIAN_MCP_TOKEN_TIER_MAP`. Use `FRISIAN_MCP_MAX_TIER` to cap all callers on an endpoint regardless of their credential tier.
 
+### Hardened-by-default posture (1.0.x)
+
+The defaults are oriented toward production safety rather than walk-up convenience:
+
+- **Token and client-secret storage uses HMAC-SHA256 digests** (`FRISIAN_MCP_HMAC_KEY`). A leaked database row cannot be replayed directly — the raw secret is only ever shown once at creation time.
+- **OAuth dynamic client registration is closed by default** (`FRISIAN_MCP_OAUTH_REGISTRATION_OPEN=False`, `FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=False`, `FRISIAN_MCP_OAUTH_AUTO_APPROVE=False`). The operator pre-registers every OAuth client via the Django admin; anonymous walk-up registration is not possible without an explicit opt-in.
+- **The PKCE default permission tier is `read`.** Mis-configurations cannot accidentally hand out write or admin scopes on first connect.
+- **Permission-aware discovery** (`FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True`) rebuilds dispatcher action enums per-request — a read-tier token sees only `list` / `retrieve` actions, write and admin actions are hidden from `tools/list` rather than just blocked at execution.
+- **`.well-known` discovery metadata is gated** by `FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY`. With it set to `False`, the OAuth metadata endpoints return parseable JSON 404s so discovery-first MCP clients fall back to their configured Bearer instead of being routed into a dead-end OAuth cascade.
+- **Authenticator chain ordering is no longer load-bearing** for correctness — both `FrisianMcpTokenAuthentication` and `OAuthTokenAuthentication` return `None` on lookup-miss so either order works. Tokens-first is the recommended convention for the WWW-Authenticate challenge shape (see [docs/Getting Started/getting-started.md](docs/Getting%20Started/getting-started.md#using-tokens-and-oauth-together)).
+- **SSE keepalive structure is documented**, with a one-time runtime warning when the package detects it is running under a synchronous WSGI worker (which cannot scale SSE without starving the worker pool). The recommended deployment is an ASGI worker class (`uvicorn.workers.UvicornWorker` or `uvicorn` directly).
+
+See [docs/Security/security.md](docs/Security/security.md) for the full threat model and recommended deployment patterns, and [docs/Reference/installation-configuration-reference.md](docs/Reference/installation-configuration-reference.md) for the complete settings reference.
+
 ---
 
 ## Full documentation
 
 Full settings reference, auth configuration, decorator API, middleware, pluggable backends, security guide, and troubleshooting are in [`docs/`](docs/).
+
+For browsable docs, a live MCP server, and the agent-consumable docs dispatcher (point your coding agent at it directly), visit <https://frisian-mcp.com/>.
