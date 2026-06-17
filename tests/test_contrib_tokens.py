@@ -10,7 +10,6 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
-from rest_framework.exceptions import AuthenticationFailed
 
 from frisian_mcp.contrib.tokens.authentication import (
     FrisianMcpApiKeyAuthentication,
@@ -112,14 +111,16 @@ class TestFrisianMcpTokenModel:
         assert not hasattr(fetched, "plaintext_token")
 
     def test_auth_rejects_hmac_used_as_bearer(self) -> None:
-        """Sending the stored HMAC as the Bearer value is rejected (wrong layer)."""
+        """Sending the stored HMAC as the Bearer value does not authenticate."""
         token = FrisianMcpToken.objects.create(name="hmac-bearer-check")
 
         class _Req:
             META = {"HTTP_AUTHORIZATION": f"Bearer {token.token}"}
 
-        with pytest.raises(AuthenticationFailed):
-            FrisianMcpTokenAuthentication().authenticate(_Req())
+        # The HMAC value re-hashes to a different digest at lookup time, so
+        # the row is never matched.  The class falls through (returns None)
+        # rather than raising — see authenticate() for the chain rationale.
+        assert FrisianMcpTokenAuthentication().authenticate(_Req()) is None
 
 
 # ---------------------------------------------------------------------------
@@ -176,18 +177,16 @@ class TestFrisianMcpTokenAuthentication:
         auth_user, _ = result
         assert isinstance(auth_user, AnonymousUser)
 
-    def test_invalid_token_raises_auth_failed(self) -> None:
-        """Unrecognised token string raises AuthenticationFailed."""
+    def test_invalid_token_returns_none(self) -> None:
+        """Unrecognised token string falls through to the next authenticator."""
         req = self._fake_request(_bearer("notarealtoken"))
-        with pytest.raises(AuthenticationFailed):
-            self._auth().authenticate(req)
+        assert self._auth().authenticate(req) is None
 
-    def test_inactive_token_raises_auth_failed(self) -> None:
-        """Inactive token raises AuthenticationFailed."""
+    def test_inactive_token_returns_none(self) -> None:
+        """Inactive token falls through (lookup excludes is_active=False rows)."""
         token = FrisianMcpToken.objects.create(name="disabled", is_active=False)
         req = self._fake_request(_bearer(token.plaintext_token))
-        with pytest.raises(AuthenticationFailed):
-            self._auth().authenticate(req)
+        assert self._auth().authenticate(req) is None
 
     def test_last_used_at_updated_on_auth(self) -> None:
         """last_used_at is set after a successful authentication."""
@@ -263,6 +262,43 @@ class TestMcpViewTokenIntegration:
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["result"] == {}
+
+    def test_oauth_token_authenticates_when_chained_behind_db_tokens(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        OAuth-issued Bearer authenticates when chained behind FrisianMcpTokenAuthentication.
+
+        Reproduces the symptom where Claude.ai completes the OAuth code flow,
+        ``POST /oauth/token/`` returns 200, and the very next ``POST /mcp/``
+        carrying the new Bearer returns 401 because the DB-token authenticator
+        was raising ``AuthenticationFailed`` on lookup-miss and stopping the
+        chain.  Lookup-miss must fall through so the OAuth authenticator can
+        validate the token.
+        """
+        # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.models import OAuthAccessToken, OAuthClient
+
+        user = User.objects.create_user(username="oauth-principal", password="pw")
+        client = OAuthClient.objects.create(name="claude-ai", user=user)
+        access_token = OAuthAccessToken.objects.create(client=client)
+        raw_bearer = access_token.plaintext_token
+
+        settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
+            "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication",
+            "frisian_mcp.contrib.oauth.authentication.OAuthTokenAuthentication",
+        ]
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+
+        isolated = ToolRegistry()
+        isolated.register("ping", lambda a, r: {}, "Ping", {})
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+        with patch("frisian_mcp.views.tool_registry", isolated):
+            request = _post_mcp(rf, payload, _bearer(raw_bearer))
+            response = _view(request)
+
+        assert response.status_code == 200, response.content
 
 
 # ---------------------------------------------------------------------------
@@ -462,14 +498,16 @@ class TestMcpViewApiKeyIntegration:
         """
         Bearer token that doesn't match any API key or DB token → 401.
 
-        FrisianMcpTokenAuthentication is listed second and raises AuthenticationFailed
-        for unrecognised tokens, so a wrong key falls through and is rejected.
+        Both authenticators return ``None`` for unrecognised Bearer values so
+        that an upstream OAuth authenticator can still validate them.  The
+        401 comes from ``IsAuthenticated`` after the chain falls through to
+        ``AnonymousUser``.
         """
         settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
             "frisian_mcp.contrib.tokens.authentication.FrisianMcpApiKeyAuthentication",
             "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication",
         ]
-        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
         settings.FRISIAN_MCP_API_KEYS = {_hmac_token("correct"): "read"}
         isolated = ToolRegistry()
         payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}

@@ -28,10 +28,10 @@ jobs:
         run: uv sync --all-extras
 
       - name: Black (format check)
-        run: uv run black --check .
+        run: uv run black --check src/ tests/
 
       - name: isort (import order check)
-        run: uv run isort --check-only .
+        run: uv run isort --check-only src/ tests/
 
       - name: Ruff (lint)
         run: uv run ruff check src/ tests/

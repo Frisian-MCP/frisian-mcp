@@ -115,18 +115,28 @@ class OAuthTokenAuthentication(BaseAuthentication):
     On success, returns ``(OAuthServicePrincipal, access_token)`` where *access_token*
     is the :class:`~frisian_mcp.contrib.oauth.models.OAuthAccessToken` instance.
 
-    On failure (token not found, expired, or client inactive), raises
-    :class:`~rest_framework.exceptions.AuthenticationFailed`.
+    A Bearer value that does not match any stored ``OAuthAccessToken`` row
+    returns ``None`` (fall-through) — it may legitimately belong to another
+    authenticator in the chain (e.g.
+    :class:`~frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication`),
+    so an unrecognised value must not short-circuit the chain.  Concrete
+    failures (expired token, inactive client) still raise
+    :class:`~rest_framework.exceptions.AuthenticationFailed` because they
+    describe a token that *did* match this class but cannot be used.
     """
 
     def authenticate(self, request: Any) -> tuple[Any, Any] | None:
         """
         Authenticate the request from an OAuth 2.0 Bearer token.
 
-        Returns ``(OAuthServicePrincipal, access_token)`` on success, ``None`` when the
-        header is absent, or raises
-        :class:`~rest_framework.exceptions.AuthenticationFailed` when the token
-        is invalid, expired, or the issuing client is inactive.
+        Returns ``(OAuthServicePrincipal, access_token)`` on success.
+        Returns ``None`` when the header is absent, the scheme is not Bearer,
+        or the Bearer value does not match any stored ``OAuthAccessToken``
+        row — the request falls through to the next authenticator in
+        ``FRISIAN_MCP_AUTHENTICATION_CLASSES``.  Raises
+        :class:`~rest_framework.exceptions.AuthenticationFailed` only when
+        the token matches a row but the row is expired or the issuing client
+        is inactive.
 
         The permission tier is read from the issuing **client** at authentication
         time (not the token's stored snapshot) so that permission changes on the
@@ -157,7 +167,9 @@ class OAuthTokenAuthentication(BaseAuthentication):
                 token=_hmac_secret(token_str),
             )
         except OAuthAccessToken.DoesNotExist:
-            raise AuthenticationFailed("Invalid OAuth token.") from None
+            # Fall through so chained authenticators (e.g. FrisianMcpTokenAuthentication)
+            # can validate the Bearer value against their own token store.
+            return None
 
         if not access_token.client.is_active:
             raise AuthenticationFailed("OAuth client is inactive.")

@@ -1,0 +1,8 @@
+[project]
+name = "frisian-mcp-netbox"
+version = "0.1.0"
+description = "Dev harness — wires frisian-mcp into NetBox's plugin system for integration testing"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["frisian_mcp_netbox*"]
