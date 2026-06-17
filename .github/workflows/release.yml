@@ -1,0 +1,139 @@
+name: Release
+
+# Tag-driven release pipeline.
+#
+#   v1.0.11-rc.1   → build → TestPyPI → smoke. Stops there.
+#   v1.0.11        → build → TestPyPI → smoke → PyPI (prod, environment-gated).
+#
+# Authentication is OIDC via PyPI Trusted Publishers — NO API tokens stored
+# in this repo.  See RELEASING.md for the one-time setup steps on
+# test.pypi.org and pypi.org.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    outputs:
+      is_rc: ${{ steps.detect.outputs.is_rc }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Normalise tag → PEP 440 version + detect rc
+        id: detect
+        run: |
+          python -m pip install --upgrade pip packaging
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          PEP440=$(python -c "from packaging.version import Version; print(Version('$TAG_VER'))")
+          echo "version=$PEP440" >> "$GITHUB_OUTPUT"
+          if python -c "from packaging.version import Version; v=Version('$TAG_VER'); raise SystemExit(0 if v.is_prerelease else 1)"; then
+            echo "is_rc=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "is_rc=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify tag matches pyproject version
+        run: |
+          PKG_VER=$(python -c "import tomllib; print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          TAG_VER=$(python -c "from packaging.version import Version; print(Version('${GITHUB_REF_NAME#v}'))")
+          if [[ "$TAG_VER" != "$PKG_VER" ]]; then
+            echo "Tag $TAG_VER does not match pyproject version $PKG_VER" >&2
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Upload dist artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi-publish:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/frisian-mcp/
+    permissions:
+      id-token: write   # required for PyPI Trusted Publishers (OIDC)
+    steps:
+      - name: Download dist artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  testpypi-smoke:
+    name: Install from TestPyPI and import
+    needs: [build, testpypi-publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Wait for TestPyPI to index the upload
+        run: sleep 60
+
+      - name: Install from TestPyPI
+        env:
+          PEP440_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            "frisian-mcp==${PEP440_VERSION}"
+
+      - name: Smoke-import
+        env:
+          PEP440_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python <<'PYEOF'
+          import os
+          import frisian_mcp
+
+          expected = os.environ["PEP440_VERSION"]
+          actual = frisian_mcp.__version__
+          assert actual == expected, f"__version__ {actual!r} != expected {expected!r}"
+          print(f"OK: imported frisian_mcp {actual}")
+          PYEOF
+
+  pypi-publish:
+    name: Publish to PyPI (production)
+    needs: [build, testpypi-smoke]
+    if: needs.build.outputs.is_rc == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/frisian-mcp/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
