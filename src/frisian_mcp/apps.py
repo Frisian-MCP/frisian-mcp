@@ -588,15 +588,26 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
     sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
 
     for group_name, resource_prefixes in groups.items():
-        prefix_set = frozenset(resource_prefixes)
+        # Normalize configured prefixes so kebab-case router slugs match the
+        # snake_case tool prefixes the discovery layer produces.  Tool prefixes
+        # come from the DRF router basename with hyphens replaced by underscores
+        # (``backends/discovery.py`` does ``basename.replace("-", "_")``).
+        # Mirroring that conversion here means an operator who configures
+        # ``"stock-movement"`` (matching their kebab-case router slug) finds the
+        # same tools as ``"stock_movement"``.  Camelcase-stripped lowercase
+        # basenames (DRF's default when no ``basename=`` is supplied) and
+        # snake_case basenames both pass through unchanged.
+        prefix_set = frozenset(p.replace("-", "_") for p in resource_prefixes)
         member_tools = _find_group_members(all_names, prefix_set, sep)
 
         if not member_tools:
             # Build "did you mean" hints: normalize configured prefixes by
             # stripping hyphens/underscores and match against registered names.
-            # The most common mistake is using URL slugs (dns-views, a-records)
-            # instead of DRF basenames (Model._meta.object_name.lower() →
-            # dnsview, arecord).  Normalizing both sides catches that pattern.
+            # Catches the most common misconfiguration where the operator
+            # guesses the wrong DRF basename shape — kebab-case URL slug
+            # (``dns-views``), camelcase-stripped lowercase (``dnsviews``),
+            # or snake_case (``dns_views``) — against tools registered under
+            # a different shape.  Normalizing both sides catches all three.
             sep_re = re.compile(r"[-_]")
             registered_resources = sorted({n.split(sep)[0] for n in all_names})
             suggestions: list[str] = []
@@ -620,7 +631,14 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
             logger.warning(
                 "FRISIAN_MCP_DISPATCH_GROUPS: group %r has no matching resources "
                 "(prefixes=%s) — no dispatcher registered.\n"
-                "Basenames must be Model._meta.object_name.lower() not URL slugs.\n%s",
+                "Prefixes must match the leading segment of registered tool "
+                "names.  Tool prefixes come from the DRF router basename, "
+                "with hyphens converted to underscores: explicit "
+                "register('stock-movement', ...) becomes 'stock_movement'; "
+                "DRF's default basename derived from "
+                "Model._meta.object_name.lower() stays camelcase-stripped "
+                "lowercase ('stockmovement', no underscore).  Match the "
+                "'Did you mean:' suggestion below rather than guessing.\n%s",
                 group_name,
                 sorted(prefix_set),
                 hint,
@@ -628,7 +646,10 @@ def _install_dispatch_groups() -> tuple[int, int]:  # pylint: disable=too-many-l
             print(  # noqa: T201 — always-on warning; misconfigured group leaves flat tools visible
                 f"[frisian-mcp] WARNING: dispatch group {group_name!r} has 0 matching tools "
                 f"— its flat tools will remain visible in tools/list and may crowd out "
-                f"other dispatchers. Hint: use Model._meta.object_name.lower(). See log.",
+                f"other dispatchers. Hint: match the leading segment of registered tool "
+                f"names (e.g. 'stock_movement' if you registered "
+                f"'stock-movement', or 'stockmovement' for DRF's default basename). "
+                f"See log for 'Did you mean:' suggestions.",
                 flush=True,
             )
             continue

@@ -82,6 +82,12 @@ _TOOLS_LIST_CACHE_KEY = "frisian_mcp:tools_list"
 _HEAVY_CACHE_PREFIX = "frisian_mcp:heavy:"
 _HEAVY_CACHE_TTL: int = 300  # seconds; tokens expire after 5 minutes
 
+#: Sentinel for the one-time WSGI-SSE-worker-pinning warning emitted on the
+#: first SSE keepalive request served from a sync worker.  Sync workers cannot
+#: host SSE without starving the worker pool — see the warning message + the
+#: Deployment Notes in the Installation & Configuration Reference.
+_SSE_WSGI_WARNED: bool = False
+
 _REFRESH_HINT = (
     " Call tools/list to refresh your available tools — the server manifest may have changed."
 )
@@ -1678,6 +1684,33 @@ class McpView(APIView):
             # FRISIAN_MCP_SSE_MAX_STREAM_SECONDS caps the worker hold time (default
             # 300 s).  After the deadline the stream closes cleanly; the client
             # reconnects.  Set to 0 to yield one keepalive and close immediately.
+            #
+            # ONE-TIME WARNING: sync WSGI workers cannot scale this pattern — each
+            # MCP client pins one worker for up to max_stream_seconds, so the
+            # (N+1)th concurrent connection starves on a pool of N workers.  The
+            # warning fires once per process lifetime so operators see it without
+            # the log getting flooded.
+            global _SSE_WSGI_WARNED  # pylint: disable=global-statement
+            if not _SSE_WSGI_WARNED:
+                _SSE_WSGI_WARNED = True
+                _msg = (
+                    "frisian_mcp: SSE keepalive served from a sync WSGI worker. "
+                    "Each MCP client connection pins one worker for up to "
+                    "FRISIAN_MCP_SSE_MAX_STREAM_SECONDS=%s seconds; concurrent "
+                    "connection count >= worker count will starve the pool and "
+                    "manifest as WORKER TIMEOUT loops.  Switch to an ASGI worker "
+                    "class — e.g. 'gunicorn config.asgi:application -k "
+                    "uvicorn.workers.UvicornWorker' or 'uvicorn config.asgi:"
+                    "application'.  Bumping --timeout only delays the symptom."
+                )
+                logger.warning(_msg, max_stream_seconds)
+                print(  # noqa: T201 — one-time loud signal for misconfigured deployment
+                    "[frisian-mcp] WARNING: SSE keepalive running on a sync WSGI "
+                    "worker; switch to an ASGI worker class (uvicorn workers) to "
+                    "avoid worker-pool starvation. See log for details.",
+                    flush=True,
+                )
+
             def _wsgi_keepalive() -> Generator[str, None, None]:
                 deadline = time.monotonic() + max_stream_seconds
                 while True:

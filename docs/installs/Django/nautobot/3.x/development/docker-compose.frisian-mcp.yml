@@ -1,0 +1,49 @@
+---
+# Compose override: mounts frisian-mcp for editable install before Nautobot starts.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.postgres.yml \
+#          -f docker-compose.dev.yml -f docker-compose.frisian-mcp.yml up
+services:
+  nautobot:
+    volumes:
+      - type: bind
+        source: ../../frisian-mcp
+        target: /opt/frisian-mcp
+      - type: bind
+        source: ./docker-entrypoint.frisian-mcp.sh
+        target: /docker-entrypoint.frisian-mcp.sh
+    entrypoint:
+      - /docker-entrypoint.frisian-mcp.sh
+    command:
+      - /docker-entrypoint.sh
+      - nautobot-server
+      - runserver
+      - "0.0.0.0:8080"
+      - --insecure
+  celery_worker:
+    volumes:
+      - type: bind
+        source: ../../frisian-mcp
+        target: /opt/frisian-mcp
+      - type: bind
+        source: ./docker-entrypoint.frisian-mcp.sh
+        target: /docker-entrypoint.frisian-mcp.sh
+    entrypoint:
+      - /docker-entrypoint.frisian-mcp.sh
+    command:
+      - sh
+      - -c
+      - "watchmedo auto-restart --directory './' --pattern '*.py' --recursive -- nautobot-server celery worker -l INFO --events"
+  celery_beat:
+    volumes:
+      - type: bind
+        source: ../../frisian-mcp
+        target: /opt/frisian-mcp
+      - type: bind
+        source: ./docker-entrypoint.frisian-mcp.sh
+        target: /docker-entrypoint.frisian-mcp.sh
+    entrypoint:
+      - /docker-entrypoint.frisian-mcp.sh
+    command:
+      - sh
+      - -c
+      - "watchmedo auto-restart --directory './' --pattern '*.py' --recursive -- nautobot-server celery beat -l INFO"

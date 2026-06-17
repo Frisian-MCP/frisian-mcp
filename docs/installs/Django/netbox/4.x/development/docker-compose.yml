@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    env_file: dev.env
+    volumes:
+      - netbox-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "netbox"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  netbox:
+    build:
+      context: ..
+      dockerfile: development/Dockerfile
+    env_file: dev.env
+    environment:
+      # Point NetBox at our dev config module; /opt/netbox_config is on PYTHONPATH.
+      - NETBOX_CONFIGURATION=netbox_dev_config
+      - PYTHONPATH=/opt/netbox/netbox:/opt/netbox_config
+    volumes:
+      # NetBox source
+      - ../netbox:/opt/netbox/netbox
+      # Dev configuration — mounted outside the NetBox source tree to avoid
+      # the Docker bind-mount-inside-bind-mount conflict.
+      - ./configuration.py:/opt/netbox_config/netbox_dev_config.py:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    command: python manage.py runserver 0.0.0.0:8080
+
+volumes:
+  netbox-postgres:

@@ -1,0 +1,11 @@
+services:
+  netbox:
+    entrypoint: ["/opt/netbox/development/docker-entrypoint.frisian-mcp.sh"]
+    volumes:
+      # frisian-mcp source — installed editable by the entrypoint
+      - ../../frisian-mcp:/opt/frisian-mcp
+      # Harness-local plugin wrapper — pip-installed by the entrypoint;
+      # not part of the NetBox source tree or the frisian-mcp package.
+      - ./plugin_wrapper:/opt/netbox/development/plugin_wrapper:ro
+      # Mount the entrypoint so it's accessible inside the container
+      - ./docker-entrypoint.frisian-mcp.sh:/opt/netbox/development/docker-entrypoint.frisian-mcp.sh:ro

@@ -4,7 +4,7 @@
 
 frisian-mcp turns your existing Django REST Framework ViewSets into [Model Context Protocol](https://spec.modelcontextprotocol.io/) tools with zero boilerplate. Add the package, include one URL, and every ViewSet action becomes a callable MCP tool — name, description, and input schema derived from your serializers automatically.
 
-**Version:** 0.1.0 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
+**Version:** 1.0.11 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
 
 ```bash
 pip install frisian-mcp
