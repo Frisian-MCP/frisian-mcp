@@ -260,6 +260,40 @@ def _action_http_method(view_class: type, action_name: str) -> str:
     return "post"
 
 
+def _apply_meta_light_key(result: dict[str, Any], tool_name: str, envelope: dict[str, Any]) -> None:
+    """
+    Surface fields named in ``serializer_class.Meta.mcp_light_key`` into *envelope*.
+
+    Resolves the ViewSet's serializer by looking up ``tool_name`` in
+    ``tool_registry``, walking the registered invocation closure for a
+    ToolDefinition exposing ``view_class``, and pulling
+    ``view_class.serializer_class.Meta.mcp_light_key``.  Each field in that
+    list that is present in *result* and not already in *envelope* is copied
+    over.  Defensive at every step — any missing piece returns silently with
+    *envelope* unchanged so decorator-only tools (no ViewSet) see no
+    behaviour change.
+    """
+    from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
+        tool_registry,
+    )
+
+    entry = tool_registry.get_entry(tool_name)
+    if entry is None:
+        return
+    view_class: Any = None
+    for cell in getattr(entry.fn, "__closure__", None) or ():
+        candidate = cell.cell_contents
+        view_class = getattr(candidate, "view_class", None)
+        if view_class is not None:
+            break
+    serializer_class = getattr(view_class, "serializer_class", None)
+    meta = getattr(serializer_class, "Meta", None)
+    extra_keys = getattr(meta, "mcp_light_key", None) or ()
+    for key in extra_keys:
+        if key in result and key not in envelope:
+            envelope[key] = result[key]
+
+
 def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> dict[str, Any]:
     """
     Build the lean write-confirmation envelope from a fully-serialised result.
@@ -316,39 +350,23 @@ def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> d
     envelope["data_size"] = data_size
     envelope["continuation_token"] = token
 
-    # Honour ``ViewSet.serializer_class.Meta.mcp_light_key`` — the
-    # documented per-serializer extension for the lean envelope (see the
-    # Installation & Configuration Reference and the Write-Path Response
-    # Filtering guide).  The source serializer is resolved by looking up
-    # the registry entry for the ``tool_name`` in the caller's frame and
-    # walking the registered invocation closure for the underlying
-    # ToolDefinition's ``view_class``.  Defensive at every step — any
-    # missing piece returns the envelope unchanged so existing callers
-    # (and decorator-only tools that have no ViewSet) see no behaviour
-    # change.
+    # Honour ``ViewSet.serializer_class.Meta.mcp_light_key`` — the documented
+    # per-serializer extension for the lean envelope (see the Installation &
+    # Configuration Reference and the Write-Path Response Filtering guide).
+    # The source serializer is resolved by looking up the registry entry for
+    # the ``tool_name`` in the caller's frame and walking the registered
+    # invocation closure for the underlying ToolDefinition's ``view_class``.
+    # Defensive at every step — any missing piece leaves the envelope
+    # unchanged so existing callers and decorator-only tools (no ViewSet)
+    # see no behaviour change.
     if isinstance(result, dict):
         try:
+            # pylint: disable-next=protected-access
             caller_locals = sys._getframe(1).f_locals  # noqa: SLF001
             tool_name = caller_locals.get("tool_name")
             if isinstance(tool_name, str) and tool_name:
-                from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
-                    tool_registry,
-                )
-
-                entry = tool_registry.get_entry(tool_name)
-                view_class: Any = None
-                if entry is not None:
-                    for cell in getattr(entry.fn, "__closure__", None) or ():
-                        candidate = cell.cell_contents
-                        view_class = getattr(candidate, "view_class", None)
-                        if view_class is not None:
-                            break
-                serializer_class = getattr(view_class, "serializer_class", None)
-                meta = getattr(serializer_class, "Meta", None)
-                extra_keys = getattr(meta, "mcp_light_key", None) or ()
-                for key in extra_keys:
-                    if key in result and key not in envelope:
-                        envelope[key] = result[key]
+                _apply_meta_light_key(result, tool_name, envelope)
+        # pylint: disable-next=broad-exception-caught
         except Exception:  # noqa: BLE001, S110 — never break existing behaviour
             pass
 
