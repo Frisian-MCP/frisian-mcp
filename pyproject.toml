@@ -67,6 +67,13 @@ include = ["frisian_mcp*"]
 [tool.black]
 line-length = 100
 target-version = ["py311", "py312", "py313"]
+# docs/ holds operator-reference configs that are illustrative examples
+# (Nautobot nautobot_config.py, NetBox configuration.py + plugin_wrapper,
+# Open edX mcp_prod.py, etc.).  They are documentation, not package source
+# under the strict formatting bar, so exclude them from the format check.
+extend-exclude = '''
+^/docs/
+'''
 
 # ---------------------------------------------------------------------------
 # isort
@@ -75,6 +82,8 @@ target-version = ["py311", "py312", "py313"]
 profile = "black"
 line_length = 100
 known_first_party = ["frisian_mcp"]
+# Matches the black exclude above — docs/ is documentation, not source.
+skip_glob = ["docs/**"]
 
 # ---------------------------------------------------------------------------
 # ruff
