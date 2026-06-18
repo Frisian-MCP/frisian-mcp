@@ -1,5 +1,7 @@
 # frisian-mcp
 
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13298/badge)](https://www.bestpractices.dev/projects/13298)
+
 **The Django MCP gateway that discovers your API automatically.**
 
 frisian-mcp turns your existing Django REST Framework ViewSets into [Model Context Protocol](https://spec.modelcontextprotocol.io/) tools with zero boilerplate. Add the package, include one URL, and every ViewSet action becomes a callable MCP tool — name, description, and input schema derived from your serializers automatically.
