@@ -105,7 +105,7 @@ Warns when `FRISIAN_MCP_HMAC_KEY` either isn't set or equals `SECRET_KEY`. In bo
 
 ## Example output
 
-```
+```text
 $ python manage.py mcp_doctor
 
   ✓ frisian_mcp in INSTALLED_APPS

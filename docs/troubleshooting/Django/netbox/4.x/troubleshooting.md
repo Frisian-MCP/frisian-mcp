@@ -11,10 +11,15 @@ Before tailing logs or pasting curl output, run the configuration audit. It surf
 
 ```bash
 docker exec <container> python manage.py mcp_doctor
-docker exec <container> python manage.py mcp_doctor --security
 ```
 
 Exits non-zero on errors. Warnings are flagged with `⚠`; errors with `✗`. See [Guide → mcp_doctor](../../../../Guide/mcp-doctor.md) for what each check looks at. If a symptom below isn't an exact match, doctor output usually narrows it down before any other diagnostic.
+
+If your deployment uses OAuth (the `frisian_mcp.contrib.oauth` app), follow up with the OAuth-specific audit. Skip this on token-only deployments — it will report noisy, irrelevant failures for OAuth checks that don't apply:
+
+```bash
+docker exec <container> python manage.py mcp_doctor --security
+```
 
 ---
 
