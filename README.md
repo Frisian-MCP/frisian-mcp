@@ -1,6 +1,7 @@
 # frisian-mcp
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13298/badge)](https://www.bestpractices.dev/projects/13298)
+[![Slack](https://img.shields.io/badge/slack-join-4A154B?logo=slack&logoColor=white)](https://join.slack.com/t/frisianmcp/shared_invite/zt-407txg7aa-EVs9SsExux7A1MCUcm2F4Q)
 
 **The Django MCP gateway that discovers your API automatically.**
 
@@ -128,6 +129,15 @@ python manage.py mcp_config --token mytoken123
 ```
 
 Use `--client` to emit the format expected by a specific MCP client. Use `--url` and `--name` to override the server URL and key.
+
+**4. Verify the install:**
+
+```bash
+python manage.py mcp_doctor                # standard audit
+python manage.py mcp_doctor --security     # extended OAuth security audit
+```
+
+Walks the configuration end-to-end and exits non-zero on errors. Run after every install, every config change, and as the first diagnostic step on any unexpected behaviour. See [docs/Guide/mcp-doctor.md](docs/Guide/mcp-doctor.md) for the full check list.
 
 ---
 

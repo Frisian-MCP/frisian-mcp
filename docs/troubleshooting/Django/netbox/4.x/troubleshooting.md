@@ -5,6 +5,19 @@
 
 ---
 
+## First step on any unexpected behaviour: run `mcp_doctor`
+
+Before tailing logs or pasting curl output, run the configuration audit. It surfaces the most common integration issues — missing contrib app, auth class not wired, missing HMAC key, cache backend regression, OAuth posture mismatch — in seconds.
+
+```bash
+docker exec <container> python manage.py mcp_doctor
+docker exec <container> python manage.py mcp_doctor --security
+```
+
+Exits non-zero on errors. Warnings are flagged with `⚠`; errors with `✗`. See [Guide → mcp_doctor](../../../../Guide/mcp-doctor.md) for what each check looks at. If a symptom below isn't an exact match, doctor output usually narrows it down before any other diagnostic.
+
+---
+
 ## Installation
 
 ### `pip: command not found` or `No module named ensurepip` (official netbox-docker image)

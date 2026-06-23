@@ -213,6 +213,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         "perm_model",
         "permission_classes",
         "permission_tier",
+        "view_class",
     )
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-locals
@@ -262,6 +263,24 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         # dispatcher when the requesting user has no capabilities for any of its
         # child tools — so agents never see a group they cannot use at all.
         self.group_tool_names = group_tool_names
+        # ``view_class`` is the DRF ViewSet that produced this tool, resolved
+        # once at registration time by walking ``fn.__closure__`` for a
+        # ToolDefinition-like cell.  ``None`` for decorator-only tools
+        # (``@mcp_tool`` / ``@mcp_heavy`` / ``@mcp_dispatcher``) whose
+        # invocation closure does not capture a ViewSet.  Consumed by
+        # ``backends.invocation._extract_lean_envelope`` so it can read
+        # ``view_class.serializer_class.Meta.mcp_light_key`` without
+        # re-walking the closure on every write.
+        self.view_class = None
+        for cell in getattr(fn, "__closure__", None) or ():
+            try:
+                candidate = cell.cell_contents
+            except ValueError:  # empty cell during early closure construction
+                continue
+            resolved = getattr(candidate, "view_class", None)
+            if resolved is not None:
+                self.view_class = resolved
+                break
 
 
 class ToolRegistry:

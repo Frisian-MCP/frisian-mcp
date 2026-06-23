@@ -264,9 +264,8 @@ def _apply_meta_light_key(result: dict[str, Any], tool_name: str, envelope: dict
     """
     Surface fields named in ``serializer_class.Meta.mcp_light_key`` into *envelope*.
 
-    Resolves the ViewSet's serializer by looking up ``tool_name`` in
-    ``tool_registry``, walking the registered invocation closure for a
-    ToolDefinition exposing ``view_class``, and pulling
+    Reads the ``view_class`` already resolved on the registry entry at
+    registration time (see ``registry._ToolEntry.__init__``), then pulls
     ``view_class.serializer_class.Meta.mcp_light_key``.  Each field in that
     list that is present in *result* and not already in *envelope* is copied
     over.  Defensive at every step — any missing piece returns silently with
@@ -280,13 +279,7 @@ def _apply_meta_light_key(result: dict[str, Any], tool_name: str, envelope: dict
     entry = tool_registry.get_entry(tool_name)
     if entry is None:
         return
-    view_class: Any = None
-    for cell in getattr(entry.fn, "__closure__", None) or ():
-        candidate = cell.cell_contents
-        view_class = getattr(candidate, "view_class", None)
-        if view_class is not None:
-            break
-    serializer_class = getattr(view_class, "serializer_class", None)
+    serializer_class = getattr(entry.view_class, "serializer_class", None)
     meta = getattr(serializer_class, "Meta", None)
     extra_keys = getattr(meta, "mcp_light_key", None) or ()
     for key in extra_keys:
@@ -354,11 +347,11 @@ def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> d
     # per-serializer extension for the lean envelope (see the Installation &
     # Configuration Reference and the Write-Path Response Filtering guide).
     # The source serializer is resolved by looking up the registry entry for
-    # the ``tool_name`` in the caller's frame and walking the registered
-    # invocation closure for the underlying ToolDefinition's ``view_class``.
-    # Defensive at every step — any missing piece leaves the envelope
-    # unchanged so existing callers and decorator-only tools (no ViewSet)
-    # see no behaviour change.
+    # the ``tool_name`` in the caller's frame and reading the ``view_class``
+    # the registry resolved once at registration time (see
+    # ``registry._ToolEntry.__init__``).  Defensive at every step — any
+    # missing piece leaves the envelope unchanged so existing callers and
+    # decorator-only tools (no ViewSet) see no behaviour change.
     if isinstance(result, dict):
         try:
             # pylint: disable-next=protected-access
