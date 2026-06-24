@@ -10,42 +10,151 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  validate:
-    name: Lint, type-check, test & build
+  changes:
+    name: Detect changed paths
     runs-on: ubuntu-latest
-
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/pr-validation.yml'
+            docs:
+              - '**/*.md'
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+  lint:
+    name: Lint (format + imports + ruff)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
       - name: Sync dependencies
         run: uv sync --all-extras
-
+      - name: Cache ruff
+        uses: actions/cache@v4
+        with:
+          path: .ruff_cache
+          key: ruff-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
       - name: Black (format check)
         run: uv run black --check src/ tests/
-
       - name: isort (import order check)
         run: uv run isort --check-only src/ tests/
-
       - name: Ruff (lint)
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check --output-format=github src/ tests/
 
-      - name: Mypy (type check)
+  typecheck:
+    name: Type check (mypy)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      - name: Cache mypy
+        uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+      - name: Mypy
         run: uv run mypy src/frisian_mcp/
 
+  pylint:
+    name: Pylint
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
       - name: Pylint
         run: uv run pylint src/frisian_mcp/
 
-      - name: Tests
+  test:
+    name: Tests
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      - name: Pytest
         run: uv run pytest tests/ -q
 
+  build:
+    name: Build wheel
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
       - name: Build wheel
         run: |
           uv pip install build setuptools wheel
           uv run python -m build --wheel --no-isolation
+
+  markdown:
+    name: Markdown lint (advisory)
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    # Advisory until a markdownlint config + docs cleanup pass lands.
+    # Remove `continue-on-error` to make this a required check.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@v18
+        with:
+          globs: |
+            **/*.md
+            !node_modules/**
+            !.venv/**
+            !.git/**
