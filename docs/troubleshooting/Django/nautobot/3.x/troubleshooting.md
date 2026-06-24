@@ -5,6 +5,24 @@
 
 ---
 
+## First step on any unexpected behaviour: run `mcp_doctor`
+
+Before tailing logs or pasting curl output, run the configuration audit. It surfaces the most common integration issues — missing contrib app, auth class not wired, missing HMAC key, cache backend regression, OAuth posture mismatch — in seconds.
+
+```bash
+docker exec <container> nautobot-server mcp_doctor
+```
+
+Exits non-zero on errors. Warnings are flagged with `⚠`; errors with `✗`. See [Guide → mcp_doctor](../../../../Guide/mcp-doctor.md) for what each check looks at. If a symptom below isn't an exact match, doctor output usually narrows it down before any other diagnostic.
+
+If your deployment uses OAuth (the `frisian_mcp.contrib.oauth` app), follow up with the OAuth-specific audit. Skip this on token-only deployments — it will report noisy, irrelevant failures for OAuth checks that don't apply:
+
+```bash
+docker exec <container> nautobot-server mcp_doctor --security
+```
+
+---
+
 ## Installation
 
 ### `[frisian-mcp] registered 0 tools` at startup

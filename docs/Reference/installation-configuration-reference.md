@@ -358,6 +358,20 @@ FRISIAN_MCP_SERVICE_ACCOUNT_USER = "mcp_readonly_service"
 
 ---
 
+## Management Commands
+
+frisian-mcp ships three Django management commands. Run with `python manage.py <command>` (or `nautobot-server <command>`, `docker exec <container> python manage.py <command>`, etc., depending on host).
+
+| Command | Purpose | Guide |
+|---|---|---|
+| `mcp_doctor` | Audit the host's frisian-mcp integration end-to-end. Default pass runs eight checks (INSTALLED_APPS, URL mounting, auth wiring, security settings, cache backend, performance hints, OAuth registration posture, authorize URL reachability). `--security` adds six OAuth-specific security checks. Exits non-zero on errors. CI-pipeline usable. | [Guide → mcp_doctor](../Guide/mcp-doctor.md) |
+| `mcp_config` | Generate a client config JSON snippet for connecting an MCP client to this gateway. `--client <name>` emits the format expected by a specific client; `--token <value>` embeds an auth header; `--url`/`--name` override the server URL and key. | (inline; see `mcp_config --help`) |
+| `mcp_hash_api_key` | Compute the HMAC-SHA256 digest of a raw API key for use in `FRISIAN_MCP_API_KEYS`. Keys are stored as digests, not raw values, so a leaked settings file does not directly expose usable credentials. | (inline; see `mcp_hash_api_key --help`) |
+
+Run `mcp_doctor` after every install, after every config change, and as the first diagnostic step on any unexpected behaviour — most integration issues surface as a single `⚠` or `✗` line in the doctor output.
+
+---
+
 ## Decorator Reference
 
 ### @mcp_ignore

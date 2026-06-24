@@ -57,6 +57,8 @@ urlpatterns = [
 
 Connect your MCP client to `https://your-domain.com/mcp/`. That's the full install for a brownfield app with existing ViewSets.
 
+> **Verify the install before connecting any client.** Run `python manage.py mcp_doctor` after the first deploy and after every config change. It walks eight checks (INSTALLED_APPS, URL mounting, auth wiring, security settings, cache backend, performance hints, OAuth posture, authorize URL reachability) and exits non-zero on errors — ideal as a CI gate. `--security` adds an extended OAuth audit. See [Guide → mcp_doctor](../Guide/mcp-doctor.md).
+
 ---
 
 ## What Happens on Install

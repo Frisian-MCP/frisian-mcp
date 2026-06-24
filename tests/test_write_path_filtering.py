@@ -1128,3 +1128,66 @@ class TestMcpLightKeyExtension:
         assert envelope["sku"] == "SKU-1"
         assert "does_not_exist" not in envelope
         assert "also_missing" not in envelope
+
+    def test_d_registry_entry_view_class_populated_lazily(self) -> None:
+        """
+        P4.2.2: ``_ToolEntry.view_class`` is resolved once at registration time.
+
+        Resolved by walking ``fn.__closure__``, so ``_apply_meta_light_key`` can
+        read it directly without re-walking the closure on every write.
+        """
+        from frisian_mcp.registry import tool_registry as _registry
+
+        view_class = _FakeViewSet(_FakeSerializer(["sku"]))
+        tool_def = _FakeToolDef(view_class)
+
+        def _make_fn(td: _FakeToolDef) -> Any:
+            def _invoke(arguments: dict[str, Any], request: Any) -> Any:  # pragma: no cover
+                return td
+
+            return _invoke
+
+        tool_name = "p422.registry-entry"
+        _registry.register(
+            name=tool_name,
+            fn=_make_fn(tool_def),
+            description="fake",
+            input_schema={"type": "object"},
+            permission_classes=[],
+        )
+        try:
+            entry = _registry.get_entry(tool_name)
+            assert entry is not None
+            assert entry.view_class is view_class
+        finally:
+            _registry._tools.pop(tool_name, None)  # noqa: SLF001 — test cleanup
+
+    def test_d_registry_entry_view_class_none_for_decorator_only_tools(self) -> None:
+        """
+        Decorator-only tools default to ``view_class = None``.
+
+        ``@mcp_tool`` / ``@mcp_heavy`` register a callable whose closure has no
+        ``view_class`` attribute on any cell, so ``_ToolEntry.view_class`` must
+        default to ``None`` in that case so consumers can branch defensively.
+        """
+        from frisian_mcp.registry import tool_registry as _registry
+
+        def _plain_fn(
+            arguments: dict[str, Any], request: Any
+        ) -> dict[str, Any]:  # pragma: no cover
+            return {"ok": True}
+
+        tool_name = "p422.no-viewset"
+        _registry.register(
+            name=tool_name,
+            fn=_plain_fn,
+            description="fake",
+            input_schema={"type": "object"},
+            permission_classes=[],
+        )
+        try:
+            entry = _registry.get_entry(tool_name)
+            assert entry is not None
+            assert entry.view_class is None
+        finally:
+            _registry._tools.pop(tool_name, None)  # noqa: SLF001 — test cleanup
