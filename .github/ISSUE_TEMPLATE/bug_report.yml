@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a report. Please fill out the fields below so we can reproduce the issue quickly.
+        Thanks for taking the time to file a report. Fill out what you can — only a few fields are required.
   - type: textarea
     id: description
     attributes:
@@ -38,7 +38,7 @@ body:
       label: Actual behavior
       description: What actually happened, including full tracebacks or error envelopes if available.
     validations:
-      required: true
+      required: false
   - type: input
     id: frisian-version
     attributes:
@@ -52,14 +52,14 @@ body:
       label: Python version
       placeholder: "e.g. 3.12"
     validations:
-      required: true
+      required: false
   - type: input
     id: django-version
     attributes:
       label: Django / DRF version
       placeholder: "e.g. Django 5.1, DRF 3.15"
     validations:
-      required: true
+      required: false
   - type: input
     id: deployment
     attributes:
