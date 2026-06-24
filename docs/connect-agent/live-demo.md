@@ -7,6 +7,7 @@
 ---
 
 ## Connect a Coding Agent
+
 Add the following to your agent's `mcp.json`:
 
 ```json
@@ -25,6 +26,7 @@ This is a demo server and requires no authentication.
 ## Connect an LLM
 
 ### Claude.ai (Anthropic)
+
 - Go to [Connectors](https://claude.ai/customize/connectors) in your account settings.
 - Under Connectors, click `+`.
 - Click "Add custom connector" and enter the info below.
@@ -32,6 +34,7 @@ This is a demo server and requires no authentication.
 ![Connect Claude](claude/image.png)
 
 ### GPT (OpenAI)
+
 - Click your name (bottom left) → Settings → Apps.
 - Open "Advanced Settings" and toggle "Developer Mode" on.
 - Click "Create App" and enter the info below.
@@ -39,6 +42,7 @@ This is a demo server and requires no authentication.
 ![Connect GPT](chatgpt/image.png)
 
 ### Grok (xAI)
+
 - Click your name (bottom left) → Skills and Connectors → Connectors.
 - Click "New Connector" → "Custom".
 - Enter the info below.
@@ -46,9 +50,11 @@ This is a demo server and requires no authentication.
 ![Connect Grok](grok/image.png)
 
 ## Why connect your own agent?
+
 These tools were built for AI agents to use. The best judge of whether they fit your needs is the agent that will actually use them. Connected, it reads the same docs you see here—just faster.  It will also have access to the code in the `Test Cases` that we used to configure and test.
 
 ## What to ask once connected
+
 - What is the token problem?
 - Does this solve it?
 - What systems has it run on?  Tested on?  Why?

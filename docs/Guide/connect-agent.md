@@ -18,7 +18,7 @@ Screenshots for each client are in `connect-agent/` (sibling of this Guide direc
 
 The live MCP endpoint for the hosted demo instance is:
 
-```
+```text
 https://mcp.frisian-mcp.com/mcp
 ```
 
@@ -36,7 +36,7 @@ Claude Code, Cursor, Windsurf, and similar coding agents use Bearer token auth. 
 
 Obtain a token from your instance admin, then include it in the `Authorization` header on every request:
 
-```
+```http
 Authorization: Bearer <your-token>
 ```
 
@@ -85,7 +85,7 @@ Verify the connection with `/mcp` in the Claude Code prompt — this lists all c
 
 In Claude.ai, go to **Settings → Integrations → Add MCP server** and enter the endpoint URL:
 
-```
+```text
 https://mcp.frisian-mcp.com/mcp
 ```
 
@@ -99,7 +99,7 @@ Claude.ai will initiate the OAuth flow. Approve access when prompted and the int
 
 In ChatGPT, go to **Settings → Connectors → Add connector** and enter the endpoint URL. ChatGPT uses OAuth 2.0 — follow the authorization prompt to complete the connection.
 
-```
+```text
 https://mcp.frisian-mcp.com/mcp
 ```
 
@@ -111,7 +111,7 @@ https://mcp.frisian-mcp.com/mcp
 
 In Grok, navigate to **Tools → Add MCP server** and enter the endpoint URL. Grok uses OAuth 2.0 — follow the authorization prompt to complete the connection.
 
-```
+```text
 https://mcp.frisian-mcp.com/mcp
 ```
 

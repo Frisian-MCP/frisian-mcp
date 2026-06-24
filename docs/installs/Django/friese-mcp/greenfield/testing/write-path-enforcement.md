@@ -28,6 +28,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 **Setup:** Call a create tool (`POST` equivalent).
 
 **Input:**
+
 ```json
 {
   "name": "test-device-01",
@@ -36,6 +37,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 ```
 
 **Expected response shape:**
+
 ```json
 {
   "id": "<uuid or pk>",
@@ -58,6 +60,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 **Setup:** Call a bulk-create tool with multiple objects.
 
 **Input:**
+
 ```json
 [
   {"name": "batch-device-01", "status": "active"},
@@ -67,6 +70,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 ```
 
 **Expected response shape:**
+
 ```json
 {
   "accepted": 3,
@@ -88,6 +92,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 **Setup:** Call a destroy tool on an existing object.
 
 **Expected response shape:**
+
 ```json
 {
   "deleted": true,
@@ -104,6 +109,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 **Setup:** Call a create tool with `verify=True`.
 
 **Input:**
+
 ```json
 {
   "name": "verify-device-01",

@@ -139,7 +139,7 @@ frisian-mcp raises a startup error (E002) if `contrib.oauth` is installed, `FRIS
 
 Each `OAuthClient` record has a **user** field in the admin. Set it to the Django user whose permissions should define that client's tool surface. This gives independent scoping per OAuth client.
 
-```
+```text
 OAuthClient "dns-agent"
   └─ user: dns_service_account
 

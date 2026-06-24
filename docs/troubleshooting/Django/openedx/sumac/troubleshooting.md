@@ -28,11 +28,11 @@ INSTALLED_APPS = list(INSTALLED_APPS) + [
 ]
 ```
 
-2. Check that the `PluginURLs.CONFIG` in `openedx_frisian_mcp/apps.py` is present and correct.
+1. Check that the `PluginURLs.CONFIG` in `openedx_frisian_mcp/apps.py` is present and correct.
 
-3. Restart the LMS and look for this startup log line:
+2. Restart the LMS and look for this startup log line:
 
-```
+```text
 frisian_mcp: auto-discovery registered N tools
 ```
 

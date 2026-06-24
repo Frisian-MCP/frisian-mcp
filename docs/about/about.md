@@ -6,7 +6,6 @@ frisian-mcp is a Django package that turns Django REST Framework applications in
 
 This isn't theoretical. This was built after watching agents fail repeatedly when connected to real systems.
 
-
 ## The Problem
 
 If you've tried connecting an agent to a production API via MCP, you've probably seen this:
@@ -22,20 +21,25 @@ Traditional MCP servers expose everything eagerly. Agents can't handle it.
 ## What frisian-mcp Does Differently
 
 ### Dispatcher Pattern
+
 Instead of exposing 634 individual tools, frisian-mcp groups them into logical dispatchers. The agent sees one gateway tool and discovers resources progressively as needed. Tool schemas stay out of context until requested.
 
 ### @mcp_heavy Decorator
+
 Large result sets get automatic pagination. The agent receives metadata (total count, next URL) instead of 500 records dumped into context. The agent decides whether to paginate, filter, or work with the summary. Context window is preserved.
 
 ### Permission-Aware Discovery
+
 Only tools the authenticated user can actually call are exposed. No wasted tokens on permission errors. No retry loops burning context budget.
 
 ## Two Use Cases
 
 ### Brownfield: Overlay Existing Apps
+
 If you have a Django app with DRF ViewSets, frisian-mcp can expose it via MCP without refactoring. Your existing REST API becomes agent-accessible. URLs, serializers, permissions—everything works as-is.
 
 ### Greenfield: Agent-First Architecture
+
 If you're building new systems, frisian-mcp lets you design for agents as users, not consumers. Agents are smart enough to understand what they need. The question shifts from "how do we expose this?" to "how do agents interact with data?"—whether that's network configs, marketing reports, infrastructure state, or anything else. Building agent-first from day one means designing for how agents actually retrieve and act on data — not retrofitting a human API for machine consumption.
 
 In this model, agents are first-class users.
@@ -83,13 +87,13 @@ These aren't projections. We measured them.
 Version 1.0.12. Works with Django 5.x, DRF 3.x, Python 3.11+.
 
 Tested against:
+
 - Nautobot (network automation platform)
 - Multi-agent orchestration systems
 - Fitness tracking applications
 - Small/medium business management tools
 
 If you're building agent-accessible Django apps and you're tired of context bloat, this might help.
-
 
 ## Zero-Touch Integration
 
@@ -106,4 +110,3 @@ For plugin-based hosts like NetBox, the integration uses a thin plugin wrapper t
 Built by an engineer frustrated with context bloat in MCP tooling — where connecting to a large API meant burning an entire agent session just to discover what tools were available. The MCP standard has been a focus since Anthropic introduced it in 2024, through its growth and its donation to the AAIF under the Linux Foundation in December 2025. This package is the result of nearly two years of working with agents in production — learning what works and what doesn't.
 
 frisian-mcp isn't designed only for enterprise systems. The solo developer automating a side project deserves tools that don't hallucinate. The vibe coder building a small business app deserves agent integration that doesn't exhaust context windows. frisian-mcp is for anyone building with Django who wants agents to actually work.
-

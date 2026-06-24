@@ -106,12 +106,13 @@ For permission-aware discovery to provide meaningful security properties, the ex
 
 Each OAuth client record has a `user` field. Set it to a Django user whose permissions match exactly what you want that client to see and do.
 
-```
+```text
 OAuthClient "dns-agent"
   └─ user: dns_service_account  ← has view_dnsrecord, no write, no other models
 ```
 
 With this configuration:
+
 - `request.user` = `dns_service_account` (set by the authentication backend)
 - Discovery filter: runs against `dns_service_account`'s permissions → shows only DNS read tools
 - Execution: REST calls run as `dns_service_account` → host app enforces `dns_service_account`'s permissions

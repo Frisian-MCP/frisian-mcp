@@ -9,6 +9,7 @@
 frisian-mcp's security architecture recommends separating read and write surfaces at the URL routing level. This is not a package default — it is an architecture you configure. This test verifies that if you have implemented path separation, the boundary holds: callers on the read path cannot reach write tools by any means.
 
 The threat model is an agent — compromised, misconfigured, or adversarial — that:
+
 1. Enumerates tools via `tools/list`
 2. Identifies write or admin tool names
 3. Attempts to invoke them directly, bypassing the listing

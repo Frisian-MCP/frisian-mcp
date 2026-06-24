@@ -41,7 +41,7 @@ The decorated function must accept `(uri: str, request: HttpRequest)` and return
 
 URI templates use Level-1 RFC 6570 placeholders. The match is exact on literal segments; `{variable}` captures one path segment:
 
-```
+```text
 config://app/{key}        matches  config://app/debug_mode
 documents://reports/{id}  matches  documents://reports/42
 ```

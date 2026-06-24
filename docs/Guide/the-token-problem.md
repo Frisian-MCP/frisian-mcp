@@ -75,7 +75,7 @@ The numbers below are measured, not estimated:
 
 **Network automation platform** — full integration with 1,967 discoverable tools:
 
-```
+```text
 Flat exposure:           ~490,000 tokens of tool schemas
 Group dispatch (13):       ~2,000–4,000 tokens
 Reduction:                 99.3%
@@ -83,7 +83,7 @@ Reduction:                 99.3%
 
 **Multi-agent orchestration platform** (production) — 70–90 underlying operations exposed as 10 dispatchers:
 
-```
+```text
 Flat exposure:           ~22,500 tokens of tool schemas  
 Dispatcher exposure:       ~2,000 tokens
 Reduction:                 91%
@@ -166,6 +166,7 @@ Unlike result payload bloat, write-echo bloat is structurally predictable: the a
 The `@mcp_light` feature applies a lean confirmation envelope to all write operations by default. Instead of echoing the full serialized object, frisian-mcp returns a small set of identifying fields plus metadata:
 
 **Single-object create or update:**
+
 ```json
 {
   "id": "abc123",
@@ -178,6 +179,7 @@ The `@mcp_light` feature applies a lean confirmation envelope to all write opera
 ```
 
 **Bulk create or update:**
+
 ```json
 {
   "accepted": 60,
@@ -194,7 +196,7 @@ The lean envelope for the 60-device bulk create is approximately 24 tokens (95 b
 
 The measured figures from the production integration session:
 
-```
+```text
 60-device bulk create, full echo:   ~10,798 tokens (43,190 bytes)
 60-device bulk create, lean envelope:    ~24 tokens (95 bytes)
 Reduction:                             99.8%

@@ -55,6 +55,7 @@ class ThrottledMcpView(McpView):
 **Pass condition:** On the request that exceeds the limit, the response is HTTP 429 with a `Retry-After` header indicating when the window resets.
 
 **What to verify in the response:**
+
 ```json
 {
   "detail": "Request was throttled. Expected available in X seconds."
@@ -100,6 +101,7 @@ This matters for agent workflows that call `tools/list` once at startup and then
 ## Test 6: Throttle Under Bulk-Provisioning Pattern
 
 **Setup:** Simulate a realistic agent bulk-provisioning workflow:
+
 1. `tools/list` (1 call)
 2. Loop of `devices.create` calls × N devices
 
@@ -108,6 +110,7 @@ This matters for agent workflows that call `tools/list` once at startup and then
 **This is a capacity-sizing test, not a pass/fail test.** The result informs your throttle configuration, not whether frisian-mcp has a defect.
 
 Typical agent-scale guidance:
+
 - A 200-device provisioning run with sequential creates needs at minimum 201 calls per session
 - If your `user` rate is 600/min and each create takes ~300ms, you have headroom for ~33 devices/minute before hitting the wall
 - For bulk operations, use the bulk-create tool (single call, many objects) rather than sequential single creates

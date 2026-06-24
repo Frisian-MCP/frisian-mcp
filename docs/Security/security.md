@@ -9,6 +9,7 @@ Traditional web security was built around a human attacker operating at human sp
 An autonomous agent doesn't operate at human speed. It operates at API speed.
 
 In two seconds, a compromised or malicious agent can:
+
 - Enumerate your entire tool surface via `tools/list`
 - Identify write and admin endpoints by name
 - Attempt privilege escalation against any endpoint it can reach
@@ -33,18 +34,20 @@ frisian-mcp's recommended deployment separates read and write operations at the 
 
 > Implementation note: This is a recommended architecture, not a default package setting. You must configure path separation explicitly.
 
-
 ### Public read path — docs, discovery, read-only tools
+
 `/mcp/`
 This path is for public consumption.  Similar to the path you are reading this on, it is meant to inform agents and be an `open-world` endpoint.  These can still be gated through access tiers and permissions.
 
 This is not a permission boundary. It is a **route-availability boundary**: write and elevated-permission operations are physically absent from the public path. A caller on /mcp/ cannot invoke routes that are not mounted there.
 
-### Write path — customer agent tools with write access.
+### Write path — customer agent tools with write access
+
 `/mcp-endpoint-elevated-permissions/`
 These paths are similar to the public read path, but include write operations.  This would be where untrusted agents can contribute or mutate customer-scoped states.
 
 ### Authenticated write path - elevated admin or sensitive data paths (HIPAA, PCI, SOC, etc...)
+
 `/protected-mcp-endpoint/{randomized_string}`
 This path is for administrative permissions on the system, where agents have full CRUD access to the system and data they are responsible for.   If this is internet-facing the `{randomized_string}` should be treated as a `secret` and stored in a vault, with a retention and rotation policy.  This is not authentication and by no means does it replace good authn/authz practices, it is a **defense-in-depth** architectural design suggestion.
 
@@ -82,6 +85,7 @@ Recommended: the `/mcp/` path must return identical response shapes and timing f
 ## Recommended Deployment Pattern
 
 > The three paths are distinct mounts at the reverse proxy layer — not nested routes. The randomized admin path shares no URL prefix with the write path in production.
+
 ```mermaid
 graph TD
     RP["Reverse Proxy"]
@@ -149,7 +153,7 @@ package primitives above), not via a per-path allowlist.
 
 Not all documentation should be public simultaneously. frisian-mcp uses Django group assignment to control which documents are served by the docs dispatcher.
 
-```
+```text
 private group  →  not returned by /mcp/ docs dispatcher
 public group   →  returned with no authentication required
 ```

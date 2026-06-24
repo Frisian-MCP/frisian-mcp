@@ -158,7 +158,7 @@ NetBox removed the standard Django `is_staff` attribute from its User model. The
 
 NetBox 4.x uses a v2 token system. Tokens have the format `nbt_<key>.<plaintext>` and require the `Bearer` scheme:
 
-```
+```http
 Authorization: Bearer nbt_<key>.<plaintext>
 ```
 
@@ -240,7 +240,7 @@ FRISIAN_MCP_OAUTH_ISSUER = "https://your-netbox.example.com"
 
 **Symptom:** Startup log shows:
 
-```
+```text
 frisian-mcp: WARNING: dispatch group 'circuits' has 0 matching tools
 ```
 
@@ -272,7 +272,8 @@ The warning log includes "did you mean" suggestions from the registered basename
 The default path when `FRISIAN_MCP_PATH` is not set is `mcp`, making the endpoint `/mcp/`. The install docs recommend `FRISIAN_MCP_PATH = "api/mcp"` which makes it `/api/mcp/`. Whichever value is set (or defaulted), that is the only path that returns 200.
 
 Check which path was registered at startup:
-```
+
+```text
 [frisian-mcp] registered N tools at /mcp/
 ```
 

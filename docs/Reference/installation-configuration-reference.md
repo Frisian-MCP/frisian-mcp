@@ -142,6 +142,7 @@ FRISIAN_MCP_AUTODISCOVER = True
 ```
 
 **Auto-discovery produces zero tools when:**
+
 - ViewSets are not yet resolved at discovery time — verify your router registration runs before frisian-mcp's app ready signal
 - All discovered ViewSets are decorated with `@mcp_ignore`
 - Only function-based views are in use (auto-discovery reads ViewSets only)
@@ -172,7 +173,7 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 
 **Misconfigured groups warn at startup.** A group whose configured prefixes match zero tools logs a `WARNING` and prints a `[frisian-mcp] WARNING` line with "Did you mean:" suggestions derived from the actually-registered resource names (`apps.py:600-635`). The group is silently dropped — its flat tools remain visible in `tools/list`. If you see a `0 matching tools` warning, the most common cause is configuring camelcase-stripped prefixes (`stockmovement`) for a build that uses kebab-case router slugs (which become `stock_movement` after the hyphen→underscore conversion), or vice versa. Match the suggestion the warning prints rather than guessing.
 
-```
+```text
 [frisian-mcp] WARNING: dispatch group 'stock' has 0 matching tools — its flat tools will
 remain visible in tools/list and may crowd out other dispatchers. Hint: use
 Model._meta.object_name.lower(). See log.
@@ -436,6 +437,7 @@ Write-path response filtering. All create, update, and destroy tools return a le
 **Default lean envelope shapes:**
 
 Single-object create or update:
+
 ```json
 {
   "id": "abc123",
@@ -448,6 +450,7 @@ Single-object create or update:
 ```
 
 Bulk create or update (when supported by the underlying ViewSet):
+
 ```json
 {
   "accepted": 60,
@@ -461,6 +464,7 @@ Bulk create or update (when supported by the underlying ViewSet):
 > **Note:** Bulk create is a passthrough — frisian-mcp does not add bulk support to ViewSets that don't already implement it. The `accepted`/`failed` envelope only appears when the host ViewSet's DRF implementation handles a list body on the create endpoint. If the underlying ViewSet does not support bulk create, a standard single-object create is all that is available.
 
 Delete:
+
 ```json
 {
   "id": "abc123",
@@ -585,6 +589,7 @@ python manage.py migrate
 ```
 
 Mounts automatically:
+
 - `/.well-known/oauth-authorization-server` — RFC 8414 metadata
 - `/mcp/oauth/token/` — token endpoint (client_credentials grant)
 - `/mcp/oauth/register/` — RFC 7591 dynamic client registration

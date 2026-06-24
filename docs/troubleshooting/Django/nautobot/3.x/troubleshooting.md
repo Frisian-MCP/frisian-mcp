@@ -56,7 +56,7 @@ pip install --force-reinstall frisian-mcp
 
 The startup log shows a warning such as:
 
-```
+```text
 [frisian-mcp] WARNING: dispatch group 'dns' has 0 matching tools
 ```
 
@@ -152,9 +152,11 @@ MCP tool calls are synchronous HTTP requests that can take 30–90 seconds for c
 **Steps:**
 
 1. Increase `proxy_read_timeout` in the `/api/mcp/` location blocks:
+
    ```nginx
    proxy_read_timeout 180s;  # try 180, then 300 if still timing out
    ```
+
 2. Add `FRISIAN_MCP_DISPATCH_GROUPS` to bundle tools — group dispatchers reduce per-call data volume and response time (see [install.md](../../../../installs/Django/nautobot/3.x/install.md) Step 7).
 3. For ViewSet actions returning large result sets, consider `@mcp_heavy` — it enforces pagination-first behavior so agents receive a count and first page rather than the full result set.
 

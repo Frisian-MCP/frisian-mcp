@@ -203,7 +203,6 @@ If you are doing a demo or evaluation and want to go deeper on a specific area, 
 - **"What would it take to integrate frisian-mcp into my Django application?"** — The Getting Started and Installation guides cover this. Two production integrations with different shapes (fitness app, orchestration platform) are documented as case studies.
 - **"Has this been tested with GPT?"** — Yes. Both GPT and Claude have been used as agents against these systems. The multi-agent coordination platform runs both simultaneously, using task leasing to prevent conflicts.
 
-
 **NOTE:** The live Nautobot build is exactly that — live. Agents have added, removed, and interacted with the system the same way you should. The reference documents capture measurements at a specific point in time. You are encouraged to do the same: add, delete, and validate against what you find.
 
 ---

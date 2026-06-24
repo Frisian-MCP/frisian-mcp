@@ -275,7 +275,7 @@ This means frisian-mcp is upgrade-safe. When NetBox releases a new version, fris
 
 The gateway will be available at:
 
-```
+```text
 https://your-netbox.example.com/api/mcp/
 ```
 
@@ -285,7 +285,7 @@ https://your-netbox.example.com/api/mcp/
 
 Start NetBox normally. Look for this line in the server output:
 
-```
+```text
 [frisian-mcp] registered N tools at /api/mcp/
 ```
 
@@ -295,7 +295,7 @@ If you see `registered 0 tools`, verify that `frisian_mcp_netbox` appears in `PL
 
 You may also see schema derivation warnings for a small number of NetBox ViewSets whose `get_serializer_class()` requires a live request object. These are cosmetic — the affected tools are still registered with an empty input schema and remain callable:
 
-```
+```text
 frisian_mcp: schema derivation failed for DeviceViewSet.create — falling back to empty schema.
 ```
 
@@ -355,7 +355,7 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 ```
 
 > **Full group listing:** `development/configuration.py` contains the complete dispatch group configuration including all VPN, wireless, and extras resources discovered during integration testing.
-
+>
 > **Basename tip:** Dispatch group basenames must match DRF's ViewSet basename — always `Model._meta.object_name.lower()`. Three explicit exceptions in NetBox: `connected-device` → `"connected_device"`, the scripts endpoint → `"script"`, and the user config endpoint → `"userconfig"`.
 
 ---
@@ -456,7 +456,7 @@ operator pre-registers each client via the Django admin:
    **Connect MCP Server → Advanced**; ChatGPT and Grok have equivalent
    forms).  Point the client URL at:
 
-   ```
+   ```text
    https://your-netbox.example.com/api/mcp/
    ```
 

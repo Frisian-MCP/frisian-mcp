@@ -19,6 +19,7 @@ jobs:
     outputs:
       python: ${{ steps.filter.outputs.python }}
       docs: ${{ steps.filter.outputs.docs }}
+      workflows: ${{ steps.filter.outputs.workflows }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -33,6 +34,32 @@ jobs:
               - '.github/workflows/pr-validation.yml'
             docs:
               - '**/*.md'
+            workflows:
+              - '.github/workflows/**'
+
+  guard-workflow-edits:
+    name: Guard workflow edits (Core Maintainers only)
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify author is a Core Maintainer
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # Hardcoded mirror of @Frisian-MCP/core-maintainers team roster.
+          # Update this list when team membership changes:
+          # https://github.com/orgs/Frisian-MCP/teams/core-maintainers
+          case "$AUTHOR" in
+            Jeremy-Friese|salehkabuawad)
+              echo "✓ $AUTHOR is a Core Maintainer — workflow edit allowed."
+              ;;
+            *)
+              echo "::error::Workflow edits require @Frisian-MCP/core-maintainers membership."
+              echo "::error::Author '$AUTHOR' is not on the maintainer roster."
+              exit 1
+              ;;
+          esac
 
   lint:
     name: Lint (format + imports + ruff)

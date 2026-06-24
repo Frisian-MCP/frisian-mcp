@@ -126,4 +126,3 @@ Other backends (default Django `ModelBackend`, custom backends) satisfy the cont
 1. Final names: the feature flag, the `backend_action` decorator parameter, and the adapter method signatures (these become public contract).
 2. Startup validation: when the flag is on, verify (a) the OAuth identity resolves to a real user where applicable, and (b) every registered non-CRUD dispatcher tool has a `backend_action` mapping; fail loud with actionable errors otherwise.
 3. Whether `is_unrestricted()` needs a per-action signature (Nautobot's exemption is view-only) or whether per-content-type is sufficient for V1.
-
