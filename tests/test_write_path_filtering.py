@@ -1131,8 +1131,9 @@ class TestMcpLightKeyExtension:
 
     def test_d_registry_entry_view_class_populated_lazily(self) -> None:
         """
-        P4.2.2: ``_ToolEntry.view_class`` is resolved once at registration
-        time by walking ``fn.__closure__``, so ``_apply_meta_light_key`` can
+        P4.2.2: ``_ToolEntry.view_class`` is resolved once at registration time.
+
+        Resolved by walking ``fn.__closure__``, so ``_apply_meta_light_key`` can
         read it directly without re-walking the closure on every write.
         """
         from frisian_mcp.registry import tool_registry as _registry
@@ -1163,14 +1164,17 @@ class TestMcpLightKeyExtension:
 
     def test_d_registry_entry_view_class_none_for_decorator_only_tools(self) -> None:
         """
-        Decorator-only tools (``@mcp_tool``, ``@mcp_heavy``) register a
-        callable whose closure has no ``view_class`` attribute on any cell.
-        ``_ToolEntry.view_class`` must default to ``None`` in that case so
-        consumers can branch defensively.
+        Decorator-only tools default to ``view_class = None``.
+
+        ``@mcp_tool`` / ``@mcp_heavy`` register a callable whose closure has no
+        ``view_class`` attribute on any cell, so ``_ToolEntry.view_class`` must
+        default to ``None`` in that case so consumers can branch defensively.
         """
         from frisian_mcp.registry import tool_registry as _registry
 
-        def _plain_fn(arguments: dict[str, Any], request: Any) -> dict[str, Any]:  # pragma: no cover
+        def _plain_fn(
+            arguments: dict[str, Any], request: Any
+        ) -> dict[str, Any]:  # pragma: no cover
             return {"ok": True}
 
         tool_name = "p422.no-viewset"
