@@ -1248,3 +1248,164 @@ class TestMcpLightKeyEndToEnd:
         assert result["sku"] == "SKU-9"
         # ...but unlisted payload fields are not.
         assert "noise" not in result
+
+
+# ---------------------------------------------------------------------------
+# SEC-3 — write-issued continuation_token owner binding
+# ---------------------------------------------------------------------------
+
+
+def _call_tool_session(
+    rf: RequestFactory, name: str, arguments: dict[str, Any], session_id: str
+) -> Any:
+    """Like ``_call_tool`` but stamps an ``Mcp-Session-Id`` header on the request."""
+    request = rf.post(
+        "/mcp/",
+        data=json.dumps(_jsonrpc("tools/call", {"name": name, "arguments": arguments})),
+        content_type="application/json",
+        HTTP_MCP_SESSION_ID=session_id,
+    )
+    request.user = AnonymousUser()
+    return _view(request)
+
+
+def _call_with_cache(
+    rf: RequestFactory,
+    isolated: ToolRegistry,
+    cache_store: dict[str, Any],
+    name: str,
+    arguments: dict[str, Any],
+    session_id: str,
+) -> Any:
+    """Run a ``tools/call`` against *isolated* with a persistent fake cache + session."""
+
+    def _set(key: str, value: Any, timeout: int) -> None:
+        cache_store[key] = value
+
+    def _get(key: str) -> Any:
+        return cache_store.get(key)
+
+    with (
+        patch("frisian_mcp.views.tool_registry", isolated),
+        patch("frisian_mcp.views.django_cache") as mock_cache,
+    ):
+        mock_cache.get.side_effect = _get
+        mock_cache.set.side_effect = _set
+        return _call_tool_session(rf, name, arguments, session_id)
+
+
+class TestWriteContinuationTokenOwnerBinding:
+    """
+    SEC-3: a write-issued ``continuation_token`` is owner-bound like a ``@mcp_heavy`` token.
+
+    The lean write path caches the full result via ``_build_heavy_cache_entry``,
+    which stamps the caller's owner key, and retrieval re-checks that key before
+    serving.  The existing SEC-3 tests (``test_mcp_heavy.py``) only cover tokens
+    issued by ``@mcp_heavy`` tools; these prove the same binding holds for tokens
+    issued by the *write* path, so a future change that special-cased write-token
+    caching could not silently drop the protection.
+
+    The owner key composes the tool name and the MCP session id (among other
+    fields), so two of the three drift dimensions are exercised here: a different
+    session and a different tool.  The happy-path test anchors the other two —
+    it confirms a refusal is caused by owner drift, not an unrelated error.
+    """
+
+    def test_replay_from_different_session_is_refused(self, rf: RequestFactory) -> None:
+        """A write token issued to one session cannot be replayed by another session."""
+        full_object = {"id": "uuid-A", "name": "device-A", "payload": "x" * 100}
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return full_object
+
+        isolated = _build_write_registry("device.create", _create)
+        cache_store: dict[str, Any] = {}
+
+        resp1 = _call_with_cache(
+            rf, isolated, cache_store, "device.create", {"name": "device-A"}, "agent-A"
+        )
+        token = _tool_result(resp1)["continuation_token"]
+
+        resp2 = _call_with_cache(
+            rf,
+            isolated,
+            cache_store,
+            "device.create",
+            {"continuation_token": token, "mode": "full"},
+            "agent-B",
+        )
+
+        assert _is_error(resp2)
+        body = _tool_result(resp2)
+        assert "does not belong" in body["error"]
+        # The cached payload must NOT leak to the wrong caller.
+        assert "payload" not in body
+
+    def test_replay_against_different_tool_is_refused(self, rf: RequestFactory) -> None:
+        """A write token issued for one tool cannot be replayed against another tool."""
+        full_object = {"id": "uuid-B", "name": "device-B", "secret": "top"}
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return full_object
+
+        def _delete(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return {"deleted": True}
+
+        isolated = _build_write_registry("device.create", _create)
+        isolated.register(
+            name="device.delete",
+            fn=_delete,
+            description="stub write tool",
+            input_schema={"type": "object"},
+            permission_classes=[],
+            is_write=True,
+            permission_tier="read",
+        )
+        cache_store: dict[str, Any] = {}
+
+        resp1 = _call_with_cache(
+            rf, isolated, cache_store, "device.create", {"name": "device-B"}, "agent-A"
+        )
+        token = _tool_result(resp1)["continuation_token"]
+
+        # Same session, same caller — only the tool name differs.
+        resp2 = _call_with_cache(
+            rf,
+            isolated,
+            cache_store,
+            "device.delete",
+            {"continuation_token": token, "mode": "full"},
+            "agent-A",
+        )
+
+        assert _is_error(resp2)
+        body = _tool_result(resp2)
+        assert "does not belong" in body["error"]
+        assert "secret" not in body
+
+    def test_same_caller_same_tool_serves_full_result(self, rf: RequestFactory) -> None:
+        """Anchor: identical owner (same tool + session) serves the cached full result."""
+        full_object = {"id": "uuid-C", "name": "device-C", "payload": "z" * 50}
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return full_object
+
+        isolated = _build_write_registry("device.create", _create)
+        cache_store: dict[str, Any] = {}
+
+        resp1 = _call_with_cache(
+            rf, isolated, cache_store, "device.create", {"name": "device-C"}, "agent-A"
+        )
+        token = _tool_result(resp1)["continuation_token"]
+
+        resp2 = _call_with_cache(
+            rf,
+            isolated,
+            cache_store,
+            "device.create",
+            {"continuation_token": token, "mode": "full"},
+            "agent-A",
+        )
+
+        assert not _is_error(resp2)
+        assert _tool_result(resp2)["payload"] == full_object["payload"]
