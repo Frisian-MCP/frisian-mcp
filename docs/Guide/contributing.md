@@ -147,7 +147,7 @@ def build_response(data: dict[str, object]) -> MCPResponse:
 
 ### pylint — code quality
 
-pylint is configured in `pyproject.toml` under `[tool.pylint]`. The project targets a minimum score of **9.0/10**.
+pylint is configured in `pyproject.toml` under `[tool.pylint]`. The project targets a score of **10/10**.
 
 Run pylint directly:
 
