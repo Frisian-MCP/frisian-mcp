@@ -25,7 +25,7 @@ Frisian-MCP has been validated against four large, production-grade open-source 
 - **Nautobot** - network automation and source-of-truth (634+ API operations)
 - **NetBox** - infrastructure resource modeling
 - **Paperless-ngx** - document management
-- **Opend edX** - learning management at platform scale
+- **Open edX** - learning management at platform scale
 
 ### Why these systems?
 
