@@ -323,6 +323,6 @@ See [Permission-Aware Discovery](../Guide/permission-aware-discovery.md) for con
 - **Security-First MCP Architecture** — recommended deployment patterns for production MCP surfaces
 - **Integration walkthroughs** — real build sessions against Nautobot and NetBox, including token efficiency measurements and agent behavior at scale
 - **Test Cases** — Real integration sessions across network automation, document management, and other production systems.  View the **API Validation** for raw comparisons.
-- **Changelog** — full version history from v0.1.0 to v1.0.11
+- **Changelog** — full version history from v0.1.0 to v1.0.12
 
 ---
