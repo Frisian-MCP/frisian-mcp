@@ -1319,7 +1319,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         )
 
         _w_token = secrets.token_urlsafe(16)
-        _lean = _extract_lean_envelope(result, _w_token, _http_status)
+        _lean = _extract_lean_envelope(result, _w_token, _http_status, tool_name=tool_name)
         if "continuation_token" in _lean:
             django_cache.set(
                 f"{_HEAVY_CACHE_PREFIX}{_w_token}",
@@ -1359,7 +1359,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             )
 
             _w_token = secrets.token_urlsafe(16)
-            _d_lean = _extract_lean_envelope(result, _w_token, _http_status)
+            # Pass the outer dispatcher tool name, matching the prior
+            # frame-introspection behaviour.  (Resolving the underlying
+            # ``_d_target`` serializer's light-key here would be a behaviour
+            # change, not a refactor — left for a follow-up.)
+            _d_lean = _extract_lean_envelope(result, _w_token, _http_status, tool_name=tool_name)
             if "continuation_token" in _d_lean:
                 django_cache.set(
                     f"{_HEAVY_CACHE_PREFIX}{_w_token}",
