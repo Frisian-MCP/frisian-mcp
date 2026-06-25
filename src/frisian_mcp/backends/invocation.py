@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sys
 from io import BytesIO
 from typing import Any
 from urllib.parse import urlencode
@@ -287,7 +286,9 @@ def _apply_meta_light_key(result: dict[str, Any], tool_name: str, envelope: dict
             envelope[key] = result[key]
 
 
-def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> dict[str, Any]:
+def _extract_lean_envelope(
+    result: Any, token: str, http_status: int = 200, tool_name: str | None = None
+) -> dict[str, Any]:
     """
     Build the lean write-confirmation envelope from a fully-serialised result.
 
@@ -298,6 +299,10 @@ def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> d
     ``http_status`` is the HTTP status code from the DRF response (201 for creates,
     204 for deletes, 200 for reads/updates).  When called directly (e.g. from tests
     without a live DRF response), it defaults to 200.
+
+    ``tool_name`` names the tool whose serializer should be consulted for the
+    ``Meta.mcp_light_key`` extension (see below).  When ``None`` (the default,
+    e.g. direct callers that do not need the extension) the lookup is skipped.
 
     For delete results the ``"status"`` key embedded by ``_extract_data`` is used
     directly; it is always a bare integer (204) so no ambiguity with application-
@@ -346,22 +351,14 @@ def _extract_lean_envelope(result: Any, token: str, http_status: int = 200) -> d
     # Honour ``ViewSet.serializer_class.Meta.mcp_light_key`` — the documented
     # per-serializer extension for the lean envelope (see the Installation &
     # Configuration Reference and the Write-Path Response Filtering guide).
-    # The source serializer is resolved by looking up the registry entry for
-    # the ``tool_name`` in the caller's frame and reading the ``view_class``
-    # the registry resolved once at registration time (see
-    # ``registry._ToolEntry.__init__``).  Defensive at every step — any
-    # missing piece leaves the envelope unchanged so existing callers and
-    # decorator-only tools (no ViewSet) see no behaviour change.
-    if isinstance(result, dict):
-        try:
-            # pylint: disable-next=protected-access
-            caller_locals = sys._getframe(1).f_locals  # noqa: SLF001
-            tool_name = caller_locals.get("tool_name")
-            if isinstance(tool_name, str) and tool_name:
-                _apply_meta_light_key(result, tool_name, envelope)
-        # pylint: disable-next=broad-exception-caught
-        except Exception:  # noqa: BLE001, S110 — never break existing behaviour
-            pass
+    # The serializer is resolved by looking up the registry entry for the
+    # explicitly-supplied ``tool_name`` and reading the ``view_class`` the
+    # registry resolved once at registration time (see
+    # ``registry._ToolEntry.__init__``).  ``_apply_meta_light_key`` is
+    # defensive at every step — any missing piece leaves the envelope
+    # unchanged so decorator-only tools (no ViewSet) see no behaviour change.
+    if isinstance(result, dict) and tool_name:
+        _apply_meta_light_key(result, tool_name, envelope)
 
     return envelope
 

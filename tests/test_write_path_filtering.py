@@ -1054,13 +1054,12 @@ def _build_envelope_with_meta(
     result: dict[str, Any], light_key: list[str] | None, tool_name: str = "items.create"
 ) -> dict[str, Any]:
     """
-    Drive ``_extract_lean_envelope`` through the frame-introspection path.
+    Drive ``_extract_lean_envelope`` with an explicit ``tool_name`` argument.
 
     Wire up a real ``tool_registry`` entry whose ``fn`` closure exposes a
-    fake ToolDefinition with a fake ViewSet → Serializer → Meta chain,
-    then call ``_extract_lean_envelope`` with ``tool_name`` in the caller's
-    frame locals so the frame-introspection path can resolve the
-    serializer.
+    fake ToolDefinition with a fake ViewSet → Serializer → Meta chain, then
+    call ``_extract_lean_envelope`` passing ``tool_name`` explicitly so it can
+    resolve the serializer — no stack-frame introspection involved.
     """
     from frisian_mcp.registry import tool_registry as _registry
 
@@ -1084,7 +1083,7 @@ def _build_envelope_with_meta(
         permission_classes=[],
     )
     try:
-        return _extract_lean_envelope(result, "tok")
+        return _extract_lean_envelope(result, "tok", tool_name=tool_name)
     finally:
         _registry._tools.pop(tool_name, None)  # noqa: SLF001 — test cleanup
 
@@ -1191,3 +1190,61 @@ class TestMcpLightKeyExtension:
             assert entry.view_class is None
         finally:
             _registry._tools.pop(tool_name, None)  # noqa: SLF001 — test cleanup
+
+
+class TestMcpLightKeyEndToEnd:
+    """
+    End-to-end ``Meta.mcp_light_key`` promotion through the real ``McpView`` write path.
+
+    The unit tests above call ``_extract_lean_envelope`` directly.  These drive a
+    write all the way through ``McpView`` so the ``views.py`` → ``_extract_lean_envelope``
+    ``tool_name`` hand-off is exercised.  A regression that breaks that hand-off
+    (e.g. the view failing to pass ``tool_name``) is caught here and nowhere else.
+
+    The tool is registered in the *global* ``tool_registry`` because
+    ``_apply_meta_light_key`` resolves the serializer via that singleton; the view
+    dispatches against the same singleton, so no registry patch is needed.
+    """
+
+    @staticmethod
+    def _make_create(full_object: dict[str, Any], view_class: Any) -> Any:
+        tool_def = _FakeToolDef(view_class)
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            _ = tool_def  # close over tool_def so the registry resolves view_class
+            return full_object
+
+        return _create
+
+    def test_light_key_field_promoted_through_mcpview(self, rf: RequestFactory) -> None:
+        """A write through McpView surfaces a Meta.mcp_light_key field in the lean envelope."""
+        from frisian_mcp.registry import tool_registry as _registry
+
+        full_object = {"id": "x1", "name": "n1", "sku": "SKU-9", "noise": "skip"}
+        view_class = _FakeViewSet(_FakeSerializer(["sku"]))
+        tool_name = "lightkey_e2e.create"
+        _registry.register(
+            name=tool_name,
+            fn=self._make_create(full_object, view_class),
+            description="light-key e2e",
+            input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+            permission_classes=[],
+            is_write=True,
+            permission_tier="read",
+        )
+        try:
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
+                mock_cache.get.return_value = None
+                response = _call_tool(rf, tool_name, {"name": "n1"})
+            result = _tool_result(response)
+        finally:
+            _registry._tools.pop(tool_name, None)  # noqa: SLF001 — test cleanup
+
+        assert not _is_error(response)
+        # Standard extraction still present.
+        assert result["id"] == "x1"
+        assert result["name"] == "n1"
+        # The Meta.mcp_light_key field is promoted into the lean envelope...
+        assert result["sku"] == "SKU-9"
+        # ...but unlisted payload fields are not.
+        assert "noise" not in result
