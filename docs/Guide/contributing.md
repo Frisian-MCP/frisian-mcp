@@ -113,7 +113,7 @@ frisian-mcp enforces strict type annotations throughout the codebase. All public
 Run mypy directly:
 
 ```bash
-mypy frisian_mcp/
+mypy src/frisian_mcp/
 ```
 
 Key rules:
@@ -147,12 +147,12 @@ def build_response(data: dict[str, object]) -> MCPResponse:
 
 ### pylint — code quality
 
-pylint is configured in `pyproject.toml` under `[tool.pylint]`. The project targets a minimum score of **9.0/10**.
+pylint is configured in `pyproject.toml` under `[tool.pylint]`. The project targets a score of **10/10**.
 
 Run pylint directly:
 
 ```bash
-pylint frisian_mcp/
+pylint src/frisian_mcp/
 ```
 
 Enforced rules include:
@@ -180,8 +180,8 @@ The `.pre-commit-config.yaml` at the repo root configures all hooks. The relevan
 1. **trailing-whitespace** — removes trailing whitespace
 2. **end-of-file-fixer** — ensures files end with a newline
 3. **check-yaml** — validates YAML syntax
-4. **mypy** — type checking via `mypy frisian_mcp/`
-5. **pylint** — code quality via `pylint frisian_mcp/`
+4. **mypy** — type checking via `mypy src/frisian_mcp/`
+5. **pylint** — code quality via `pylint src/frisian_mcp/`
 
 All hooks must pass before the commit is accepted. If a hook auto-fixes a file (trailing whitespace, newlines), stage the fix and commit again:
 
@@ -212,8 +212,8 @@ Before requesting review, verify:
 
 - [ ] Branch is rebased onto the latest `upstream/main`
 - [ ] `pre-commit run --all-files` passes with zero errors
-- [ ] `mypy frisian_mcp/` reports no new errors
-- [ ] `pylint frisian_mcp/` score is 9.0/10 or higher
+- [ ] `mypy src/frisian_mcp/` reports no new errors
+- [ ] `pylint src/frisian_mcp/` score is 10/10
 - [ ] `pytest` passes with no failures
 - [ ] New public functions/classes have docstrings
 - [ ] New features have tests; bug fixes have a regression test
