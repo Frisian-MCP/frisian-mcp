@@ -106,17 +106,24 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
         from django.apps import apps  # pylint: disable=import-outside-toplevel
 
         if apps.is_installed("frisian_mcp.contrib.oauth"):
+            if not getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
+                return 'Bearer realm="frisian-mcp"'
+
             try:
-                from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+                from frisian_mcp.contrib.oauth.views import (
                     _get_base_url,
                 )
             except ImportError:
                 return 'Bearer realm="frisian-mcp"'
+
             base = _get_base_url(request)
             resource_metadata = f"{base}/.well-known/oauth-protected-resource"
-            return f'Bearer realm="frisian-mcp", resource_metadata="{resource_metadata}"'
-        return 'Bearer realm="frisian-mcp"'
+            return (
+                f'Bearer realm="frisian-mcp", '
+                f'resource_metadata="{resource_metadata}"'
+            )
 
+        return 'Bearer realm="frisian-mcp"'
 
 class _ApiKeyAuth:
     """Lightweight auth object set as ``request.auth`` for API key authentications."""

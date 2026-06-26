@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 
 from frisian_mcp.contrib.tokens.authentication import (
     FrisianMcpApiKeyAuthentication,
@@ -203,6 +203,15 @@ class TestFrisianMcpTokenAuthentication:
         assert header.startswith("Bearer")
         assert "resource_metadata" in header
 
+        @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+        def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
+            self,
+            rf: RequestFactory,
+        ) -> None:
+            """authenticate_header() should omit OAuth discovery metadata when disabled."""
+            header = self._auth().authenticate_header(rf.get("/"))
+
+            assert header == 'Bearer realm="frisian-mcp"'
 
 # ---------------------------------------------------------------------------
 # Integration: McpView + FrisianMcpTokenAuthentication
@@ -458,6 +467,16 @@ class TestFrisianMcpApiKeyAuthentication:
         header = self._auth().authenticate_header(req)
         assert header.startswith("Bearer")
         assert "frisian-mcp" in header
+
+        @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+        def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
+            self,
+            rf: RequestFactory,
+         ) -> None:
+            """authenticate_header() should omit OAuth discovery metadata when disabled."""
+            header = self._auth().authenticate_header(rf.get("/"))
+
+            assert header == 'Bearer realm="frisian-mcp"'
 
     def test_is_authenticated_on_result(self, settings: Any) -> None:
         """The returned auth object has is_authenticated=True."""
