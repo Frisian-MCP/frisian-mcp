@@ -213,6 +213,7 @@ class TestFrisianMcpTokenAuthentication:
 
             assert header == 'Bearer realm="frisian-mcp"'
 
+
 # ---------------------------------------------------------------------------
 # Integration: McpView + FrisianMcpTokenAuthentication
 # ---------------------------------------------------------------------------
@@ -472,7 +473,7 @@ class TestFrisianMcpApiKeyAuthentication:
         def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
             self,
             rf: RequestFactory,
-         ) -> None:
+        ) -> None:
             """authenticate_header() should omit OAuth discovery metadata when disabled."""
             header = self._auth().authenticate_header(rf.get("/"))
 

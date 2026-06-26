@@ -118,12 +118,10 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
 
             base = _get_base_url(request)
             resource_metadata = f"{base}/.well-known/oauth-protected-resource"
-            return (
-                f'Bearer realm="frisian-mcp", '
-                f'resource_metadata="{resource_metadata}"'
-            )
+            return f'Bearer realm="frisian-mcp", ' f'resource_metadata="{resource_metadata}"'
 
         return 'Bearer realm="frisian-mcp"'
+
 
 class _ApiKeyAuth:
     """Lightweight auth object set as ``request.auth`` for API key authentications."""
