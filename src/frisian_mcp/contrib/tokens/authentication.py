@@ -110,7 +110,7 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
                 return 'Bearer realm="frisian-mcp"'
 
             try:
-                from frisian_mcp.contrib.oauth.views import (
+                from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
                     _get_base_url,
                 )
             except ImportError:
@@ -199,6 +199,9 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
         from django.apps import apps  # pylint: disable=import-outside-toplevel
 
         if apps.is_installed("frisian_mcp.contrib.oauth"):
+            if not getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
+                return 'Bearer realm="frisian-mcp"'
+
             try:
                 from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
                     _get_base_url,

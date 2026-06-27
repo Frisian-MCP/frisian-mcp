@@ -360,7 +360,7 @@ class TestOAuthTokenAuthentication:
         self,
         rf: RequestFactory,
     ) -> None:
-        """authenticate_header() should not advertise resource metadata when discovery is disabled."""
+        """authenticate_header() omits OAuth discovery metadata when disabled."""
         header = self._auth().authenticate_header(rf.get("/"))
 
         assert header == 'Bearer realm="frisian-mcp"'

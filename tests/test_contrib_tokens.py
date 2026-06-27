@@ -203,15 +203,15 @@ class TestFrisianMcpTokenAuthentication:
         assert header.startswith("Bearer")
         assert "resource_metadata" in header
 
-        @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
-        def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
-            self,
-            rf: RequestFactory,
-        ) -> None:
-            """authenticate_header() should omit OAuth discovery metadata when disabled."""
-            header = self._auth().authenticate_header(rf.get("/"))
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+    def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """authenticate_header() should omit OAuth discovery metadata when disabled."""
+        header = self._auth().authenticate_header(rf.get("/"))
 
-            assert header == 'Bearer realm="frisian-mcp"'
+        assert header == 'Bearer realm="frisian-mcp"'
 
 
 # ---------------------------------------------------------------------------
@@ -463,21 +463,26 @@ class TestFrisianMcpApiKeyAuthentication:
         assert result[1].permission == "read_write"
 
     def test_authenticate_header_returns_bearer(self, rf: RequestFactory) -> None:
-        """authenticate_header() returns a Bearer realm string."""
+        """authenticate_header() advertises resource_metadata when discovery is enabled."""
         req = rf.get("/")
         header = self._auth().authenticate_header(req)
         assert header.startswith("Bearer")
-        assert "frisian-mcp" in header
+        assert 'realm="frisian-mcp"' in header
+        # Pin the enabled branch: removing the PUBLIC_DISCOVERY gate
+        # would still satisfy the omits-resource-metadata test below,
+        # so we must positively assert the metadata pointer is present
+        # here to lock in *both* branches.
+        assert "resource_metadata" in header
 
-        @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
-        def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
-            self,
-            rf: RequestFactory,
-        ) -> None:
-            """authenticate_header() should omit OAuth discovery metadata when disabled."""
-            header = self._auth().authenticate_header(rf.get("/"))
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+    def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """authenticate_header() should omit OAuth discovery metadata when disabled."""
+        header = self._auth().authenticate_header(rf.get("/"))
 
-            assert header == 'Bearer realm="frisian-mcp"'
+        assert header == 'Bearer realm="frisian-mcp"'
 
     def test_is_authenticated_on_result(self, settings: Any) -> None:
         """The returned auth object has is_authenticated=True."""
@@ -564,3 +569,105 @@ class TestMcpViewApiKeyIntegration:
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["result"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Admin: FrisianMcpTokenAdmin surfaces plaintext_token on first save
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestFrisianMcpTokenAdminSurfacesPlaintext:
+    """
+    Admin must surface the raw Bearer once on first create without persisting it.
+
+    The raw value must not be routed through Django's messages framework
+    (whose backends persist the message body to cookies/sessions until
+    consumed) or any other transport store that could retain the secret
+    across requests.
+    """
+
+    def _admin(self) -> Any:
+        from django.contrib.admin.sites import AdminSite
+
+        from frisian_mcp.contrib.tokens.admin import FrisianMcpTokenAdmin
+
+        return FrisianMcpTokenAdmin(FrisianMcpToken, AdminSite())
+
+    def _request(self, rf: RequestFactory, path: str, user: Any) -> Any:
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        request = rf.post(path)
+        request.user = user
+        request.session = {}
+        # Wire messages storage so we can assert it stays EMPTY.
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_save_model_stashes_plaintext_on_create_not_in_messages(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """First save stashes plaintext on the request, never in the messages backend."""
+        user = User.objects.create_user(username="admin-surface", password="x")
+        request = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+
+        obj = FrisianMcpToken(name="admin-created", user=user, permission="read")
+        self._admin().save_model(request, obj, form=None, change=False)
+
+        raw = getattr(obj, "plaintext_token", None)
+        assert raw, "plaintext_token must be set on the instance after save"
+        # In-memory on the request only — discarded with the response.
+        assert getattr(request, "_frisian_mcp_plaintext_token", None) == raw
+        # Critical security assertion: the raw must NOT have landed in the
+        # messages framework (cookie/session storage would retain it).
+        messages_emitted = list(request._messages)  # type: ignore[attr-defined]
+        assert messages_emitted == [], (
+            "Raw Bearer must NEVER be written to django.contrib.messages — "
+            "messages backends persist the message body to a transport store"
+        )
+
+    def test_response_add_renders_plaintext_inline_with_no_store(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """response_add returns an HttpResponse containing the raw Bearer with no-store."""
+        user = User.objects.create_user(username="admin-resp", password="x")
+        request = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+
+        admin_obj = self._admin()
+        obj = FrisianMcpToken(name="admin-resp", user=user, permission="read")
+        admin_obj.save_model(request, obj, form=None, change=False)
+        with patch(
+            "frisian_mcp.contrib.tokens.admin.reverse",
+            return_value="/admin/frisian_mcp_tokens/frisianmcptoken/",
+        ):
+            response = admin_obj.response_add(request, obj)
+
+        raw = getattr(obj, "plaintext_token", "")
+        assert raw and raw in response.content.decode()
+        assert response["Cache-Control"] == "no-store, max-age=0"
+        assert response["Pragma"] == "no-cache"
+        assert response["Referrer-Policy"] == "no-referrer"
+        # Sanity: messages still empty.
+        assert list(request._messages) == []  # type: ignore[attr-defined]
+
+    def test_save_model_silent_on_change(self, rf: RequestFactory) -> None:
+        """Edits to an existing token must NOT stash or emit plaintext anywhere."""
+        user = User.objects.create_user(username="admin-edit", password="x")
+        obj = FrisianMcpToken.objects.create(name="orig", user=user, permission="read")
+        obj.name = "renamed"
+        request = self._request(
+            rf,
+            f"/admin/frisian_mcp_tokens/frisianmcptoken/{obj.pk}/change/",
+            user,
+        )
+
+        self._admin().save_model(request, obj, form=None, change=True)
+
+        assert getattr(request, "_frisian_mcp_plaintext_token", None) is None
+        assert list(request._messages) == []  # type: ignore[attr-defined]
