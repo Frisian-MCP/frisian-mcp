@@ -221,6 +221,9 @@ class OAuthTokenAuthentication(BaseAuthentication):
 
     def authenticate_header(self, request: Any) -> str:
         """Return the WWW-Authenticate header value for 401 responses."""
+        if not getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
+            return 'Bearer realm="frisian-mcp"'
+
         base = _get_base_url(request)
         resource_metadata = f"{base}/.well-known/oauth-protected-resource"
         return f'Bearer realm="frisian-mcp", resource_metadata="{resource_metadata}"'

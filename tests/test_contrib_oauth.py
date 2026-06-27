@@ -355,6 +355,16 @@ class TestOAuthTokenAuthentication:
         assert "resource_metadata" in header
         assert ".well-known/oauth-protected-resource" in header
 
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+    def test_authenticate_header_omits_resource_metadata_when_discovery_disabled(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """authenticate_header() omits OAuth discovery metadata when disabled."""
+        header = self._auth().authenticate_header(rf.get("/"))
+
+        assert header == 'Bearer realm="frisian-mcp"'
+
     def test_last_used_at_stamped_on_success(self) -> None:
         """last_used_at is set after a successful authentication."""
         client = OAuthClient.objects.create(name="tracked")
