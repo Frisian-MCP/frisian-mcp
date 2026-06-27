@@ -1409,3 +1409,65 @@ class TestWriteContinuationTokenOwnerBinding:
 
         assert not _is_error(resp2)
         assert _tool_result(resp2)["payload"] == full_object["payload"]
+
+
+# ---------------------------------------------------------------------------
+# _extract_lean_envelope — boundary result shapes
+# ---------------------------------------------------------------------------
+
+
+class TestExtractLeanEnvelopeEdgeShapes:
+    """
+    Boundary shapes the main unit tests don't cover.
+
+    The happy-path tests use a populated dict (single create), a 60-item list
+    (bulk), and a delete dict carrying an embedded ``status`` int.  These cover
+    the shapes that fall through those branches: a non-dict/non-list scalar, an
+    empty bulk list, and a delete dict missing (or carrying a non-int) embedded
+    status so the ``http_status`` fallback is exercised.
+    """
+
+    def test_none_result_yields_status_only_envelope(self) -> None:
+        """A ``None`` result produces a bare envelope — no id/name/url keys."""
+        envelope = _extract_lean_envelope(None, "tok")
+        assert envelope["status_code"] == 200
+        assert envelope["continuation_token"] == "tok"
+        assert envelope["data_size"] == 4  # len(b"null")
+        for key in ("id", "name", "url", "accepted", "deleted"):
+            assert key not in envelope
+
+    def test_scalar_string_result_yields_status_only_envelope(self) -> None:
+        """A bare string result is treated as a scalar — no field extraction."""
+        envelope = _extract_lean_envelope("done", "tok", http_status=201)
+        assert envelope["status_code"] == 201
+        assert envelope["continuation_token"] == "tok"
+        assert envelope["data_size"] == 6  # len(b'"done"')
+        assert "id" not in envelope
+
+    def test_empty_bulk_list_reports_accepted_zero(self) -> None:
+        """An empty list (zero-item bulk write) reports accepted=0, not an error."""
+        envelope = _extract_lean_envelope([], "tok")
+        assert envelope["accepted"] == 0
+        assert envelope["status_code"] == 200
+        assert envelope["continuation_token"] == "tok"
+        assert envelope["data_size"] == 2  # len(b"[]")
+
+    def test_bulk_list_status_code_threaded_through(self) -> None:
+        """The HTTP status passed in is used for the bulk shape (e.g. 201 Created)."""
+        envelope = _extract_lean_envelope([{"id": "1"}], "tok", http_status=201)
+        assert envelope["accepted"] == 1
+        assert envelope["status_code"] == 201
+
+    def test_delete_without_embedded_status_uses_http_status(self) -> None:
+        """A delete dict lacking an embedded ``status`` int falls back to http_status."""
+        envelope = _extract_lean_envelope({"deleted": True}, "tok", http_status=204)
+        assert envelope == {"deleted": True, "status_code": 204}
+        assert "continuation_token" not in envelope
+
+    def test_delete_with_non_int_status_uses_http_status(self) -> None:
+        """A non-int embedded ``status`` is ignored in favour of the http_status."""
+        envelope = _extract_lean_envelope(
+            {"deleted": True, "status": "boom"}, "tok", http_status=204
+        )
+        assert envelope["status_code"] == 204
+        assert envelope["deleted"] is True
