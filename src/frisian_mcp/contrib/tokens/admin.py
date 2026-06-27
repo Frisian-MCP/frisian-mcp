@@ -1,15 +1,21 @@
 """Django admin registration for FrisianMcpToken."""
 
+from datetime import timedelta
 from typing import Any
 
 from django.contrib import admin
 from django.http import HttpRequest, HttpResponse
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.html import format_html
 
 from .models import FrisianMcpToken
 
 _PLAINTEXT_ATTR = "_frisian_mcp_plaintext_token"
+_REFRESH_DETECTED_ATTR = "_frisian_mcp_refresh_detected"
+# Window inside which an identical-name+user create is treated as a browser
+# refresh of the just-issued admin form rather than a deliberate new token.
+_REFRESH_WINDOW_SECONDS = 10
 
 
 @admin.register(FrisianMcpToken)
@@ -55,7 +61,38 @@ class FrisianMcpTokenAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         form: Any,
         change: bool,
     ) -> None:
-        """Save the token; stash plaintext on the request for ``response_add`` to surface."""
+        """Save the token; suppress duplicate-on-refresh; stash plaintext."""
+        if not change:
+            # Refresh-safety: a re-POST within _REFRESH_WINDOW_SECONDS of an
+            # identical name+user create is almost certainly a browser
+            # refresh of the just-issued admin form, not a deliberate
+            # second create.  Skip the duplicate save and point the admin
+            # at the already-issued row.  The original raw value is gone
+            # (intentionally — it lived only on the first response), so
+            # response_add will fall through to the standard admin redirect.
+            threshold = timezone.now() - timedelta(seconds=_REFRESH_WINDOW_SECONDS)
+            # Match every submitted attribute the user could have set, so the
+            # dedupe only fires on a TRUE repeat-submission and never collapses
+            # two deliberate-but-different creates (e.g. same name, different
+            # permission tier).  Skipping is_active here would also mean an
+            # is_active=False submission could never match and would always
+            # mint a duplicate inactive row on refresh.
+            dupe = (
+                FrisianMcpToken.objects.filter(
+                    name=obj.name,
+                    user=obj.user,
+                    is_active=obj.is_active,
+                    permission=obj.permission,
+                    created_at__gte=threshold,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            if dupe is not None:
+                obj.pk = dupe.pk
+                setattr(request, _REFRESH_DETECTED_ATTR, True)
+                return
+
         super().save_model(request, obj, form, change)
         plaintext: str | None = getattr(obj, "plaintext_token", None)
         if not change and plaintext:
@@ -75,33 +112,16 @@ class FrisianMcpTokenAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         post_url_continue: str | None = None,
     ) -> HttpResponse:
         """
-        On first create with a stashed plaintext, render it inline once.
+        Render the stashed plaintext inline once; fall through on refresh.
 
-        This deliberately departs from Django admin's Post/Redirect/Get
-        (PRG) pattern: a normal add-flow would return a 302 redirect to a
-        GET-only confirmation page, which would survive a browser refresh
-        cleanly.  Implementing PRG here requires somewhere for the redirect
-        target to read the plaintext from — session, cache, or a query
-        string — all of which re-introduce the exact transport-store
-        persistence we explicitly rejected when designing this flow.
-
-        Trade-offs:
-
-        * **Cost of non-PRG**: a deliberate browser refresh on this page
-          re-POSTs the add form.  ``name`` has no unique constraint and
-          ``token`` is regenerated per save, so the refresh succeeds and
-          mints a NEW token (different raw + HMAC, same name).  The
-          orphaned row is harmless and visible in the changelist for
-          deletion.  Two warnings already discourage refresh: the inline
-          "Refreshing... discards it permanently" copy below, and the
-          browser's native "Confirm form resubmission" dialog.
-
-        * **Cost of PRG**: the raw Bearer would live in session or cache
-          storage between the POST and the redirected GET, which is the
-          persistence window we explicitly engineered away.
-
-        Of the two, the orphan-row risk on accidental refresh is lower
-        impact than persisting the raw secret in a transport store.
+        Departs from Django admin's Post/Redirect/Get pattern by serving
+        the plaintext directly in the POST response body.  Full PRG would
+        require parking the raw Bearer in a transport store (session or
+        cache) between the POST and the redirected GET, which we
+        explicitly engineered away.  The accidental-refresh case is
+        handled in :meth:`save_model` by detecting a near-immediate
+        re-POST and short-circuiting it, so no orphan tokens are minted
+        on browser reload.
         """
         plaintext: str | None = getattr(request, _PLAINTEXT_ATTR, None)
         # Defence-in-depth: clear the stashed value immediately after reading

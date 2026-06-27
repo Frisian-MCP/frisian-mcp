@@ -1338,10 +1338,12 @@ class TestWriteContinuationTokenOwnerBinding:
         assert _is_error(resp2)
         body = _tool_result(resp2)
         assert "does not belong" in body["error"]
-        # The cached payload must NOT leak to the wrong caller anywhere in
-        # the serialized body (nested objects or stringified payloads
-        # would slip through a top-level `"payload" not in body` check).
-        assert "payload" not in json.dumps(body)
+        # The cached payload VALUE must NOT leak to the wrong caller
+        # anywhere in the serialized body — asserting on the field NAME
+        # ("payload") would miss the real concern (the cached secret
+        # content) and would also false-positive if "payload" appeared
+        # in any error string.
+        assert full_object["payload"] not in json.dumps(body)
 
     def test_replay_against_different_tool_is_refused(self, rf: RequestFactory) -> None:
         """A write token issued for one tool cannot be replayed against another tool."""
@@ -1383,7 +1385,9 @@ class TestWriteContinuationTokenOwnerBinding:
         assert _is_error(resp2)
         body = _tool_result(resp2)
         assert "does not belong" in body["error"]
-        assert "secret" not in json.dumps(body)
+        # Assert on the VALUE that would actually be a leak (the cached
+        # secret content), not the field name.
+        assert full_object["secret"] not in json.dumps(body)
 
     def test_same_caller_same_tool_serves_full_result(self, rf: RequestFactory) -> None:
         """Anchor: identical owner (same tool + session) serves the cached full result."""

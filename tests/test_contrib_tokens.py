@@ -671,3 +671,94 @@ class TestFrisianMcpTokenAdminSurfacesPlaintext:
 
         assert getattr(request, "_frisian_mcp_plaintext_token", None) is None
         assert list(request._messages) == []  # type: ignore[attr-defined]
+
+    def test_save_model_refresh_does_not_mint_duplicate(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """A near-immediate re-POST (browser refresh) reuses the first row."""
+        user = User.objects.create_user(username="admin-refresh", password="x")
+        admin_obj = self._admin()
+
+        # First create.
+        request1 = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+        token1 = FrisianMcpToken(name="dup-name", user=user, permission="read")
+        admin_obj.save_model(request1, token1, form=None, change=False)
+        assert FrisianMcpToken.objects.filter(name="dup-name").count() == 1
+        assert getattr(request1, "_frisian_mcp_plaintext_token", None)
+
+        # Simulated browser refresh — re-POST with same field values.
+        request2 = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+        token2 = FrisianMcpToken(name="dup-name", user=user, permission="read")
+        admin_obj.save_model(request2, token2, form=None, change=False)
+
+        # No duplicate row was minted.
+        assert FrisianMcpToken.objects.filter(name="dup-name").count() == 1
+        # The refresh marker is set; no plaintext is stashed (the original
+        # raw is gone and we will NOT mint a new one to re-display).
+        assert getattr(request2, "_frisian_mcp_refresh_detected", False) is True
+        assert getattr(request2, "_frisian_mcp_plaintext_token", None) is None
+        # token2 was redirected at the existing row.
+        assert token2.pk == token1.pk
+
+    def test_save_model_refresh_dedupe_respects_permission_change(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """A second create within 10s with a DIFFERENT permission is NOT a refresh."""
+        user = User.objects.create_user(username="admin-perm-flip", password="x")
+        admin_obj = self._admin()
+
+        request1 = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+        first = FrisianMcpToken(name="flip", user=user, permission="read")
+        admin_obj.save_model(request1, first, form=None, change=False)
+
+        # Same name+user but explicit higher-tier permission — a deliberate
+        # second create, NOT a refresh.  Must mint a fresh row, not collapse
+        # the user's intended admin token onto the prior read-only one.
+        request2 = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+        second = FrisianMcpToken(name="flip", user=user, permission="admin")
+        admin_obj.save_model(request2, second, form=None, change=False)
+
+        assert FrisianMcpToken.objects.filter(name="flip").count() == 2
+        assert getattr(request2, "_frisian_mcp_refresh_detected", False) is False
+        assert second.pk != first.pk
+        assert second.permission == "admin"
+
+    def test_save_model_refresh_dedupe_respects_inactive_submission(
+        self,
+        rf: RequestFactory,
+    ) -> None:
+        """An is_active=False submission still hits the dedupe path on refresh."""
+        user = User.objects.create_user(username="admin-inactive", password="x")
+        admin_obj = self._admin()
+
+        request1 = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+        first = FrisianMcpToken(
+            name="staged", user=user, permission="read", is_active=False
+        )
+        admin_obj.save_model(request1, first, form=None, change=False)
+        assert FrisianMcpToken.objects.filter(name="staged").count() == 1
+
+        request2 = self._request(
+            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
+        )
+        second = FrisianMcpToken(
+            name="staged", user=user, permission="read", is_active=False
+        )
+        admin_obj.save_model(request2, second, form=None, change=False)
+
+        # The refresh of an inactive create must NOT mint a duplicate.
+        assert FrisianMcpToken.objects.filter(name="staged").count() == 1
+        assert getattr(request2, "_frisian_mcp_refresh_detected", False) is True
+        assert second.pk == first.pk
