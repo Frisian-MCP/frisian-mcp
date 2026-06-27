@@ -610,9 +610,7 @@ class TestFrisianMcpTokenAdminSurfacesPlaintext:
     ) -> None:
         """First save stashes plaintext on the request, never in the messages backend."""
         user = User.objects.create_user(username="admin-surface", password="x")
-        request = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
+        request = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
 
         obj = FrisianMcpToken(name="admin-created", user=user, permission="read")
         self._admin().save_model(request, obj, form=None, change=False)
@@ -635,9 +633,7 @@ class TestFrisianMcpTokenAdminSurfacesPlaintext:
     ) -> None:
         """response_add returns an HttpResponse containing the raw Bearer with no-store."""
         user = User.objects.create_user(username="admin-resp", password="x")
-        request = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
+        request = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
 
         admin_obj = self._admin()
         obj = FrisianMcpToken(name="admin-resp", user=user, permission="read")
@@ -681,18 +677,14 @@ class TestFrisianMcpTokenAdminSurfacesPlaintext:
         admin_obj = self._admin()
 
         # First create.
-        request1 = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
+        request1 = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
         token1 = FrisianMcpToken(name="dup-name", user=user, permission="read")
         admin_obj.save_model(request1, token1, form=None, change=False)
         assert FrisianMcpToken.objects.filter(name="dup-name").count() == 1
         assert getattr(request1, "_frisian_mcp_plaintext_token", None)
 
         # Simulated browser refresh — re-POST with same field values.
-        request2 = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
+        request2 = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
         token2 = FrisianMcpToken(name="dup-name", user=user, permission="read")
         admin_obj.save_model(request2, token2, form=None, change=False)
 
@@ -713,18 +705,14 @@ class TestFrisianMcpTokenAdminSurfacesPlaintext:
         user = User.objects.create_user(username="admin-perm-flip", password="x")
         admin_obj = self._admin()
 
-        request1 = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
+        request1 = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
         first = FrisianMcpToken(name="flip", user=user, permission="read")
         admin_obj.save_model(request1, first, form=None, change=False)
 
         # Same name+user but explicit higher-tier permission — a deliberate
         # second create, NOT a refresh.  Must mint a fresh row, not collapse
         # the user's intended admin token onto the prior read-only one.
-        request2 = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
+        request2 = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
         second = FrisianMcpToken(name="flip", user=user, permission="admin")
         admin_obj.save_model(request2, second, form=None, change=False)
 
@@ -741,21 +729,13 @@ class TestFrisianMcpTokenAdminSurfacesPlaintext:
         user = User.objects.create_user(username="admin-inactive", password="x")
         admin_obj = self._admin()
 
-        request1 = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
-        first = FrisianMcpToken(
-            name="staged", user=user, permission="read", is_active=False
-        )
+        request1 = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
+        first = FrisianMcpToken(name="staged", user=user, permission="read", is_active=False)
         admin_obj.save_model(request1, first, form=None, change=False)
         assert FrisianMcpToken.objects.filter(name="staged").count() == 1
 
-        request2 = self._request(
-            rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user
-        )
-        second = FrisianMcpToken(
-            name="staged", user=user, permission="read", is_active=False
-        )
+        request2 = self._request(rf, "/admin/frisian_mcp_tokens/frisianmcptoken/add/", user)
+        second = FrisianMcpToken(name="staged", user=user, permission="read", is_active=False)
         admin_obj.save_model(request2, second, form=None, change=False)
 
         # The refresh of an inactive create must NOT mint a duplicate.

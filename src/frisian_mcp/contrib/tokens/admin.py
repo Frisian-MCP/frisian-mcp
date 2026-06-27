@@ -150,16 +150,16 @@ class FrisianMcpTokenAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         )
         body = format_html(
             "<!DOCTYPE html><html><head><title>Bearer token created</title>"
-            "<meta name=\"robots\" content=\"noindex,nofollow\"></head>"
-            "<body style=\"font-family:sans-serif;max-width:720px;margin:2em auto;\">"
+            '<meta name="robots" content="noindex,nofollow"></head>'
+            '<body style="font-family:sans-serif;max-width:720px;margin:2em auto;">'
             "<h1>Bearer token created for <em>{name}</em></h1>"
             "<p><strong>Copy this value now — it will not be shown again.</strong>"
             "  Refreshing or navigating away discards it permanently.</p>"
-            "<pre style=\"background:#f4f4f4;padding:1em;border:1px solid #ccc;"
-            "word-break:break-all;white-space:pre-wrap;\"><code>{token}</code></pre>"
-            "<p style=\"margin-top:2em;\">"
-            "<a href=\"{change}\">Edit this token</a> &middot; "
-            "<a href=\"{changelist}\">Back to tokens list</a></p></body></html>",
+            '<pre style="background:#f4f4f4;padding:1em;border:1px solid #ccc;'
+            'word-break:break-all;white-space:pre-wrap;"><code>{token}</code></pre>'
+            '<p style="margin-top:2em;">'
+            '<a href="{change}">Edit this token</a> &middot; '
+            '<a href="{changelist}">Back to tokens list</a></p></body></html>',
             name=obj.name,
             token=plaintext,
             change=change_url,
