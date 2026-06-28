@@ -156,7 +156,7 @@ The `openedx_frisian_mcp` plugin app wires URLs and settings entirely through Op
 
 The gateway will be available at:
 
-```
+```text
 https://your-lms.example.com/mcp/
 ```
 
@@ -166,7 +166,7 @@ https://your-lms.example.com/mcp/
 
 Start the LMS normally. On the first incoming request, frisian-mcp scans the URL tree and registers all discovered tools:
 
-```
+```text
 [frisian-mcp] registered 78 tools at /mcp/
 [frisian-mcp] 9 dispatch group(s) bundling 78 tools
 ```
@@ -262,7 +262,7 @@ FRISIAN_MCP_API_KEYS = {
 
 With `FRISIAN_MCP_OAUTH_ISSUER` set and `frisian_mcp.contrib.oauth` installed, AI clients can self-register and connect via PKCE. Point the client at:
 
-```
+```text
 https://your-lms.example.com/mcp/
 ```
 

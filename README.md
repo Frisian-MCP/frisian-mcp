@@ -143,7 +143,7 @@ Walks the configuration end-to-end and exits non-zero on errors. Run after every
 
 ## Architecture overview
 
-```
+```text
 MCP Client
        │  JSON-RPC 2.0 over HTTP POST
        ▼

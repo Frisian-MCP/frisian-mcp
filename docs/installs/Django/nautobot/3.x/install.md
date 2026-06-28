@@ -215,7 +215,7 @@ This means frisian-mcp is upgrade-safe. When Nautobot releases a new version, fr
 
 frisian-mcp auto-registers its endpoint during Django's app startup (`AppConfig.ready()`). You do **not** need to modify Nautobot's `urls.py`. The gateway will be available at:
 
-```
+```text
 https://your-nautobot.example.com/api/mcp/
 ```
 
@@ -227,7 +227,7 @@ https://your-nautobot.example.com/api/mcp/
 
 Start Nautobot normally. On the first incoming request, frisian-mcp scans the URL tree and registers all discovered tools. Look for these lines in the server output:
 
-```
+```text
 [frisian-mcp] registered 1967 tools at /api/mcp/
 [frisian-mcp] 13 dispatch group(s) bundling 1967 tools
 ```
@@ -288,7 +288,7 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 
 Extend or trim the list based on the Nautobot plugins you have installed. After restarting, the startup log will confirm the group count:
 
-```
+```text
 [frisian-mcp] 6 dispatch group(s) bundling 847 tools
 ```
 
@@ -394,7 +394,7 @@ client via the Django admin:
    **Connect MCP Server → Advanced**; ChatGPT and Grok have equivalent
    forms).  Point the client URL at:
 
-   ```
+   ```text
    https://your-nautobot.example.com/api/mcp/
    ```
 

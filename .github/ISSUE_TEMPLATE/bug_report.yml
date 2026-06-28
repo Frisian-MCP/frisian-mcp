@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a problem with Frisian-MCP
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. Fill out what you can — only a few fields are required.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, config, or a code snippet that triggers the behavior.
+      placeholder: |
+        1. Configure the dispatcher with '...'
+        2. Call action '...'
+        3. Observe '...'
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened, including full tracebacks or error envelopes if available.
+    validations:
+      required: false
+  - type: input
+    id: frisian-version
+    attributes:
+      label: Frisian-MCP version
+      placeholder: "e.g. 1.0.3"
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "e.g. 3.12"
+    validations:
+      required: false
+  - type: input
+    id: django-version
+    attributes:
+      label: Django / DRF version
+      placeholder: "e.g. Django 5.1, DRF 3.15"
+    validations:
+      required: false
+  - type: input
+    id: deployment
+    attributes:
+      label: Server / deployment
+      description: WSGI/ASGI worker class and server, if relevant.
+      placeholder: "e.g. gunicorn + uvicorn worker, ASGI"
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else relevant — linked apps under test (Nautobot, NetBox, etc.), logs, related issues.
+    validations:
+      required: false

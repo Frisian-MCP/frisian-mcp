@@ -120,6 +120,9 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["frisian_mcp"]
 
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
 [tool.ruff.lint.per-file-ignores]
 "src/frisian_mcp/__init__.py" = ["D"]
 "src/**/migrations/**" = [

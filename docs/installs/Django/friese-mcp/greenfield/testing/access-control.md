@@ -44,6 +44,7 @@ Both layers must hold independently. A tool with tight permission classes is not
 ## Test 3: Valid Token, Wrong Tier, Protected Tool
 
 **Setup:**
+
 - Token: `read-token` (tier `read`)
 - Target: a tool registered with `write=True` on `@mcp_tool`
 

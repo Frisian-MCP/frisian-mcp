@@ -34,7 +34,7 @@ pip install frisian-mcp
 
 For projects using `requirements.txt` or `pyproject.toml`:
 
-```
+```text
 frisian-mcp>=0.2.0
 ```
 
@@ -185,6 +185,7 @@ A successful response looks like:
 ```
 
 If `tools` is an empty array, auto-discovery found no ViewSet actions. Check that:
+
 - Your ViewSets are registered in the URL resolver (not just defined)
 - `frisian_MCP_AUTODISCOVER` is not set to `False`
 - No `@mcp_ignore` decorator was applied to all ViewSets
@@ -247,6 +248,7 @@ For large APIs (hundreds of ViewSet actions), use dispatchers to keep `tools/lis
 | Resources, `@mcp_ignore`, permission tiers, all settings | `features/configuration.md` |
 
 Cross-references to the design rationale behind these features:
+
 - [dispatcher-pattern](../../../../Guide/dispatcher-pattern.md)
 - [the-token-problem](../../../../Guide/the-token-problem.md)
 - [read-response-filtering](../../../../Guide/read-response-filtering.md)

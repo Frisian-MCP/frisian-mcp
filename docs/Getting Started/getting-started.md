@@ -96,6 +96,7 @@ class InternalAdminViewSet(viewsets.ModelViewSet):
 ```
 
 Auto-discovery silently registers zero tools under four conditions worth knowing:
+
 - ViewSets not yet resolved at discovery time (check your router registration order)
 - All ViewSets decorated with `@mcp_ignore`
 - `FRISIAN_MCP_AUTODISCOVER = False`
@@ -242,6 +243,7 @@ Measured impact on a 65-device Nautobot instance: 23% token reduction on the lis
 Write operations — create, update, delete — return a lean confirmation envelope by default rather than echoing the full serialized object back. No decorator or configuration is required; this is the package-level default for all write tools.
 
 **Single-object create or update:**
+
 ```json
 {
   "id": "abc123",
@@ -254,6 +256,7 @@ Write operations — create, update, delete — return a lean confirmation envel
 ```
 
 **Bulk create or update:**
+
 ```json
 {
   "accepted": 60,

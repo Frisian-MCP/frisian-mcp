@@ -27,6 +27,7 @@ Tier ranks: `read (0) < read_write (1) < admin (2)`
 **Setup:** Call `tools/list` with `read-token`.
 
 **Pass condition:**
+
 - Response contains all `read` tier tools.
 - Response does NOT contain any `read_write` or `admin` tier tools.
 
@@ -39,6 +40,7 @@ Tier ranks: `read (0) < read_write (1) < admin (2)`
 **Setup:** Call `tools/list` with `rw-token`.
 
 **Pass condition:**
+
 - Response is a superset of the `read-token` listing.
 - Response contains all write-capable tools (create, update, destroy equivalents from auto-discovered ViewSets).
 - Response does NOT contain `admin` tier tools.
@@ -50,6 +52,7 @@ Tier ranks: `read (0) < read_write (1) < admin (2)`
 **Setup:** Call `tools/list` with `admin-token`.
 
 **Pass condition:**
+
 - Response is a superset of the `rw-token` listing.
 - Any tools registered with `admin=True` on `@mcp_tool` appear only in this listing.
 

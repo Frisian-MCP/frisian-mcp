@@ -74,7 +74,7 @@ frisian-mcp adds a **nested-wrapper guard** to `registry.py`'s `ToolRegistry.dis
 
 ### Detection Algorithm
 
-```
+```text
 For each (key, value) in arguments:
     If isinstance(value, dict):
         If key not in tool.inputSchema["properties"]:
@@ -91,7 +91,7 @@ The check is skipped for bulk-list-body calls (`_is_list_body=True`) because tho
 
 The error is raised as `ToolInputError`, which the views layer converts to a JSON-RPC `-32602 INVALID_PARAMS` error. The error message is:
 
-```
+```text
 Argument 'data' is not a declared field and its value is a nested object.
 Likely cause: REST-style wrapper — send fields flat at the top level.
 Unwrap 'data': send "email", "first_name" directly, not inside "data".

@@ -10,42 +10,192 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  validate:
-    name: Lint, type-check, test & build
+  changes:
+    name: Detect changed paths
     runs-on: ubuntu-latest
-
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      docs: ${{ steps.filter.outputs.docs }}
+      workflows: ${{ steps.filter.outputs.workflows }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/pr-validation.yml'
+            docs:
+              - '**/*.md'
+            workflows:
+              - '.github/workflows/**'
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+  guard-workflow-edits:
+    name: Guard workflow edits (Core Maintainers only)
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify author is a Core Maintainer
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # Hardcoded mirror of @Frisian-MCP/core-maintainers team roster.
+          # Update this list when team membership changes:
+          # https://github.com/orgs/Frisian-MCP/teams/core-maintainers
+          case "$AUTHOR" in
+            Jeremy-Friese|salehkabuawad)
+              echo "✓ $AUTHOR is a Core Maintainer — workflow edit allowed."
+              ;;
+            *)
+              echo "::error::Workflow edits require @Frisian-MCP/core-maintainers membership."
+              echo "::error::Author '$AUTHOR' is not on the maintainer roster."
+              exit 1
+              ;;
+          esac
+
+  lint:
+    name: Lint (format + imports + ruff)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
       - name: Sync dependencies
         run: uv sync --all-extras
-
+      - name: Cache ruff
+        uses: actions/cache@v4
+        with:
+          path: .ruff_cache
+          key: ruff-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
       - name: Black (format check)
         run: uv run black --check src/ tests/
-
       - name: isort (import order check)
         run: uv run isort --check-only src/ tests/
-
       - name: Ruff (lint)
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check --output-format=github src/ tests/
 
-      - name: Mypy (type check)
+  typecheck:
+    name: Type check (mypy)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      - name: Cache mypy
+        uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+      - name: Mypy
         run: uv run mypy src/frisian_mcp/
 
+  pylint:
+    name: Pylint
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
       - name: Pylint
         run: uv run pylint src/frisian_mcp/
 
-      - name: Tests
+  test:
+    name: Tests
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      - name: Pytest
         run: uv run pytest tests/ -q
 
+  build:
+    name: Build wheel
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
       - name: Build wheel
         run: |
           uv pip install build setuptools wheel
           uv run python -m build --wheel --no-isolation
+
+  markdown:
+    name: Markdown lint (advisory)
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    # Advisory until a markdownlint config + docs cleanup pass lands.
+    # Remove `continue-on-error` to make this a required check.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@v18
+        with:
+          globs: |
+            **/*.md
+            !node_modules/**
+            !.venv/**
+            !.git/**

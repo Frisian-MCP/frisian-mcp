@@ -113,7 +113,7 @@ This means frisian-mcp is upgrade-safe. When Paperless-ngx releases a new versio
 
 The gateway will be available at:
 
-```
+```text
 https://your-paperless.example.com/mcp/
 ```
 
@@ -125,7 +125,7 @@ https://your-paperless.example.com/mcp/
 
 Start Paperless-ngx normally. On the first incoming request, frisian-mcp scans the URL tree and registers all discovered tools. Look for these lines in the server output:
 
-```
+```text
 [frisian-mcp] registered 131 tools at /mcp/
 [frisian-mcp] 7 dispatch group(s) bundling 131 tools
 ```
@@ -216,7 +216,7 @@ Connect with:
 
 With `frisian_mcp.contrib.oauth` installed and `FRISIAN_MCP_OAUTH_ISSUER` set, AI clients that support OAuth can self-register and connect automatically. Point the client at:
 
-```
+```text
 https://your-paperless.example.com/mcp/
 ```
 

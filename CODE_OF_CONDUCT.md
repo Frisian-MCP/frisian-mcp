@@ -94,7 +94,7 @@ as we are guests of their spaces.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the project maintainers responsible for enforcement at
-developer@frisian-mcp.com
+<developer@frisian-mcp.com>
 
 All complaints will be reviewed and investigated promptly and fairly.
 
