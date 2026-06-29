@@ -162,6 +162,17 @@ class TestCustomDetailActionInvocation:
         assert result.is_error is False
         assert result.content == {"pk": "device-1", "payload": {"command": "show version"}}
 
+    def test_custom_detail_action_receives_pk_as_pk(self, store_request: Any) -> None:
+        """@action(detail=True) also accepts the MCP pk alias."""
+        result = SyncInvocation().invoke(
+            _detail_tool(),
+            {"pk": "device-1", "command": "show version"},
+            store_request,
+        )
+
+        assert result.is_error is False
+        assert result.content == {"pk": "device-1", "payload": {"command": "show version"}}
+
     def test_custom_detail_action_missing_id_is_clean_error(self, store_request: Any) -> None:
         """Missing id returns a structured error before Python raises TypeError."""
         result = SyncInvocation().invoke(_detail_tool(), {"command": "show version"}, store_request)
