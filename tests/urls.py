@@ -194,7 +194,7 @@ class FilterSetClassViewSet(ViewSet):
 
 
 class TypedActionViewSet(ViewSet):
-    """ViewSet with a typed custom GET action for signature introspection tests."""
+    """ViewSet with typed custom actions for signature introspection tests."""
 
     @action(detail=False, methods=["get"])
     def export(self, request: Request, fmt: str = "csv", limit: int = 100) -> Response:
@@ -205,6 +205,11 @@ class TypedActionViewSet(ViewSet):
     def summary(self, request: Request) -> Response:
         """Return a resource summary with no extra parameters."""
         return Response({})
+
+    @action(detail=True, methods=["post"])
+    def napalm(self, request: Request, pk: str) -> Response:
+        """Run an object-scoped custom action."""
+        return Response({"pk": pk})
 
 
 class LimitedViewSet(ViewSet):
