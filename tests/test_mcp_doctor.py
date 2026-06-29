@@ -17,11 +17,13 @@ def _run(**kwargs: Any) -> tuple[str, str]:
 
     Calls handle() directly to avoid Django's INSTALLED_APPS-based command
     discovery (which fails when INSTALLED_APPS is empty) and to avoid the
-    BaseCommand.execute() options dict requirement.
+    BaseCommand.execute() options dict requirement.  Extra kwargs (e.g.
+    ``security=True``) are forwarded to handle() so tests can exercise the
+    extended audit path.
     """
     out, err = StringIO(), StringIO()
     cmd = Command(stdout=out, stderr=err)
-    cmd.handle()
+    cmd.handle(**kwargs)
     return out.getvalue(), err.getvalue()
 
 
@@ -217,3 +219,188 @@ class TestMcpDoctorOAuthAuthorizeUrl:
         with patch("urllib.request.urlopen", side_effect=exc):
             out, _ = _run()
         assert "could not be reached" in out
+
+
+class TestMcpDoctorPkceAutoRegister:
+    """T1: AUTO_REGISTER + host-allowlist matrix (extended security audit)."""
+
+    @override_settings(FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=False)
+    def test_ok_when_disabled(self) -> None:
+        """AUTO_REGISTER=False reports OK."""
+        out, _ = _run(security=True)
+        assert "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=False" in out
+
+    @override_settings(
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True,
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST=[],
+        DEBUG=False,
+    )
+    def test_error_when_enabled_with_empty_allowlist_outside_debug(self) -> None:
+        """AUTO_REGISTER=True + empty allowlist + DEBUG=False raises an error."""
+        with pytest.raises(SystemExit) as exc_info:
+            _run(security=True)
+        assert exc_info.value.code == 1
+
+    @override_settings(
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True,
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST=[],
+        DEBUG=True,
+    )
+    def test_warn_when_enabled_with_empty_allowlist_under_debug(self) -> None:
+        """AUTO_REGISTER=True + empty allowlist + DEBUG=True warns rather than errors."""
+        out, _ = _run(security=True)
+        assert "no host allowlist (DEBUG=True)" in out
+
+    @override_settings(
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True,
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST=["claude.ai", "*.anthropic.com"],
+        DEBUG=False,
+    )
+    def test_ok_when_enabled_with_allowlist_outside_debug(self) -> None:
+        """AUTO_REGISTER=True + non-empty allowlist + DEBUG=False reports size, never contents."""
+        out, _ = _run(security=True)
+        assert "restricted to 2 host pattern(s)" in out
+        # Allowlist values must never echo into the doctor output.
+        assert "claude.ai" not in out
+        assert "anthropic.com" not in out
+
+    @override_settings(
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True,
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST=["claude.ai"],
+        DEBUG=True,
+    )
+    def test_warn_when_enabled_with_allowlist_under_debug(self) -> None:
+        """AUTO_REGISTER=True + allowlist + DEBUG=True warns operator to verify before prod."""
+        out, _ = _run(security=True)
+        assert "restricted to 1 host pattern(s)" in out
+        assert "DEBUG=True" in out
+        assert "claude.ai" not in out
+
+
+class TestMcpDoctorPkceRedirectTierMap:
+    """T7: legacy PKCE_REDIRECT_TIER_MAP stale-setting warning."""
+
+    def test_silent_when_setting_absent(self) -> None:
+        """No mention of the removed setting when operators have removed it."""
+        out, _ = _run()
+        assert "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP" not in out
+
+    @override_settings(FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP={"https://example.com/": "read"})
+    def test_warn_when_legacy_setting_present(self) -> None:
+        """Operator left the removed setting in settings.py → warn to clean up."""
+        out, _ = _run()
+        assert "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP is set" in out
+        assert "no longer read" in out
+
+
+class TestMcpDoctorAutoApprove:
+    """T9: AUTO_APPROVE matrix + interaction with AUTO_REGISTER."""
+
+    def test_ok_when_unset(self) -> None:
+        """AUTO_APPROVE absent → OK."""
+        out, _ = _run(security=True)
+        assert "FRISIAN_MCP_OAUTH_AUTO_APPROVE unset or False" in out
+
+    @override_settings(FRISIAN_MCP_OAUTH_AUTO_APPROVE=False)
+    def test_ok_when_false(self) -> None:
+        """AUTO_APPROVE=False → OK."""
+        out, _ = _run(security=True)
+        assert "FRISIAN_MCP_OAUTH_AUTO_APPROVE unset or False" in out
+
+    @override_settings(FRISIAN_MCP_OAUTH_AUTO_APPROVE=True, DEBUG=True)
+    def test_ok_when_true_in_debug(self) -> None:
+        """AUTO_APPROVE=True under DEBUG is acceptable but called out."""
+        out, _ = _run(security=True)
+        assert "FRISIAN_MCP_OAUTH_AUTO_APPROVE=True (DEBUG=True)" in out
+
+    @override_settings(FRISIAN_MCP_OAUTH_AUTO_APPROVE=True, DEBUG=False)
+    def test_warn_when_true_outside_debug(self) -> None:
+        """AUTO_APPROVE=True outside DEBUG warns operator to confirm consent posture."""
+        out, _ = _run(security=True)
+        assert "repeat-grant fast path active" in out
+
+    @override_settings(
+        FRISIAN_MCP_OAUTH_AUTO_APPROVE=True,
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True,
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST=["claude.ai"],
+        DEBUG=False,
+    )
+    def test_warn_when_combined_with_auto_register(self) -> None:
+        """AUTO_APPROVE=True + AUTO_REGISTER=True raises an additional combined-warning."""
+        out, _ = _run(security=True)
+        assert "combined with" in out
+
+
+class TestMcpDoctorTierPermissions:
+    """T10: FRISIAN_MCP_OAUTH_TIER_PERMISSIONS audit."""
+
+    @override_settings(
+        INSTALLED_APPS=["frisian_mcp", "frisian_mcp.contrib.tokens", "frisian_mcp.contrib.oauth"]
+    )
+    def test_ok_when_unset(self) -> None:
+        """TIER_PERMISSIONS unset → default-deny is the safe default."""
+        out, _ = _run()
+        assert "TIER_PERMISSIONS unset or empty" in out
+        assert "default-deny" in out
+
+    @override_settings(
+        INSTALLED_APPS=["frisian_mcp", "frisian_mcp.contrib.tokens", "frisian_mcp.contrib.oauth"],
+        FRISIAN_MCP_OAUTH_TIER_PERMISSIONS={"read": ["app.view_thing"], "admin": ["app.add_thing"]},
+    )
+    def test_ok_with_size_when_populated(self) -> None:
+        """Populated TIER_PERMISSIONS reports tier count, never perm strings."""
+        out, _ = _run()
+        assert "set for 2 tier(s)" in out
+        # Perm strings must never leak into the doctor output.
+        assert "app.view_thing" not in out
+        assert "app.add_thing" not in out
+
+    @override_settings(
+        INSTALLED_APPS=["frisian_mcp", "frisian_mcp.contrib.tokens", "frisian_mcp.contrib.oauth"],
+        FRISIAN_MCP_OAUTH_TIER_PERMISSIONS="not a dict",
+    )
+    def test_warn_when_misconfigured_type(self) -> None:
+        """Non-dict TIER_PERMISSIONS warns operator about shape."""
+        out, _ = _run()
+        assert "is not a dict" in out
+
+    @override_settings(INSTALLED_APPS=["frisian_mcp"])
+    def test_silent_when_oauth_not_installed(self) -> None:
+        """No TIER_PERMISSIONS signal when contrib.oauth is absent."""
+        out, _ = _run()
+        assert "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS" not in out
+
+
+@pytest.mark.django_db
+class TestMcpDoctorAutoApproveConsentRecords:
+    """T9: AUTO_APPROVE=True with no OAuthAuthorizeConsent rows → operator drift warning."""
+
+    @override_settings(
+        INSTALLED_APPS=[
+            "django.contrib.contenttypes",
+            "django.contrib.auth",
+            "frisian_mcp",
+            "frisian_mcp.contrib.tokens",
+            "frisian_mcp.contrib.oauth",
+        ],
+        FRISIAN_MCP_OAUTH_AUTO_APPROVE=True,
+    )
+    def test_warn_when_auto_approve_and_no_consent_rows(self) -> None:
+        """AUTO_APPROVE=True with empty consent table → drift warning."""
+        out, _ = _run(security=True)
+        assert "no OAuthAuthorizeConsent rows exist" in out
+
+    @override_settings(
+        INSTALLED_APPS=[
+            "django.contrib.contenttypes",
+            "django.contrib.auth",
+            "frisian_mcp",
+            "frisian_mcp.contrib.tokens",
+            "frisian_mcp.contrib.oauth",
+        ],
+        FRISIAN_MCP_OAUTH_AUTO_APPROVE=False,
+    )
+    def test_silent_when_auto_approve_false(self) -> None:
+        """No drift warning when AUTO_APPROVE is False."""
+        out, _ = _run(security=True)
+        assert "no OAuthAuthorizeConsent rows exist" not in out

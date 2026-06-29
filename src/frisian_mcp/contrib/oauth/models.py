@@ -259,3 +259,64 @@ class OAuthAccessToken(models.Model):
             self.plaintext_token: str = raw  # pylint: disable=attribute-defined-outside-init
             self.token = _hmac_secret(raw)
         super().save(*args, **kwargs)
+
+
+class OAuthAuthorizeConsent(models.Model):
+    """Persisted approval of an OAuth authorize request.
+
+    Records that a Django *user* has approved a specific
+    ``(client_id, redirect_uri, scope)`` tuple at least once.  Subsequent
+    requests for the same tuple by the same user can be auto-approved without
+    re-rendering the consent form when
+    ``FRISIAN_MCP_OAUTH_AUTO_APPROVE`` is ``True``.
+
+    Operators can pre-populate consent rows via Django admin to grant
+    silent re-approval for trusted clients without requiring an interactive
+    consent step.  Per-row delete is the revocation mechanism.
+
+    Closes M-oauth-auto-approve-debug-default.  See ADR:
+    "Unauthenticated PKCE authorize-path: request inputs are never
+    authority."
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="oauth_authorize_consents",
+        help_text="Django user who granted this consent.",
+    )
+    client_id = models.CharField(
+        max_length=255,
+        help_text="OAuth client_id from the authorize request at the time of consent.",
+    )
+    redirect_uri = models.CharField(
+        max_length=2000,
+        help_text="Exact redirect_uri the user approved.  Must match on subsequent requests.",
+    )
+    scope = models.CharField(
+        max_length=64,
+        help_text=(
+            "Permission tier at the time of consent.  Currently one of "
+            "``read`` / ``read_write`` / ``admin`` (the OAuthClient.permission "
+            "value at consent time).  Stored as a free-form string so future "
+            "scope refactors do not require a migration."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        """Model metadata."""
+
+        verbose_name = "OAuth Authorize Consent"
+        verbose_name_plural = "OAuth Authorize Consents"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "client_id", "redirect_uri", "scope"],
+                name="frisian_mcp_oac_unique_grant",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a human-readable representation."""
+        return f"{self.user} → {self.client_id} ({self.scope})"

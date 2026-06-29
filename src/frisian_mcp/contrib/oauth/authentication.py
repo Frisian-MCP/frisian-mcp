@@ -36,6 +36,104 @@ from .views import _get_base_url
 
 logger = logging.getLogger(__name__)
 
+#: Tier ranking shared with the OAuth views' tier-promotion ladder.  Indexed
+#: lookup is the comparison primitive used by :func:`_effective_tier`.  Tier
+#: strings outside this list are treated as the lowest tier ("read") per the
+#: package's safe-default convention.
+_TIER_RANK: tuple[str, ...] = ("read", "read_write", "admin")
+
+#: In-memory throttle for the "snapshot narrower than client" INFO log.
+#: A frozenset entry of (token_pk, observed_client_tier) is appended on first
+#: emission; subsequent observations of the same pair within the process
+#: lifetime are suppressed.  Bounded growth (one entry per unique observed
+#: pairing per process); resets on process restart.  Not persisted, not shared
+#: across workers — the log signal is operational, not authoritative.
+_LOGGED_NARROWER_AUTHORITY: set[tuple[Any, str]] = set()
+
+
+def _tier_rank(tier: str) -> int:
+    """Return the ordinal rank of *tier* (unknown tiers fall through to 0 / "read")."""
+    if tier in _TIER_RANK:
+        return _TIER_RANK.index(tier)
+    return 0
+
+
+def _tier_permissions_for(tier: str) -> set[str]:
+    """Return the accumulated Django-perm allowlist for *tier* with inheritance.
+
+    Reads ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` (default ``{}``), which is a
+    ``dict[str, list[str]]`` mapping each MCP tier name to the
+    fully-qualified Django permission strings the operator wants to grant at
+    that tier.  Inheritance is monotonic up the tier ladder: ``admin``
+    accumulates its own list plus ``read_write`` plus ``read``;
+    ``read_write`` accumulates its own plus ``read``; ``read`` returns only
+    its own list.  This matches the typical RBAC mental model where a
+    higher tier is a superset of every lower tier.
+
+    Returns an empty set when ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` is
+    unset, empty, or not a ``dict`` (defensive against operator
+    misconfiguration).  Unknown tier keys in the dict (anything outside
+    ``_TIER_RANK``) are silently ignored.
+
+    Closes M-oauth-has-perm-blanket-true (T10).
+    """
+    tier_perms: object = getattr(settings, "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS", {})
+    if not isinstance(tier_perms, dict):
+        return set()
+    rank = _tier_rank(tier)
+    accumulated: set[str] = set()
+    for lower in _TIER_RANK[: rank + 1]:
+        entries: object = tier_perms.get(lower, [])
+        if not isinstance(entries, list):
+            # Defensive: an operator might set a tier to a single string by
+            # mistake.  Skip the malformed entry rather than raising at
+            # request time.
+            continue
+        for entry in entries:
+            if isinstance(entry, str) and entry:
+                accumulated.add(entry)
+    return accumulated
+
+
+def _effective_tier(access_token: OAuthAccessToken) -> str:
+    """
+    Return the LESSER of the token's issuance snapshot and the live client tier.
+
+    Token authority is fixed at issuance.  An admin-console *downgrade* of the
+    issuing client takes effect live (the client tier acts as a narrowing cap
+    on every outstanding token).  An admin-console *upgrade* does NOT widen
+    previously-issued tokens — the issuance snapshot remains the ceiling.
+
+    Unknown tier strings on either side fall through to ``"read"`` via the
+    rank lookup; the function never raises.
+
+    Emits ``oauth_token_authority_narrower_than_client_tier`` (INFO) at most
+    once per (token_pk, observed_client_tier) pair per process lifetime when
+    the snapshot is strictly narrower than the live client tier.  The signal
+    surfaces either a legitimate operator downgrade or a propagated-but-
+    blocked escalation attempt; downstream alerting can correlate it with
+    the OAuthClient admin audit log to distinguish the two.
+    """
+    token_tier = access_token.permission
+    client_tier = access_token.client.permission
+    token_rank = _tier_rank(token_tier)
+    client_rank = _tier_rank(client_tier)
+    if token_rank < client_rank:
+        cache_key = (access_token.pk, client_tier)
+        if cache_key not in _LOGGED_NARROWER_AUTHORITY:
+            _LOGGED_NARROWER_AUTHORITY.add(cache_key)
+            logger.info(
+                "oauth_token_authority_narrower_than_client_tier",
+                extra={
+                    "token_id": access_token.pk,
+                    "snapshot_tier": token_tier,
+                    "client_tier": client_tier,
+                },
+            )
+    if token_rank <= client_rank:
+        return token_tier if token_tier in _TIER_RANK else "read"
+    return client_tier if client_tier in _TIER_RANK else "read"
+
 
 class OAuthServicePrincipal:
     """
@@ -54,13 +152,24 @@ class OAuthServicePrincipal:
     ``request.auth.permission == "admin"`` directly rather than relying on
     ``request.user.is_superuser``.
 
-    Tier mapping:
+    Tier mapping (T10 default-deny + opt-in via TIER_PERMISSIONS):
 
-    * ``admin``      — ``is_staff = True``; ``has_perm`` / ``has_module_perms``
-                       return ``True`` (MCP tier filtering is the real gate).
-    * ``read_write`` — ``is_staff = True``; same as admin at the Django level.
-    * ``read``       — no elevated flags; permission methods return ``False``
-                       for any write-class check.
+    * ``admin``      — ``is_staff = True``.  ``has_perm`` / ``has_module_perms``
+                       return ``True`` only for perm strings explicitly listed
+                       in ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` at the
+                       ``admin`` / ``read_write`` / ``read`` keys
+                       (inheritance).
+    * ``read_write`` — ``is_staff = True``.  ``has_perm`` /
+                       ``has_module_perms`` consult only the ``read_write``
+                       and ``read`` keys.
+    * ``read``       — no elevated flags.  ``has_perm`` /
+                       ``has_module_perms`` consult only the ``read`` key.
+
+    Default-deny applies whenever ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` is
+    unset, empty, or the perm string is not in the relevant accumulated
+    allowlist.  The MCP-internal tier gate is unchanged; T10 only narrows
+    host-code reads of ``request.user.has_perm`` so that hosts cannot rely
+    on a blanket-True signal.
     """
 
     is_authenticated: bool = True
@@ -91,17 +200,37 @@ class OAuthServicePrincipal:
         """Return an empty set; MCP tier filtering is the real permission gate."""
         return set()
 
-    def has_perm(self, perm: str, obj: object = None) -> bool:  # pylint: disable=unused-argument
-        """Return True for read_write and admin tiers; False for read-only."""
-        return self.permission in ("read_write", "admin")
+    def has_perm(  # pylint: disable=unused-argument  # ``obj`` is interface-only
+        self, perm: str, obj: object = None
+    ) -> bool:
+        """Return True iff *perm* is in the tier's allowlist (with inheritance).
+
+        Default-deny when ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` is unset or
+        does not list *perm* at the current tier (or any lower tier through
+        inheritance).  Empty *perm* strings fail closed.  The *obj*
+        argument is accepted for ``BaseBackend``-style call compatibility
+        but is not used: T10 enforces a string-level allowlist, not an
+        object-level check.
+        """
+        if not perm:
+            return False
+        return perm in _tier_permissions_for(self.permission)
 
     def has_perms(self, perm_list: Iterable[str], obj: object = None) -> bool:
         """Return True only when has_perm passes for every permission in perm_list."""
         return all(self.has_perm(p, obj) for p in perm_list)
 
-    def has_module_perms(self, app_label: str) -> bool:  # pylint: disable=unused-argument
-        """Return True for read_write and admin tiers; False for read-only."""
-        return self.permission in ("read_write", "admin")
+    def has_module_perms(self, app_label: str) -> bool:
+        """Return True iff any allowlisted perm is scoped to *app_label*.
+
+        Default-deny when ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` is unset or
+        contains no perm string prefixed with ``app_label + "."``.  Empty
+        *app_label* fails closed.
+        """
+        if not app_label:
+            return False
+        prefix = f"{app_label}."
+        return any(p.startswith(prefix) for p in _tier_permissions_for(self.permission))
 
 
 class OAuthTokenAuthentication(BaseAuthentication):
@@ -179,9 +308,10 @@ class OAuthTokenAuthentication(BaseAuthentication):
 
         OAuthAccessToken.objects.filter(pk=access_token.pk).update(last_used_at=timezone.now())
 
-        # Read permission from the client so that admin-console permission
-        # changes take effect immediately without waiting for token expiry.
-        principal = OAuthServicePrincipal(permission=access_token.client.permission)
+        # Token authority is fixed at issuance.  Admin-console downgrades take
+        # effect live (the client.permission cap narrows effective tier);
+        # admin-console upgrades do NOT widen previously-issued tokens.
+        principal = OAuthServicePrincipal(permission=_effective_tier(access_token))
 
         # Resolve request.user to a real Django User instance so that
         # FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY can call get_all_permissions().
