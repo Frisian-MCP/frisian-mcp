@@ -9,6 +9,12 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Issue #12 — custom detail actions:** Auto-discovered DRF `@action(detail=True)` handlers
+  now require an `id` in their MCP schema and pass it through as `pk` during invocation,
+  preventing missing-`pk` tracebacks for integrations such as Nautobot `napalm`.
+
 ### Removed
 
 - **`McpEndpointView` alias dropped.** The `McpEndpointView` name (a backward-compatible alias

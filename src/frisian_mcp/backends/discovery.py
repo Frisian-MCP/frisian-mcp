@@ -108,8 +108,16 @@ _FK_ITEM_SCHEMA: dict[str, Any] = {
     ]
 }
 
-# Actions that accept a detail identifier (pk / id) as the primary argument.
+# Standard actions that accept a detail identifier (pk / id) as the primary argument.
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
+
+
+def _is_detail_action(view_class: type, action: str) -> bool:
+    """Return ``True`` for standard or custom DRF detail actions."""
+    if action in _DETAIL_ACTIONS:
+        return True
+    action_func = getattr(view_class, action, None)
+    return getattr(action_func, "detail", False) is True
 
 
 def _tool_name_separator() -> str:
@@ -232,8 +240,10 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         """
         schema: dict[str, Any] = {"type": "object", "properties": {}}
 
-        # Detail actions always accept an id/pk.
-        if action in _DETAIL_ACTIONS:
+        # Detail actions always accept an id/pk.  This includes both the
+        # standard DRF detail actions and custom ``@action(detail=True)``
+        # handlers such as Nautobot's DeviceViewSet.napalm.
+        if _is_detail_action(view_class, action):
             # Accept both integer and string IDs so that UUID-keyed models work
             # without schema validation errors.  jsonschema validates the caller's
             # value against the declared type; hardcoding "integer" rejects valid

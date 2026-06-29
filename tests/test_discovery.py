@@ -761,6 +761,13 @@ class TestCustomActionSchemaInGetInputSchema:
         assert "fmt" in schema["properties"]
         assert "limit" in schema["properties"]
 
+    def test_custom_detail_action_schema_requires_id(self) -> None:
+        """Custom @action(detail=True) schemas require an object identifier."""
+        discovery = DRFSyncDiscovery()
+        schema = discovery.get_input_schema(TypedActionViewSet, "napalm")
+        assert "id" in schema["properties"]
+        assert "id" in schema["required"]
+
     def test_standard_action_schema_unaffected(self) -> None:
         """Standard list/create actions are not affected by signature introspection."""
         discovery = DRFSyncDiscovery()

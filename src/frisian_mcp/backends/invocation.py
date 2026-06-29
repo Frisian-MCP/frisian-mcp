@@ -208,8 +208,17 @@ def _exception_envelope_message(exc: BaseException) -> str:
     return _flatten_error_detail(detail)
 
 
-# ViewSet actions that need a primary-key URL kwarg.
+# Standard ViewSet actions that need a primary-key URL kwarg.
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
+
+
+def _is_detail_action(view_class: type, action: str) -> bool:
+    """Return ``True`` for standard or custom DRF detail actions."""
+    if action in _DETAIL_ACTIONS:
+        return True
+    action_func = getattr(view_class, action, None)
+    return getattr(action_func, "detail", False) is True
+
 
 # Map standard ViewSet action name → HTTP method for the synthetic request.
 # Includes bulk list-route actions (PUT/PATCH/DELETE on the list endpoint)
@@ -410,8 +419,17 @@ class SyncInvocation(BaseInvocationBackend):
 
         http_method = _action_http_method(tool.view_class, tool.action)
         view_kwargs, body_args, query_args = self._split_arguments(
-            tool.action, http_method, arguments
+            tool.view_class, tool.action, http_method, arguments
         )
+        if (
+            _is_detail_action(tool.view_class, tool.action)
+            and tool.action != "partial_update"
+            and "pk" not in view_kwargs
+        ):
+            return ToolResult(
+                content={"error": "Missing required argument: id"},
+                is_error=True,
+            )
         # PKG-24: pre-flight FK normalization.  Bare non-UUID strings for
         # PrimaryKeyRelatedField / natural-key hybrid fields are wrapped as
         # {"name": value} so the host serializer can resolve them.
@@ -552,6 +570,7 @@ class SyncInvocation(BaseInvocationBackend):
 
     def _split_arguments(
         self,
+        view_class: type,
         action: str,
         http_method: str,
         arguments: dict[str, Any],
@@ -565,6 +584,7 @@ class SyncInvocation(BaseInvocationBackend):
         into *query_args*; all other methods put them into *body_args*.
 
         Args:
+            view_class: ViewSet class, used to detect custom detail routes.
             action: ViewSet action name, used to detect detail routes.
             http_method: Lowercase HTTP method string (e.g. ``"get"``).
             arguments: Caller-supplied tool arguments.
@@ -576,7 +596,7 @@ class SyncInvocation(BaseInvocationBackend):
         remaining = dict(arguments)
         view_kwargs: dict[str, Any] = {}
 
-        if action in _DETAIL_ACTIONS:
+        if _is_detail_action(view_class, action):
             for key in ("pk", "id"):
                 if key in remaining:
                     view_kwargs["pk"] = remaining.pop(key)
