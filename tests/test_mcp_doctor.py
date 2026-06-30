@@ -6,6 +6,7 @@ from io import StringIO
 from typing import Any
 
 import pytest
+from django.conf import settings
 from django.test import override_settings
 
 from frisian_mcp.management.commands.mcp_doctor import Command
@@ -276,12 +277,46 @@ class TestMcpDoctorPkceAutoRegister:
         assert "DEBUG=True" in out
         assert "claude.ai" not in out
 
+    @override_settings(
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True,
+        FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST="claude.ai",
+        DEBUG=False,
+    )
+    def test_warn_when_allowlist_is_string_not_list(self) -> None:
+        """Misconfigured-as-string allowlist is rejected (no false 'N pattern(s)' OK)."""
+        # Without the isinstance guard, ``list("claude.ai")`` would silently
+        # explode the string into 9 single-char "patterns" and the doctor
+        # would report "restricted to 9 host pattern(s)" — falsely OK on a
+        # malformed security setting.  The shape guard catches it, coerces
+        # to empty, and the empty-allowlist + non-DEBUG matrix then ERRORs.
+        out_buf, err_buf = StringIO(), StringIO()
+        cmd = Command(stdout=out_buf, stderr=err_buf)
+        with pytest.raises(SystemExit) as exc:
+            cmd.handle(security=True)
+        assert exc.value.code == 1
+        out = out_buf.getvalue()
+        assert "is not a list" in out
+        # The exploded-into-chars fallback would emit this string; verify
+        # the shape guard suppresses it.
+        assert "restricted to 9 host pattern(s)" not in out
+
 
 class TestMcpDoctorPkceRedirectTierMap:
     """T7: legacy PKCE_REDIRECT_TIER_MAP stale-setting warning."""
 
     def test_silent_when_setting_absent(self) -> None:
         """No mention of the removed setting when operators have removed it."""
+        # Explicit precondition: if a future test_settings.py drift defines
+        # the setting, surface a clear "precondition broken" failure rather
+        # than letting the absent-case assertion pass / fail for the wrong
+        # reason.  ``hasattr`` triggers the LazySettings ``_setup`` so the
+        # check works whether or not the setting was defined at import time.
+        assert not hasattr(settings, "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP"), (
+            "Test precondition violated: FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP"
+            " is defined in the test settings module. This test asserts the"
+            " absent-case behavior; remove the setting from test_settings.py"
+            " or override it for this test."
+        )
         out, _ = _run()
         assert "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP" not in out
 
@@ -298,6 +333,13 @@ class TestMcpDoctorAutoApprove:
 
     def test_ok_when_unset(self) -> None:
         """AUTO_APPROVE absent → OK."""
+        # Explicit precondition: see TestMcpDoctorPkceRedirectTierMap for
+        # the same hermeticity guard.
+        assert not hasattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE"), (
+            "Test precondition violated: FRISIAN_MCP_OAUTH_AUTO_APPROVE is"
+            " defined in the test settings module. Remove it from"
+            " test_settings.py or override it for this test."
+        )
         out, _ = _run(security=True)
         assert "FRISIAN_MCP_OAUTH_AUTO_APPROVE unset or False" in out
 
@@ -363,6 +405,40 @@ class TestMcpDoctorTierPermissions:
         """Non-dict TIER_PERMISSIONS warns operator about shape."""
         out, _ = _run()
         assert "is not a dict" in out
+
+    @override_settings(
+        INSTALLED_APPS=["frisian_mcp", "frisian_mcp.contrib.tokens", "frisian_mcp.contrib.oauth"],
+        # Use a perm string that does NOT appear in the doctor's own warning
+        # text (which uses ``app.view_thing`` as an illustrative example),
+        # so the leak assertion isn't fooled by the help-text occurrence.
+        FRISIAN_MCP_OAUTH_TIER_PERMISSIONS={"read": "secret.special_perm"},
+    )
+    def test_warn_when_value_is_string_not_list(self) -> None:
+        """Per-tier value of str (instead of list[str]) is flagged."""
+        out, _ = _run()
+        assert "unexpected" in out
+        # Perm strings must never leak into the doctor output.
+        assert "secret.special_perm" not in out
+
+    @override_settings(
+        INSTALLED_APPS=["frisian_mcp", "frisian_mcp.contrib.tokens", "frisian_mcp.contrib.oauth"],
+        FRISIAN_MCP_OAUTH_TIER_PERMISSIONS={"read": ["secret.special_perm", 123]},
+    )
+    def test_warn_when_perm_entry_is_non_string(self) -> None:
+        """Non-string entries inside the per-tier list are flagged."""
+        out, _ = _run()
+        assert "unexpected" in out
+        assert "secret.special_perm" not in out
+
+    @override_settings(
+        INSTALLED_APPS=["frisian_mcp", "frisian_mcp.contrib.tokens", "frisian_mcp.contrib.oauth"],
+        # ``"redd"`` is a typo; no runtime tier will ever consult it.
+        FRISIAN_MCP_OAUTH_TIER_PERMISSIONS={"redd": ["secret.special_perm"]},
+    )
+    def test_warn_when_tier_key_is_not_canonical(self) -> None:
+        """A typo'd tier key (``redd``) is flagged, not silently OK'd."""
+        out, _ = _run()
+        assert "unexpected" in out
 
     @override_settings(INSTALLED_APPS=["frisian_mcp"])
     def test_silent_when_oauth_not_installed(self) -> None:

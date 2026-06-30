@@ -201,9 +201,24 @@ OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL: str = (
 _PKCE_TIER_SIGNAL_LOG_SEEN: set[tuple[str, str]] = set()
 
 
+#: Tier strings accepted as a value for ``FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION``.
+#: Anything outside this set is treated as misconfiguration and falls back
+#: to ``"read"`` rather than being persisted onto ``OAuthClient.permission``.
+_VALID_PKCE_DEFAULT_PERMISSIONS: frozenset[str] = frozenset({"read", "read_write", "admin"})
+
+
 def _pkce_default_permission() -> str:
-    """Return ``FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION`` (default ``"read"``)."""
-    return getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read")
+    """Return ``FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION`` (default ``"read"``).
+
+    Validates the operator-configured value against the known tier set;
+    a misconfigured value (typo, wrong tier name, oversized string) falls
+    closed to ``"read"`` rather than being persisted onto
+    ``OAuthClient.permission`` where it would silently mis-shape the row.
+    """
+    value = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read")
+    if isinstance(value, str) and value in _VALID_PKCE_DEFAULT_PERMISSIONS:
+        return value
+    return "read"
 
 
 def _log_redirect_uri_ignored_as_tier_signal(client_id: str, redirect_uri: str) -> None:

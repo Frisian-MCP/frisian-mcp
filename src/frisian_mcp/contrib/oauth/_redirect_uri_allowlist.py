@@ -108,10 +108,18 @@ def redirect_uri_matches_auto_register_allowlist(redirect_uri: str, allowlist: l
     """
     if not allowlist:
         return False
-    parsed = urlparse(redirect_uri)
-    scheme = parsed.scheme.lower()
+    # Fail-closed on parse error.  ``urlparse`` is lenient on its own, but
+    # ``parsed.hostname`` raises ``ValueError`` on malformed IPv6 inputs
+    # such as ``http://[::g]/``.  Any parse failure here means the URI is
+    # not safely matchable against the allowlist, so reject the request.
+    try:
+        parsed = urlparse(redirect_uri)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+    except ValueError:
+        return False
     if scheme in {"http", "https"}:
-        host = _normalize_host(parsed.hostname or "")
+        host = _normalize_host(hostname or "")
         if not host:
             return False
         return any(match_host_pattern(entry, host) for entry in allowlist)

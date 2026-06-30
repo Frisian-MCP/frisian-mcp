@@ -453,9 +453,24 @@ class Command(BaseCommand):
         """Audit the AUTO_REGISTER + host-allowlist (T1) matrix."""
         debug: bool = getattr(settings, "DEBUG", False)
         pkce_auto: bool = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER", False)
-        allowlist: list[str] = list(
-            getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST", []) or []
+        # Validate shape BEFORE counting: ``list("claude.ai")`` silently
+        # explodes a misconfigured-as-string setting into per-character
+        # "patterns" and would falsely OK a malformed security input.
+        raw_allowlist: object = getattr(
+            settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST", []
         )
+        if raw_allowlist is None or raw_allowlist == []:
+            allowlist: list[str] = []
+        elif isinstance(raw_allowlist, list):
+            allowlist = list(raw_allowlist)
+        else:
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST is set but is not a list —"
+                " auto-register will treat it as empty (fail-closed). Expected shape:"
+                " list[str] of hostname patterns (e.g. ['claude.ai', '*.anthropic.com']).",
+            )
+            allowlist = []
         if not pkce_auto:
             self._ok("FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=False — PKCE auto-registration disabled")
             return
@@ -565,6 +580,33 @@ class Command(BaseCommand):
                 "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS is set but is not a dict — has_perm will treat"
                 " it as default-deny. Expected shape: dict[str, list[str]] (tier name → perm"
                 " strings).",
+            )
+            return
+        # Top-level dict OK; validate key + value shape so a misconfiguration
+        # like ``{"redd": ["app.view"]}`` (typo'd tier name no runtime tier
+        # will consult), ``{"read": "app.view_thing"}`` (string instead of
+        # list[str]), or ``{"read": [123]}`` (non-string perm) does not get
+        # reported as healthy.  Perm strings are intentionally not echoed
+        # (CI log hygiene); the warning surfaces shape only.
+        valid_tier_keys: frozenset[str] = frozenset({"read", "read_write", "admin"})
+        bad_tiers: list[str] = []
+        for tier_name, perms in tier_perms.items():
+            if not isinstance(tier_name, str):
+                bad_tiers.append(repr(tier_name)[:40])
+                continue
+            if tier_name not in valid_tier_keys:
+                bad_tiers.append(tier_name)
+                continue
+            if not isinstance(perms, list) or not all(isinstance(p, str) for p in perms):
+                bad_tiers.append(tier_name)
+        if bad_tiers:
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS has unexpected key or value shape for"
+                f" {len(bad_tiers)} tier(s) — has_perm will fall back to default-deny for those"
+                " tiers. Expected: dict keys in {'read', 'read_write', 'admin'}; per-tier value"
+                " a list[str] of permission codenames"
+                " (e.g. ['app.view_thing', 'app.change_thing']).",
             )
             return
         tier_count = len(tier_perms)

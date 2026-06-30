@@ -3,11 +3,35 @@
 from django import forms
 from django.conf import settings
 from django.contrib import admin
+from django.contrib.auth import get_user_model
 from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils.html import format_html
 
 from .models import OAuthAccessToken, OAuthAuthorizeConsent, OAuthClient
+
+
+def _user_search_lookup() -> str | None:
+    """Return ``user__<USERNAME_FIELD>`` only when it is safe to use in admin search.
+
+    Admin ``search_fields`` requires a concrete text-searchable lookup.
+    ``AUTH_USER_MODEL.USERNAME_FIELD`` is *typically* a CharField (the
+    default ``username`` or a custom ``email``), but Django does not strictly
+    forbid declaring a relational field as USERNAME_FIELD.  When that is the
+    case, ``user__<fk_field>`` is not a valid admin search path, so this
+    helper returns ``None`` and the caller drops the user-side search rather
+    than registering an invalid lookup.
+    """
+    user_model = get_user_model()
+    try:
+        field = user_model._meta.get_field(  # pylint: disable=protected-access
+            user_model.USERNAME_FIELD
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    if field.is_relation:
+        return None
+    return f"user__{user_model.USERNAME_FIELD}"
 
 
 class OAuthClientAdminForm(forms.ModelForm):  # type: ignore[type-arg]
@@ -116,7 +140,14 @@ class OAuthAuthorizeConsentAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
     list_display = ("user", "client_id", "redirect_uri", "scope", "created_at")
     list_filter = ("scope", "created_at")
-    search_fields = ("user__username", "client_id", "redirect_uri")
+    # ``AUTH_USER_MODEL`` is swappable.  Derive the username-lookup field so
+    # admin search works on custom user models whose USERNAME_FIELD is e.g.
+    # ``email``.  If USERNAME_FIELD is a relational field (unusual but not
+    # forbidden by Django), ``_user_search_lookup`` returns None and the
+    # user-side search is dropped rather than registering an invalid path.
+    search_fields = tuple(
+        s for s in (_user_search_lookup(), "client_id", "redirect_uri") if s is not None
+    )
     readonly_fields = ("created_at",)
     actions = ("revoke_selected_consents",)
 

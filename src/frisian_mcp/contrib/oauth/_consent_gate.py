@@ -36,7 +36,11 @@ OAUTH_AUTHORIZE_AUTO_APPROVED_ON_PRIOR_CONSENT: str = (
 # at most once per ``(user_id, client_id, redirect_uri, scope)`` tuple per
 # process lifetime.  Bounded by distinct tuples seen; not persisted; not
 # shared across workers.  Matches the throttle pattern used by T7 and T8.
-LOGGED_PRIOR_CONSENT_APPROVALS: set[tuple[int, str, str, str]] = set()
+#
+# ``user_id`` is stored as ``str`` because ``AUTH_USER_MODEL`` is swappable
+# and many projects use UUID or other non-integer primary keys; coercing
+# to ``int`` here would crash the fast path for those deployments.
+LOGGED_PRIOR_CONSENT_APPROVALS: set[tuple[str, str, str, str]] = set()
 
 
 def render_consent_form(
@@ -134,14 +138,17 @@ def log_auto_approved_on_prior_consent(
     user_pk = request.user.pk
     if user_pk is None:  # pragma: no cover - authenticated users always have a pk
         return
-    key = (int(user_pk), client_id, redirect_uri, client.permission)
+    # ``str`` rather than ``int`` so projects with UUID / non-integer user
+    # primary keys (AUTH_USER_MODEL is swappable) don't crash here.
+    user_pk_str = str(user_pk)
+    key = (user_pk_str, client_id, redirect_uri, client.permission)
     if key in LOGGED_PRIOR_CONSENT_APPROVALS:
         return
     LOGGED_PRIOR_CONSENT_APPROVALS.add(key)
     logger.info(
         OAUTH_AUTHORIZE_AUTO_APPROVED_ON_PRIOR_CONSENT,
         extra={
-            "user_id": int(user_pk),
+            "user_id": user_pk_str,
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": client.permission,

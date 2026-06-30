@@ -301,6 +301,7 @@ class TestOAuthTokenAuthentication:
         assert auth_user.is_authenticated is True
         assert auth_token.pk == token.pk
 
+    @override_settings(FRISIAN_MCP_OAUTH_TIER_PERMISSIONS={})
     def test_service_principal_permission_tiers(self) -> None:
         """T10: tier still drives is_staff; has_perm / has_module_perms default-deny.
 
@@ -308,9 +309,10 @@ class TestOAuthTokenAuthentication:
         ``read_write``/``admin`` (M-oauth-has-perm-blanket-true).  T10
         flipped that to default-deny: ``has_perm`` returns ``True`` only
         when ``perm`` is in ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` at the
-        principal's tier (with inheritance).  This test runs without that
-        setting populated, so every ``has_perm`` / ``has_module_perms``
-        check returns ``False`` regardless of tier.  The ``is_staff`` /
+        principal's tier (with inheritance).  The ``@override_settings``
+        decorator explicitly enforces the empty-allowlist precondition so
+        a future suite-wide setting drift cannot make these assertions
+        pass or fail for the wrong reason.  The ``is_staff`` /
         ``is_superuser`` flags are unchanged (they reflect the tier-to-
         staff mapping, not the perm allowlist).
         """
@@ -2911,3 +2913,79 @@ class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-met
         # which is acceptable; the cache primitive's invariant still holds.
         invalid_grants = [s for s in statuses if s == 400]
         assert len(invalid_grants) >= 9, f"expected >=9 invalid_grant, got statuses {statuses}"
+
+
+# ---------------------------------------------------------------------------
+# Defensive-validation regressions surfaced during PR review
+# (CodeRabbit findings, addressed in this PR).
+# ---------------------------------------------------------------------------
+
+
+class TestRedirectUriAllowlistFailClosed:
+    """T1: ``redirect_uri_matches_auto_register_allowlist`` fails closed on parse errors."""
+
+    def test_malformed_ipv6_does_not_raise(self) -> None:
+        """A redirect_uri whose ``.hostname`` raises ``ValueError`` returns False.
+
+        ``urlparse`` itself tolerates malformed netloc, but ``.hostname`` raises
+        ``ValueError`` on inputs like ``http://[::g]/`` (invalid IPv6 hex).
+        The allowlist matcher must fail closed rather than propagating the
+        exception to the authorize handler.
+        """
+        from frisian_mcp.contrib.oauth._redirect_uri_allowlist import (  # pylint: disable=import-outside-toplevel
+            redirect_uri_matches_auto_register_allowlist,
+        )
+
+        assert (
+            redirect_uri_matches_auto_register_allowlist(
+                "http://[::g]/cb",
+                ["claude.ai"],
+            )
+            is False
+        )
+
+    def test_garbage_input_does_not_raise(self) -> None:
+        """Total garbage strings return False rather than raising."""
+        from frisian_mcp.contrib.oauth._redirect_uri_allowlist import (  # pylint: disable=import-outside-toplevel
+            redirect_uri_matches_auto_register_allowlist,
+        )
+
+        assert (
+            redirect_uri_matches_auto_register_allowlist(
+                "not-a-url-at-all",
+                ["claude.ai"],
+            )
+            is False
+        )
+
+
+class TestPkceDefaultPermissionValidation:
+    """T7: ``_pkce_default_permission`` rejects invalid setting values."""
+
+    def test_unknown_tier_falls_back_to_read(self, settings: Any) -> None:
+        """A typo'd setting value (``"redd"``) does not get persisted."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _pkce_default_permission,
+        )
+
+        settings.FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = "redd"
+        assert _pkce_default_permission() == "read"
+
+    def test_non_string_falls_back_to_read(self, settings: Any) -> None:
+        """A non-string setting value (``None``, ``42``, ``["read"]``) falls back."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _pkce_default_permission,
+        )
+
+        settings.FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = 42  # type: ignore[assignment]
+        assert _pkce_default_permission() == "read"
+
+    def test_valid_tier_passes_through(self, settings: Any) -> None:
+        """Known tier values (``read``, ``read_write``, ``admin``) are honored."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _pkce_default_permission,
+        )
+
+        for tier in ("read", "read_write", "admin"):
+            settings.FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = tier
+            assert _pkce_default_permission() == tier
