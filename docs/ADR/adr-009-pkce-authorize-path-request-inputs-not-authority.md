@@ -61,7 +61,7 @@ Token tier is now snapshotted onto `OAuthAccessToken.permission` at issuance and
 
 The authenticator (`frisian_mcp.contrib.oauth.authentication._effective_tier`) returns
 
-```
+```python
 min(token.permission, client.permission)
 ```
 
