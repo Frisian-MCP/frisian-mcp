@@ -1,6 +1,5 @@
 # ADR-009: Unauthenticated PKCE authorize-path: request inputs are never authority
 
-**Status:** Proposed
 **Date:** 2026-06-29
 **Category:** adr
 **Supersedes:** —
