@@ -56,6 +56,7 @@ from ._consent_gate import (
     record_consent,
     render_consent_form,
 )
+from ._pkce_default_permission import _pkce_default_permission
 from ._redirect_uri_allowlist import (
     OAUTH_PKCE_AUTO_REGISTER_ALLOWLIST_EMPTY,
     OAUTH_PKCE_AUTO_REGISTER_HOST_REJECTED,
@@ -199,26 +200,6 @@ OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL: str = (
 #: Process-local throttle: emit the "redirect_uri ignored as tier signal" INFO
 #: log at most once per (client_id, redirect_uri) pair per process lifetime.
 _PKCE_TIER_SIGNAL_LOG_SEEN: set[tuple[str, str]] = set()
-
-
-#: Tier strings accepted as a value for ``FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION``.
-#: Anything outside this set is treated as misconfiguration and falls back
-#: to ``"read"`` rather than being persisted onto ``OAuthClient.permission``.
-_VALID_PKCE_DEFAULT_PERMISSIONS: frozenset[str] = frozenset({"read", "read_write", "admin"})
-
-
-def _pkce_default_permission() -> str:
-    """Return ``FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION`` (default ``"read"``).
-
-    Validates the operator-configured value against the known tier set;
-    a misconfigured value (typo, wrong tier name, oversized string) falls
-    closed to ``"read"`` rather than being persisted onto
-    ``OAuthClient.permission`` where it would silently mis-shape the row.
-    """
-    value = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read")
-    if isinstance(value, str) and value in _VALID_PKCE_DEFAULT_PERMISSIONS:
-        return value
-    return "read"
 
 
 def _log_redirect_uri_ignored_as_tier_signal(client_id: str, redirect_uri: str) -> None:
