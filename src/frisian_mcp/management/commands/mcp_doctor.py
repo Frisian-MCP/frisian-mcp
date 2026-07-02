@@ -54,6 +54,8 @@ class Command(BaseCommand):
         self._check_performance_hints(warnings)
         self._check_oauth_registration(warnings)
         self._check_oauth_authorize_url(warnings)
+        self._check_oauth_tier_permissions(warnings)
+        self._check_oauth_pkce_redirect_tier_map(warnings)
 
         if options.get("security"):
             self.stdout.write("")
@@ -61,7 +63,9 @@ class Command(BaseCommand):
             self._check_oauth_service_user(warnings)
             self._check_service_account_user_privilege(warnings)
             self._check_body_size_limit(warnings)
-            self._check_pkce_auto_register(warnings)
+            self._check_pkce_auto_register(warnings, errors)
+            self._check_oauth_auto_approve(warnings)
+            self._check_oauth_auto_approve_consent_records(warnings)
             self._check_oauth_registration_vs_wellknown(warnings)
             self._check_hmac_key_rotation(warnings)
 
@@ -445,27 +449,198 @@ class Command(BaseCommand):
                 "Set explicitly in settings to document and tune the intended limit.",
             )
 
-    def _check_pkce_auto_register(self, warnings: list[str]) -> None:
-        """Warn when PKCE auto-registration is enabled in a production-like environment."""
+    def _check_pkce_auto_register(self, warnings: list[str], errors: list[str]) -> None:
+        """Audit the AUTO_REGISTER + host-allowlist (T1) matrix."""
         debug: bool = getattr(settings, "DEBUG", False)
         pkce_auto: bool = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER", False)
-        if pkce_auto and not debug:
+        # Validate shape BEFORE counting: ``list("claude.ai")`` silently
+        # explodes a misconfigured-as-string setting into per-character
+        # "patterns" and would falsely OK a malformed security input.
+        raw_allowlist: object = getattr(
+            settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST", []
+        )
+        if raw_allowlist is None or raw_allowlist == []:
+            allowlist: list[str] = []
+        elif isinstance(raw_allowlist, list):
+            allowlist = list(raw_allowlist)
+        else:
             self._warn_msg(
                 warnings,
-                "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True in a non-debug environment — "
-                "any caller can register a new OAuth client by presenting an unknown client_id "
-                "at the authorize endpoint.  Ensure this is intentional for your deployment "
-                "(e.g. open MCP platform).  Disable for closed or enterprise deployments.",
+                "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST is set but is not a list —"
+                " auto-register will treat it as empty (fail-closed). Expected shape:"
+                " list[str] of hostname patterns (e.g. ['claude.ai', '*.anthropic.com']).",
             )
-        elif pkce_auto:
+            allowlist = []
+        if not pkce_auto:
+            self._ok("FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=False — PKCE auto-registration disabled")
+            return
+        # AUTO_REGISTER is True from here.  Behavior depends on the allowlist
+        # and DEBUG.  We never echo the allowlist contents into the doctor
+        # output (operator-specific values shouldn't land in CI logs);
+        # report size/presence only.
+        if not allowlist:
+            if debug:
+                self._warn_msg(
+                    warnings,
+                    "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True with no host allowlist"
+                    " (DEBUG=True) — unknown clients will be refused (effectively disabled)."
+                    " Set FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST to opt in to a"
+                    " trusted set of redirect-URI hosts before relying on auto-register.",
+                )
+            else:
+                self._fail(
+                    errors,
+                    "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True but the host allowlist is empty —"
+                    " unknown clients will be refused (effectively disabled). Set"
+                    " FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST or AUTO_REGISTER=False.",
+                )
+            return
+        # AUTO_REGISTER=True with a non-empty allowlist.
+        size = len(allowlist)
+        if debug:
             self._warn_msg(
                 warnings,
-                "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True — unauthenticated callers can "
-                "cache authorization codes for arbitrary client_ids.  Acceptable for local "
-                "development; disable before production.",
+                f"FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True restricted to {size} host pattern(s)"
+                " (DEBUG=True). Acceptable for local development; verify the allowlist before"
+                " enabling outside DEBUG.",
             )
         else:
-            self._ok("FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=False — PKCE auto-registration disabled")
+            self._ok(
+                f"FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True restricted to {size} host pattern(s)"
+            )
+
+    def _check_oauth_pkce_redirect_tier_map(self, warnings: list[str]) -> None:
+        """Warn when the legacy PKCE_REDIRECT_TIER_MAP setting is still present (T7 removed it)."""
+        # The setting is removed by T7; if an operator still has it set in
+        # their settings.py the doctor flags it so they can clean up.
+        if hasattr(settings, "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP"):
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP is set but the setting is no longer read"
+                " by frisian-mcp. Under the hardened authorize path the redirect_uri cannot"
+                " influence the client.permission tier. Remove the setting from your settings.py.",
+            )
+
+    def _check_oauth_auto_approve(self, warnings: list[str]) -> None:
+        """Audit the AUTO_APPROVE (T9) matrix and its interaction with AUTO_REGISTER (T1)."""
+        debug: bool = getattr(settings, "DEBUG", False)
+        # Sentinel resolution lets us distinguish "operator opted in to True"
+        # from "operator left it unset" without echoing the value.
+        _auto_approve_raw: object = getattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE", None)
+        auto_approve = bool(_auto_approve_raw) if _auto_approve_raw is not None else False
+        pkce_auto: bool = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER", False)
+        if not auto_approve:
+            self._ok(
+                "FRISIAN_MCP_OAUTH_AUTO_APPROVE unset or False"
+                " — consent form renders on first contact and on every authorize without a"
+                " stored prior-consent record"
+            )
+            return
+        # AUTO_APPROVE=True from here.  Reframed semantics: "remember consent,"
+        # not "skip consent."  First-time consent gate still fires.
+        if debug:
+            self._ok(
+                "FRISIAN_MCP_OAUTH_AUTO_APPROVE=True (DEBUG=True) — repeat-grant fast path active."
+                " First-time consent gate still applies."
+            )
+        else:
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_AUTO_APPROVE=True — repeat-grant fast path active."
+                " The first-time consent gate still applies (no consent record means"
+                " the form renders), but subsequent authorize requests for the same"
+                " (user, client_id, redirect_uri, scope) tuple skip the form."
+                " Confirm this matches your deployment's consent posture.",
+            )
+        if pkce_auto:
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_AUTO_APPROVE=True combined with"
+                " FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True — first contact from a newly"
+                " auto-registered client still renders the consent form (the gate is unbypassable)"
+                " but the combination is only safe with a tight"
+                " FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST.",
+            )
+
+    def _check_oauth_tier_permissions(self, warnings: list[str]) -> None:
+        """Audit the FRISIAN_MCP_OAUTH_TIER_PERMISSIONS (T10) signal."""
+        oauth_installed = "frisian_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
+        if not oauth_installed:
+            return
+        tier_perms: object = getattr(settings, "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS", None)
+        if not tier_perms:
+            self._ok(
+                "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS unset or empty — has_perm default-deny in"
+                " effect. Host code consulting Django perms will see no MCP-granted perms."
+            )
+            return
+        if not isinstance(tier_perms, dict):
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS is set but is not a dict — has_perm will treat"
+                " it as default-deny. Expected shape: dict[str, list[str]] (tier name → perm"
+                " strings).",
+            )
+            return
+        # Top-level dict OK; validate key + value shape so a misconfiguration
+        # like ``{"redd": ["app.view"]}`` (typo'd tier name no runtime tier
+        # will consult), ``{"read": "app.view_thing"}`` (string instead of
+        # list[str]), or ``{"read": [123]}`` (non-string perm) does not get
+        # reported as healthy.  Perm strings are intentionally not echoed
+        # (CI log hygiene); the warning surfaces shape only.
+        valid_tier_keys: frozenset[str] = frozenset({"read", "read_write", "admin"})
+        bad_tiers: list[str] = []
+        for tier_name, perms in tier_perms.items():
+            if not isinstance(tier_name, str):
+                bad_tiers.append(repr(tier_name)[:40])
+                continue
+            if tier_name not in valid_tier_keys:
+                bad_tiers.append(tier_name)
+                continue
+            if not isinstance(perms, list) or not all(isinstance(p, str) for p in perms):
+                bad_tiers.append(tier_name)
+        if bad_tiers:
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_TIER_PERMISSIONS has unexpected key or value shape for"
+                f" {len(bad_tiers)} tier(s) — has_perm will fall back to default-deny for those"
+                " tiers. Expected: dict keys in {'read', 'read_write', 'admin'}; per-tier value"
+                " a list[str] of permission codenames"
+                " (e.g. ['app.view_thing', 'app.change_thing']).",
+            )
+            return
+        tier_count = len(tier_perms)
+        self._ok(
+            f"FRISIAN_MCP_OAUTH_TIER_PERMISSIONS set for {tier_count} tier(s)"
+            " — has_perm grants the listed perms per tier"
+        )
+
+    def _check_oauth_auto_approve_consent_records(self, warnings: list[str]) -> None:
+        """Warn when AUTO_APPROVE is True but no OAuthAuthorizeConsent rows exist yet."""
+        oauth_installed = "frisian_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
+        if not oauth_installed:
+            return
+        auto_approve: bool = bool(getattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE", False))
+        if not auto_approve:
+            return
+        try:
+            from frisian_mcp.contrib.oauth.models import (  # pylint: disable=import-outside-toplevel
+                OAuthAuthorizeConsent,
+            )
+
+            count = OAuthAuthorizeConsent.objects.count()
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Model unavailable or DB not reachable — silent skip; the
+            # INSTALLED_APPS / migration checks elsewhere surface that.
+            return
+        if count == 0:
+            self._warn_msg(
+                warnings,
+                "FRISIAN_MCP_OAUTH_AUTO_APPROVE=True but no OAuthAuthorizeConsent rows exist —"
+                " every authorize call still renders the consent form. If your deployment is"
+                " not new, this likely signals a configuration drift (consent rows missing or"
+                " filtered out).",
+            )
 
     def _check_oauth_registration_vs_wellknown(self, _warnings: list[str]) -> None:
         """Verify registration_endpoint advertisement matches actual registration state."""

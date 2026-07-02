@@ -38,21 +38,40 @@ import hmac as _hmac
 import json
 import logging
 import secrets
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlencode, urlparse
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
 from django.http import HttpRequest, HttpResponseRedirect, JsonResponse
-from django.shortcuts import render
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
+from ._consent_gate import (
+    has_prior_consent,
+    log_auto_approved_on_prior_consent,
+    log_consent_denied,
+    log_consent_required,
+    record_consent,
+    render_consent_form,
+)
+from ._pkce_default_permission import _pkce_default_permission
+from ._redirect_uri_allowlist import (
+    OAUTH_PKCE_AUTO_REGISTER_ALLOWLIST_EMPTY,
+    OAUTH_PKCE_AUTO_REGISTER_HOST_REJECTED,
+    redirect_uri_matches_auto_register_allowlist,
+)
 from .models import OAuthAccessToken, OAuthClient, _hmac_secret
 
 _AUTH_CODE_CACHE_PREFIX = "frisian_mcp:oauth_code:"
+# T11: cache.add() on this separate key family is the atomic single-use gate.
+_AUTH_CODE_CONSUMED_PREFIX = "frisian_mcp:oauth_code_consumed:"
 _AUTH_CODE_TTL = 300  # 5 minutes
+
+#: Canonical log-event name emitted when a concurrent or replayed
+#: token-exchange loses the atomic-consume race for an authorization code.
+OAUTH_AUTHORIZATION_CODE_REPLAY_DETECTED: str = "oauth_authorization_code_replay_detected"
 
 _TOKEN_RL_PREFIX = "frisian_mcp:oauth_token_rl:"  # noqa: S105  # cache key prefix, not a password
 _RATE_LIMIT_PERIODS: dict[str, int] = {
@@ -172,28 +191,27 @@ def _str_field(data: dict[str, Any], key: str) -> str:
     return str(val) if val else ""
 
 
-def _pkce_permission_for_uri(redirect_uri: str) -> str:
-    """
-    Return the OAuth permission tier for a PKCE client by its redirect_uri.
+#: Canonical log-event name emitted when the authorize-code exchange ignores
+#: the request-supplied redirect_uri as a tier signal (T7).  Public symbol.
+OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL: str = (
+    "oauth_pkce_redirect_uri_ignored_as_tier_signal"
+)
 
-    Checks ``FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP`` (a ``dict[str, str]``
-    mapping redirect_uri prefix → tier) and returns the first matching tier.
-    Falls back to ``FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION`` (default
-    ``"read"``) when no prefix matches.
+#: Process-local throttle: emit the "redirect_uri ignored as tier signal" INFO
+#: log at most once per (client_id, redirect_uri) pair per process lifetime.
+_PKCE_TIER_SIGNAL_LOG_SEEN: set[tuple[str, str]] = set()
 
-    Example::
 
-        FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP = {
-            "https://public-client.example.com/": "read",
-            "https://internal.corp.example.com/": "read_write",
-            "com.example.admin:/": "admin",
-        }
-    """
-    tier_map: dict[str, str] = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP", {})
-    for prefix, tier in tier_map.items():
-        if redirect_uri.startswith(prefix):
-            return tier
-    return getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION", "read")
+def _log_redirect_uri_ignored_as_tier_signal(client_id: str, redirect_uri: str) -> None:
+    """Emit the redirect_uri-ignored INFO log once per pair per process (T7)."""
+    key = (client_id, redirect_uri)
+    if key in _PKCE_TIER_SIGNAL_LOG_SEEN:
+        return
+    _PKCE_TIER_SIGNAL_LOG_SEEN.add(key)
+    logger.info(
+        OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL,
+        extra={"client_id": client_id, "redirect_uri": redirect_uri},
+    )
 
 
 _SCOPE_TO_TIER: dict[str, str] = {
@@ -431,39 +449,31 @@ class TokenView(View):
                 status=400,
             )
 
-        # One-time use: delete the code
+        # T11: atomic single-use.  cache.add() returns False if the key
+        # already exists; only the first concurrent caller wins.  Backend-
+        # agnostic per Django's BaseCache contract.  Closes RFC 6749 §4.1.2.
+        if not django_cache.add(f"{_AUTH_CODE_CONSUMED_PREFIX}{code}", True, _AUTH_CODE_TTL):
+            logger.warning(
+                OAUTH_AUTHORIZATION_CODE_REPLAY_DETECTED,
+                extra={"client_id": client_id, "redirect_uri": redirect_uri},
+            )
+            return JsonResponse(
+                {
+                    "error": "invalid_grant",
+                    "error_description": "Authorization code has already been used.",
+                },
+                status=400,
+            )
         django_cache.delete(f"{_AUTH_CODE_CACHE_PREFIX}{code}")
 
         pkce_auto: bool = getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER", False)
-        # Resolve the permission tier for this redirect_uri.  When
-        # FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP is configured, different
-        # clients (keyed by their redirect_uri prefix) can receive different
-        # default tiers so that public-facing clients (e.g. Claude.ai) and
-        # internal privileged clients are not forced to share the same grant.
-        effective_permission: str = _pkce_permission_for_uri(redirect_uri)
         try:
             client = OAuthClient.objects.get(client_id=client_id, is_active=True)
-            # When the resolved permission for this redirect_uri has been raised
-            # (e.g. the tier map now grants "read_write" where "read" was issued
-            # previously), promote the existing PKCE client so reconnections pick
-            # up the new grant without requiring a DB reset.
-            if pkce_auto and client.permission != effective_permission:
-                _tier_rank = ["read", "read_write", "admin"]
-                existing_rank = (
-                    _tier_rank.index(client.permission) if client.permission in _tier_rank else 0
-                )
-                effective_rank = (
-                    _tier_rank.index(effective_permission)
-                    if effective_permission in _tier_rank
-                    else 0
-                )
-                if effective_rank > existing_rank:
-                    client.permission = effective_permission
-                    client.save(update_fields=["permission"])
-                    logger.info(
-                        "oauth_pkce_client_permission_promoted",
-                        extra={"client_id": client_id, "new_permission": effective_permission},
-                    )
+            # T7: request-supplied redirect_uri is never a tier signal.  The
+            # stored client.permission is operator authority; ignoring the
+            # redirect_uri here closes H-oauth-pkce-tier-auto-promote.  Log
+            # once per (client_id, redirect_uri) for audit observability.
+            _log_redirect_uri_ignored_as_tier_signal(client_id, redirect_uri)
         except OAuthClient.DoesNotExist:
             # PKCE clients (e.g. Claude.ai, Cursor) generate their own client_id and
             # never pre-register.  When FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER is True the
@@ -485,7 +495,7 @@ class TokenView(View):
             client = OAuthClient.objects.create(
                 client_id=client_id,
                 name=f"pkce-{client_id[:24]}",
-                permission=effective_permission,
+                permission=_pkce_default_permission(),
                 redirect_uris=[redirect_uri],
                 grant_types=["authorization_code"],
             )
@@ -607,16 +617,13 @@ class RegistrationView(View):
                     status=400,
                 )
 
-        # Resolve tier by the first registered redirect_uri so DCR clients also
-        # benefit from FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP.  Falls back to
-        # FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION when no URIs are supplied or
-        # none match the map.
-        first_uri = raw_uris[0] if raw_uris else ""
-        reg_permission: str = _pkce_permission_for_uri(first_uri)
+        # T7: tier is operator authority, never derived from the request.  All
+        # newly-registered DCR clients land at the operator default; promote
+        # individual clients to a higher tier via the admin UI when warranted.
         client = OAuthClient.objects.create(
             name=client_name.strip(),
             redirect_uris=list(raw_uris),
-            permission=reg_permission,
+            permission=_pkce_default_permission(),
         )
 
         logger.info(
@@ -868,15 +875,38 @@ class _OAuthRedirect(HttpResponseRedirect):
 
 
 def _auto_approve_default() -> bool:
-    """
-    Return the default for ``FRISIAN_MCP_OAUTH_AUTO_APPROVE``.
+    """Return the default for ``FRISIAN_MCP_OAUTH_AUTO_APPROVE``: always ``False``.
 
-    Defaults to ``True`` only when ``settings.DEBUG`` is also ``True``.
-    Production deployments (DEBUG=False) MUST explicitly opt in to
-    auto-approval via the setting — silently issuing codes without consent
-    is unsafe in any non-developer context.
+    Auto-approval is opt-in regardless of ``settings.DEBUG``.  T9 reframed
+    ``AUTO_APPROVE`` from "skip consent" to "remember consent": even when the
+    operator opts in, the first-time consent gate still renders the form for
+    a new ``(user, client_id, redirect_uri, scope)`` tuple.  Subsequent
+    requests for the same tuple by the same user can fast-path via a stored
+    ``OAuthAuthorizeConsent`` row.
+
+    Closes M-oauth-auto-approve-debug-default: DEBUG no longer leaks the
+    code-issuance fast-path into staging or test-public hosts.
     """
-    return bool(getattr(settings, "DEBUG", False))
+    return False
+
+
+class _AuthorizeValidation(NamedTuple):
+    """Result of :meth:`AuthorizeView._validate_authorize_params`.
+
+    ``error`` is an OAuth error code string, or ``""`` when the parameters
+    are valid.  ``just_auto_registered`` is ``True`` iff the request entered
+    the AUTO_REGISTER + host-allowlist branch for an unknown ``client_id``
+    and an ``OAuthClient`` row would be created on the matching token
+    exchange.  Every error return and every known-client valid return sets
+    ``just_auto_registered`` to ``False``.
+
+    Tuple-unpack compatible: existing callers that wrote
+    ``error = self._validate_authorize_params(...)`` and indexed ``[0]``
+    continue to work; new T9 logic unpacks both fields.
+    """
+
+    error: str
+    just_auto_registered: bool
 
 
 class AuthorizeView(View):
@@ -958,7 +988,7 @@ class AuthorizeView(View):
         code_challenge_method = request.GET.get("code_challenge_method", "")
         state = request.GET.get("state", "")
 
-        error = self._validate_authorize_params(
+        error, just_auto_registered = self._validate_authorize_params(
             response_type, client_id, redirect_uri, code_challenge, code_challenge_method
         )
         if error:
@@ -971,20 +1001,31 @@ class AuthorizeView(View):
                 return self._error_redirect(redirect_uri, error, state)
             return JsonResponse({"error": error}, status=400)
 
-        if getattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE", _auto_approve_default()):
-            return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state)
-
-        # Render consent page
-        return render(
-            request,
-            "frisian_mcp/oauth/authorize.html",
-            {
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "code_challenge": code_challenge,
-                "state": state,
-            },
+        # T9 consent gate.  AUTO_APPROVE no longer means "skip consent" — it
+        # means "remember consent for this (user, client_id, redirect_uri,
+        # scope) tuple after the first time the user approves it."  The
+        # gate is mandatory in two cases:
+        #   1. ``just_auto_registered`` — an unknown client_id just passed
+        #      the AUTO_REGISTER + host-allowlist branch.  First-touch
+        #      consent for a brand-new client must always render the form.
+        #   2. No prior ``OAuthAuthorizeConsent`` row matches the tuple for
+        #      ``request.user``.  Even AUTO_APPROVE=True cannot fast-path
+        #      when no prior approval exists.
+        # Anonymous (non-authenticated) requests cannot store consent rows;
+        # operators wrap the URL with ``login_required`` (see view docstring)
+        # or pre-populate consent via admin for ambient M2M flows.
+        auto_approve = bool(
+            getattr(settings, "FRISIAN_MCP_OAUTH_AUTO_APPROVE", _auto_approve_default())
         )
+        if just_auto_registered:
+            log_consent_required(client_id, redirect_uri, reason="just_auto_registered")
+            return render_consent_form(request, client_id, redirect_uri, code_challenge, state)
+        if auto_approve and has_prior_consent(request, client_id, redirect_uri):
+            log_auto_approved_on_prior_consent(request, client_id, redirect_uri)
+            return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state)
+        if auto_approve:
+            log_consent_required(client_id, redirect_uri, reason="no_prior_consent")
+        return render_consent_form(request, client_id, redirect_uri, code_challenge, state)
 
     def post(self, request: HttpRequest) -> Any:
         """Handle the consent form submission (auto_approve=False path)."""
@@ -996,7 +1037,7 @@ class AuthorizeView(View):
 
         # Re-validate on POST: a malicious form submitter cannot bypass the
         # GET-side allowlist by hand-crafting the consent POST.
-        error = self._validate_authorize_params(
+        error, _just_auto_registered = self._validate_authorize_params(
             "code", client_id, redirect_uri, code_challenge, "S256"
         )
         if error:
@@ -1005,7 +1046,23 @@ class AuthorizeView(View):
             return JsonResponse({"error": error}, status=400)
 
         if not allow:
+            log_consent_denied(client_id, redirect_uri)
             return self._error_redirect(redirect_uri, "access_denied", state)
+
+        # T9: persist consent so the next request for the same tuple from
+        # this user can fast-path under AUTO_APPROVE=True.  Anonymous
+        # requests are no-op'd inside ``record_consent``.  Re-query the
+        # client (T7 immutability guarantees ``client.permission`` is
+        # operator-set) so the scope value reflects the stored tier, not a
+        # request input.
+        try:
+            client = OAuthClient.objects.get(client_id=client_id, is_active=True)
+            scope = client.permission
+        except OAuthClient.DoesNotExist:
+            # AUTO_REGISTER will create the client on token exchange;
+            # fall back to the operator default for the consent scope.
+            scope = _pkce_default_permission()
+        record_consent(request, client_id, redirect_uri, scope)
 
         return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state)
 
@@ -1020,9 +1077,15 @@ class AuthorizeView(View):
         redirect_uri: str,
         code_challenge: str,
         code_challenge_method: str,
-    ) -> str:
-        """
-        Return an error string or empty string if params are valid.
+    ) -> _AuthorizeValidation:
+        """Return ``(error, just_auto_registered)`` for the authorize params.
+
+        ``error`` is the OAuth error code string (``""`` if valid).
+        ``just_auto_registered`` is ``True`` only when validation passed an
+        AUTO_REGISTER + host-allowlist branch for an unknown ``client_id``;
+        every error return and every known-client valid return sets it to
+        ``False``.  T9's consent gate uses the flag to refuse the
+        auto-approve fast-path for first-touch clients.
 
         Validation order matters: cheap shape checks first, then the
         scheme/loopback check, then the per-client allowlist.  We DO NOT
@@ -1031,20 +1094,20 @@ class AuthorizeView(View):
         redirect and return JSON 400 instead.
         """
         if response_type != "code":
-            return "unsupported_response_type"
+            return _AuthorizeValidation("unsupported_response_type", False)
         if not client_id:
-            return "invalid_request"
+            return _AuthorizeValidation("invalid_request", False)
         if not redirect_uri:
-            return "invalid_request"
+            return _AuthorizeValidation("invalid_request", False)
         if not code_challenge:
-            return "invalid_request"
+            return _AuthorizeValidation("invalid_request", False)
         if code_challenge_method != "S256":
-            return "invalid_request"
+            return _AuthorizeValidation("invalid_request", False)
         # SEC-2: scheme/loopback gate runs BEFORE the client lookup so a
         # javascript: or http://evil.example URI is rejected even when the
         # client_id is bogus and PKCE auto-register would otherwise accept it.
         if not _redirect_uri_is_safe(redirect_uri):
-            return "invalid_redirect_uri"
+            return _AuthorizeValidation("invalid_redirect_uri", False)
         # SEC-2: client allowlist.  An OAuthClient row is the registration
         # source of truth; an empty redirect_uris list means "this client may
         # not use the authorize endpoint".  PKCE clients without a DB row are
@@ -1054,13 +1117,39 @@ class AuthorizeView(View):
         # exchange) so that unauthenticated callers cannot flood the cache
         # with codes for arbitrarily-long synthetic client_ids.
         if len(client_id) > 255:
-            return "invalid_request"
+            return _AuthorizeValidation("invalid_request", False)
         try:
             client = OAuthClient.objects.get(client_id=client_id, is_active=True)
         except OAuthClient.DoesNotExist:
-            if getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER", False):
-                return ""
-            return "invalid_client"
+            # SEC: unknown client.  Auto-register accepts the request only
+            # when (a) FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER is True AND
+            # (b) the inbound redirect_uri matches a host on the explicit
+            # allowlist.  An empty allowlist fails closed — operators must
+            # opt in to a trusted set; silent open-door behavior is not
+            # acceptable.  All rejection branches return ``invalid_client``
+            # (not ``invalid_redirect_uri``) so the response does not leak
+            # which of the unknown-client checks rejected the request.
+            if not getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER", False):
+                return _AuthorizeValidation("invalid_client", False)
+            allowlist: list[str] = list(
+                getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST", []) or []
+            )
+            if not allowlist:
+                logger.warning(
+                    OAUTH_PKCE_AUTO_REGISTER_ALLOWLIST_EMPTY,
+                    extra={"client_id": client_id},
+                )
+                return _AuthorizeValidation("invalid_client", False)
+            if not redirect_uri_matches_auto_register_allowlist(redirect_uri, allowlist):
+                logger.warning(
+                    OAUTH_PKCE_AUTO_REGISTER_HOST_REJECTED,
+                    extra={"client_id": client_id},
+                )
+                return _AuthorizeValidation("invalid_client", False)
+            # T9: the only return that sets just_auto_registered=True.  The
+            # caller MUST render the consent form for this request; auto-approve
+            # cannot skip first-time consent for an unknown client.
+            return _AuthorizeValidation("", True)
         registered: list[str] = list(client.redirect_uris or [])
         if redirect_uri not in registered:
             # Do NOT silently add the caller-supplied URI to the client's
@@ -1069,8 +1158,8 @@ class AuthorizeView(View):
             # added; it must be updated via Django admin or re-registered.
             # Auto-healing lets any caller inject an arbitrary redirect target
             # into an existing client's allowlist.
-            return "invalid_redirect_uri"
-        return ""
+            return _AuthorizeValidation("invalid_redirect_uri", False)
+        return _AuthorizeValidation("", False)
 
     def _issue_code_redirect(
         self,

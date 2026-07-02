@@ -232,7 +232,44 @@ The defaults are oriented toward production safety rather than walk-up convenien
 - **Authenticator chain ordering is no longer load-bearing** for correctness — both `FrisianMcpTokenAuthentication` and `OAuthTokenAuthentication` return `None` on lookup-miss so either order works. Tokens-first is the recommended convention for the WWW-Authenticate challenge shape (see [docs/Getting Started/getting-started.md](docs/Getting%20Started/getting-started.md#using-tokens-and-oauth-together)).
 - **SSE keepalive structure is documented**, with a one-time runtime warning when the package detects it is running under a synchronous WSGI worker (which cannot scale SSE without starving the worker pool). The recommended deployment is an ASGI worker class (`uvicorn.workers.UvicornWorker` or `uvicorn` directly).
 
-See [docs/Security/security.md](docs/Security/security.md) for the full threat model and recommended deployment patterns, and [docs/Reference/installation-configuration-reference.md](docs/Reference/installation-configuration-reference.md) for the complete settings reference.
+### Authorize-path hardening
+
+The unknown-client variant of the OAuth authorize endpoint (`AUTO_REGISTER`) is, by design, a walk-up surface — an unauthenticated browser hits `/oauth/authorize` and the server lazily registers the client on first sight. Three coordinated changes ensure request inputs on that path describe *what the caller wants* but never *what the caller is permitted to do*. The full design rationale lives in [ADR-009](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md); the operator-facing summary is below.
+
+- **`FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST`** gates the unknown-client branch. With `AUTO_REGISTER=True` and an empty allowlist (the default), no unknown client can register on any host — the configuration is fail-closed and behaves exactly as `AUTO_REGISTER=False`. To allow walk-up registration, declare the trusted host set explicitly:
+
+  ```python
+  FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+  FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = [
+      "claude.ai",              # exact host
+      "*.anthropic.com",        # leading-*. wildcard, label-boundary anchored
+      "com.example.app",        # reverse-DNS native-app scheme (RFC 8252)
+  ]
+  ```
+
+  The `*.` wildcard matches a non-empty left-hand label sequence ending in the suffix (`api.anthropic.com`, `x.y.anthropic.com`) but never the bare apex (`anthropic.com`) and never a suffix-substring attacker host (`anthropic.com.evil.example`). Patterns and hosts are IDNA-normalized before comparison, so a Cyrillic look-alike host cannot bypass an entry spelled in ASCII. A request whose redirect URI fails the check is rejected with `error=invalid_client` (not `invalid_redirect_uri`) so the response shape does not advertise which check rejected it. Loopback redirect URIs (`127.0.0.1`, `::1`, `localhost`) still require an explicit allowlist entry under `AUTO_REGISTER` — there is no implicit loopback bypass on this path.
+
+- **`FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP` is removed.** The setting (and its helper `_pkce_permission_for_uri`) accepted a `redirect_uri → tier` mapping and applied it to the stored `OAuthClient.permission` at first contact under `AUTO_REGISTER`. The `redirect_uri` is no longer a tier signal on any path. Operators who depended on per-redirect tier inference must now set `OAuthClient.permission` explicitly in the Django admin after auto-registration. The token endpoint emits `oauth_pkce_redirect_uri_ignored_as_tier_signal` (INFO) at code redemption when a code-exchange would have, under the old behavior, promoted the client's tier.
+
+- **Token authority is fixed at issuance.** `OAuthAccessToken.permission` is snapshotted when the token is issued and is the ceiling for that token's lifetime. The authenticator returns `min(token.permission, client.permission)` — so an operator admin-console *downgrade* of the issuing client narrows every outstanding token live, but an admin-console *upgrade* does NOT widen previously-issued tokens. To grant a wider tier to an existing client, the operator must reissue the token after the upgrade.
+
+- **`FRISIAN_MCP_OAUTH_AUTO_APPROVE` is reframed as "remember consent."** The setting no longer means "skip the consent form" — it now means "remember consent for repeat grants of the same `(user, client_id, redirect_uri, scope)` tuple." When `AUTO_APPROVE=True`, the first authorize for any new tuple still renders the consent form; subsequent authorizes for the *same* tuple fast-path on the stored consent. When `AUTO_APPROVE=False` (the default), the consent form renders on every authorize regardless of whether a prior consent record exists for the tuple. The DEBUG-derived default (`bool(DEBUG)`) is removed; the default is now `False` unconditionally. A new `OAuthAuthorizeConsent` model records each granted consent and is admin-browsable with a `revoke_selected_consents` bulk action. Operators with machine-to-machine flows that cannot render a consent form must set `AUTO_APPROVE=True` AND pre-populate `OAuthAuthorizeConsent` records via the admin to preserve silent code issuance.
+
+- **`FRISIAN_MCP_OAUTH_TIER_PERMISSIONS` controls `OAuthServicePrincipal.has_perm`.** Previously, `has_perm` returned `True` for any permission string at `read_write` / `admin` tiers. It now default-denies. Operators declare the per-tier allowlist explicitly:
+
+  ```python
+  FRISIAN_MCP_OAUTH_TIER_PERMISSIONS = {
+      "read":       ["dcim.view_device"],
+      "read_write": ["dcim.change_device"],
+      "admin":      ["dcim.delete_device"],
+  }
+  ```
+
+  Inheritance is monotonic up the ladder — `admin` accumulates its own list plus `read_write` plus `read`. Empty mapping or unknown perm string returns `False`. This affects only host code that calls `request.user.has_perm(...)` *outside* the MCP layer; the MCP-internal tier filter (`FRISIAN_MCP_MAX_TIER`, the dispatcher per-action gate, `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`) is unchanged.
+
+- **PKCE authorization-code single-use is atomic.** The previous `cache.get` → checks → `cache.delete` sequence had a race window under concurrent exchanges of the same code. The token endpoint now gates code consumption on `cache.add()` against a separate consume-marker key family (`frisian_mcp:oauth_code_consumed:`). Concurrent or replayed exchanges of the same code return `invalid_grant` and log `oauth_authorization_code_replay_detected` at `WARNING`. The primitive is backend-agnostic across Django's `BaseCache` contract (LocMem, Redis, Memcached, DatabaseCache). Operators on `DummyCache` should switch to a real cache backend for any deployment that ships OAuth — `DummyCache` makes the gate silently inert. No new setting is required.
+
+See [docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md) for the full design rationale across all six changes, [docs/Security/security.md](docs/Security/security.md) for the threat model and recommended deployment patterns, and [docs/Reference/installation-configuration-reference.md](docs/Reference/installation-configuration-reference.md) for the complete settings reference.
 
 ---
 

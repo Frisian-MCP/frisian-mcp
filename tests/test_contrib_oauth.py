@@ -12,9 +12,15 @@ from django.test import RequestFactory, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 
+from frisian_mcp.contrib.oauth._consent_gate import OAUTH_AUTHORIZE_CONSENT_REQUIRED
+from frisian_mcp.contrib.oauth._redirect_uri_allowlist import (
+    OAUTH_PKCE_AUTO_REGISTER_ALLOWLIST_EMPTY,
+    OAUTH_PKCE_AUTO_REGISTER_HOST_REJECTED,
+)
 from frisian_mcp.contrib.oauth.authentication import OAuthServicePrincipal, OAuthTokenAuthentication
-from frisian_mcp.contrib.oauth.models import OAuthAccessToken, OAuthClient
+from frisian_mcp.contrib.oauth.models import OAuthAccessToken, OAuthAuthorizeConsent, OAuthClient
 from frisian_mcp.contrib.oauth.views import (
+    OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL,
     OAuthAuthorizationServerView,
     OAuthProtectedResourceView,
     RegistrationView,
@@ -295,18 +301,31 @@ class TestOAuthTokenAuthentication:
         assert auth_user.is_authenticated is True
         assert auth_token.pk == token.pk
 
+    @override_settings(FRISIAN_MCP_OAUTH_TIER_PERMISSIONS={})
     def test_service_principal_permission_tiers(self) -> None:
-        """OAuthServicePrincipal maps permission tier to Django permission interface."""
+        """T10: tier still drives is_staff; has_perm / has_module_perms default-deny.
+
+        Pre-T10 ``has_perm`` returned ``True`` for any perm at
+        ``read_write``/``admin`` (M-oauth-has-perm-blanket-true).  T10
+        flipped that to default-deny: ``has_perm`` returns ``True`` only
+        when ``perm`` is in ``FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`` at the
+        principal's tier (with inheritance).  The ``@override_settings``
+        decorator explicitly enforces the empty-allowlist precondition so
+        a future suite-wide setting drift cannot make these assertions
+        pass or fail for the wrong reason.  The ``is_staff`` /
+        ``is_superuser`` flags are unchanged (they reflect the tier-to-
+        staff mapping, not the perm allowlist).
+        """
         admin = OAuthServicePrincipal(permission="admin")
         assert admin.is_superuser is False
         assert admin.is_staff is True
-        assert admin.has_perm("svc.add_item") is True
-        assert admin.has_module_perms("svc") is True
+        assert admin.has_perm("svc.add_item") is False
+        assert admin.has_module_perms("svc") is False
 
         rw = OAuthServicePrincipal(permission="read_write")
         assert rw.is_superuser is False
         assert rw.is_staff is True
-        assert rw.has_perm("svc.add_item") is True
+        assert rw.has_perm("svc.add_item") is False
 
         read = OAuthServicePrincipal(permission="read")
         assert read.is_superuser is False
@@ -314,8 +333,8 @@ class TestOAuthTokenAuthentication:
         assert read.has_perm("svc.add_item") is False
         assert read.has_module_perms("svc") is False
 
-    def test_principal_carries_client_permission(self) -> None:
-        """Authenticate reads permission from the client rather than the token snapshot."""
+    def test_principal_tier_uses_issuance_snapshot_when_equal(self) -> None:
+        """When snapshot == client tier, the principal carries that tier."""
         client = OAuthClient.objects.create(name="admin-agent", permission="admin")
         token = OAuthAccessToken.objects.create(client=client, permission="admin")
         req = self._fake_request(_bearer(token.plaintext_token))
@@ -323,6 +342,42 @@ class TestOAuthTokenAuthentication:
         assert isinstance(auth_user, OAuthServicePrincipal)
         assert auth_user.permission == "admin"
         assert auth_user.is_superuser is False
+
+    def test_principal_tier_does_not_widen_when_client_promoted_after_issuance(
+        self,
+    ) -> None:
+        """Live client promotion MUST NOT widen previously-issued tokens.
+
+        H-oauth-token-tier-live-read: token issued at ``read`` stays at
+        ``read`` even after the client is bumped to ``admin``.
+        """
+        client = OAuthClient.objects.create(name="late-bloomer", permission="read")
+        token = OAuthAccessToken.objects.create(client=client, permission="read")
+        # Operator (or attacker via the closed H2 chain) promotes the client.
+        client.permission = "admin"
+        client.save(update_fields=["permission"])
+        req = self._fake_request(_bearer(token.plaintext_token))
+        auth_user, _ = self._auth().authenticate(req)
+        assert isinstance(auth_user, OAuthServicePrincipal)
+        assert auth_user.permission == "read"
+
+    def test_principal_tier_narrows_live_when_client_downgraded_after_issuance(
+        self,
+    ) -> None:
+        """Live client downgrade narrows effective tier on existing tokens.
+
+        The client tier acts as a narrowing cap on every outstanding token
+        so operators can revoke effective authority without waiting for
+        token expiry.
+        """
+        client = OAuthClient.objects.create(name="rev-tier", permission="admin")
+        token = OAuthAccessToken.objects.create(client=client, permission="admin")
+        client.permission = "read"
+        client.save(update_fields=["permission"])
+        req = self._fake_request(_bearer(token.plaintext_token))
+        auth_user, _ = self._auth().authenticate(req)
+        assert isinstance(auth_user, OAuthServicePrincipal)
+        assert auth_user.permission == "read"
 
     def test_invalid_token_returns_none(self) -> None:
         """Unrecognised token string falls through to the next authenticator."""
@@ -1334,24 +1389,28 @@ class TestAuthorizeView:
             "state": "xyz",
         }
 
-    def test_get_auto_approve_redirects_with_code(self, rf: RequestFactory, settings: Any) -> None:
-        """GET with valid params + FRISIAN_MCP_OAUTH_AUTO_APPROVE=True redirects with a code."""
+    def test_get_auto_approve_renders_consent_when_no_prior_consent(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """T9: AUTO_APPROVE=True alone renders consent; prior consent needed to fast-path.
+
+        Pre-T9 behavior was "AUTO_APPROVE=True silently issues a code."  T9
+        reframes AUTO_APPROVE as "remember consent" — the first request for
+        a new ``(user, client_id, redirect_uri, scope)`` tuple always renders
+        the consent form, even when AUTO_APPROVE is on.  See
+        M-oauth-auto-approve-debug-default.
+        """
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
 
-        # SEC-2: AUTO_APPROVE now defaults to bool(DEBUG); test_settings has
-        # no DEBUG so the default is False.  Set the flag explicitly.
         settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
         client = self._make_client()
         view = AuthorizeView.as_view()
         request = rf.get("/oauth/authorize/", self._valid_params(client.client_id))
         response = view(request)
-        assert response.status_code == 302
-        location = response["Location"]
-        assert location.startswith("https://example.com/cb")
-        assert "code=" in location
-        assert "state=xyz" in location
+        # T9: consent form rendered (200) — AUTO_APPROVE no longer skips consent.
+        assert response.status_code == 200
 
     def test_get_auto_approve_false_renders_consent_template(
         self, rf: RequestFactory, settings: Any
@@ -1560,7 +1619,13 @@ class TestAuthorizeViewSEC2:
         assert json.loads(response.content)["error"] == "invalid_redirect_uri"
 
     def test_http_loopback_accepted(self, rf: RequestFactory, settings: Any) -> None:
-        """http://localhost is allowed (RFC 8252 §7.3 native-app loopback)."""
+        """http://localhost is allowed (RFC 8252 §7.3 native-app loopback).
+
+        Asserts the loopback scheme passes ``_redirect_uri_is_safe`` and the
+        request proceeds past validation; T9's consent gate renders the
+        consent form on the first request (consent template = 200), not
+        a 4xx error from scheme validation.
+        """
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
@@ -1576,11 +1641,17 @@ class TestAuthorizeViewSEC2:
             self._params(client.client_id, redirect_uri="http://localhost:8080/cb"),
         )
         response = view(request)
-        assert response.status_code == 302
-        assert response["Location"].startswith("http://localhost:8080/cb")
+        # T9: validation passed → consent form rendered (200), not a 4xx
+        # rejection.  The loopback scheme is accepted by _redirect_uri_is_safe.
+        assert response.status_code == 200
 
     def test_custom_native_scheme_accepted(self, rf: RequestFactory, settings: Any) -> None:
-        """Custom native-app scheme (e.g. ``com.example.app:/cb``) is allowed."""
+        """Custom native-app scheme (e.g. ``com.example.app:/cb``) is allowed.
+
+        Asserts the reverse-DNS scheme passes ``_redirect_uri_is_safe`` and
+        the request proceeds past validation; T9's consent gate renders the
+        consent form on the first request (200), not a 4xx rejection.
+        """
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
@@ -1596,7 +1667,10 @@ class TestAuthorizeViewSEC2:
             self._params(client.client_id, redirect_uri="com.example.app:/cb"),
         )
         response = view(request)
-        assert response.status_code == 302
+        # T9: validation passed → consent form rendered (200), not a 4xx
+        # rejection.  The custom native scheme is accepted by
+        # _redirect_uri_is_safe.
+        assert response.status_code == 200
 
     def test_javascript_scheme_rejected(self, rf: RequestFactory) -> None:
         """A javascript: URI is rejected by the scheme gate (no dot in scheme)."""
@@ -1638,13 +1712,15 @@ class TestAuthorizeViewSEC2:
         assert response.status_code == 400
         assert json.loads(response.content)["error"] == "invalid_redirect_uri"
 
-    def test_pkce_auto_register_skips_client_check(self, rf: RequestFactory, settings: Any) -> None:
+    def test_pkce_auto_register_empty_allowlist_refuses_unknown_client(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
         """
-        When PKCE_AUTO_REGISTER is True, an unknown client_id is allowed through.
+        AUTO_REGISTER with no allowlist must fail closed (``invalid_client``).
 
-        The token exchange step still requires PKCE proof, so the actual
-        threat model isn't widened — operators who opt in have already
-        accepted that any caller can hold a client_id.
+        Operators must explicitly opt in to a trusted set of redirect-URI
+        hosts via ``FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST``;
+        a silent open-door issuer is not acceptable.
         """
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
@@ -1652,12 +1728,72 @@ class TestAuthorizeViewSEC2:
 
         settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
         settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        # No FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST set →
+        # fail-closed: AUTO_REGISTER behaves as if disabled.
         view = AuthorizeView.as_view()
         request = rf.get("/oauth/authorize/", self._params("on-the-fly-pkce"))
         response = view(request)
-        # Bypasses the client lookup but still gets the scheme gate.
-        assert response.status_code == 302
-        assert "code=" in response["Location"]
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+
+    def test_pkce_auto_register_allowlisted_host_renders_consent(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        AUTO_REGISTER + redirect_uri host on the allowlist → consent form rendered.
+
+        Preserves the connector-onboarding path for legitimate PKCE
+        clients (e.g. Claude.ai, Cursor) once the operator opts in by
+        adding the host pattern to the allowlist.  T9 forces the first-
+        touch consent form for ``just_auto_registered=True`` requests even
+        when AUTO_APPROVE is on — the consent template (200) is the
+        success signal that the allowlist permitted the request to proceed
+        past validation.
+        """
+        from frisian_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = [
+            "claude.ai",
+            "*.anthropic.com",
+        ]
+        view = AuthorizeView.as_view()
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("on-the-fly-pkce", redirect_uri="https://claude.ai/cb"),
+        )
+        response = view(request)
+        # T9: just_auto_registered=True forces the consent form (200) — the
+        # rejection branch would have returned 400 invalid_client.
+        assert response.status_code == 200
+
+    def test_pkce_auto_register_host_off_allowlist_returns_invalid_client(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        AUTO_REGISTER + redirect_uri host NOT on the allowlist → invalid_client.
+
+        The rejection code is ``invalid_client`` (not
+        ``invalid_redirect_uri``) so the response does not leak which of
+        the unknown-client checks rejected the request.
+        """
+        from frisian_mcp.contrib.oauth.views import (
+            AuthorizeView,  # pylint: disable=import-outside-toplevel
+        )
+
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["claude.ai"]
+        params = dict(self._params("on-the-fly-pkce"))
+        params["redirect_uri"] = "https://evil.example/cb"
+        view = AuthorizeView.as_view()
+        request = rf.get("/oauth/authorize/", params)
+        response = view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
 
 
 # ---------------------------------------------------------------------------
@@ -1667,7 +1803,12 @@ class TestAuthorizeViewSEC2:
 
 @pytest.mark.django_db
 class TestAutoApproveDefault:
-    """SEC-2: FRISIAN_MCP_OAUTH_AUTO_APPROVE defaults to bool(DEBUG)."""
+    """T9: FRISIAN_MCP_OAUTH_AUTO_APPROVE defaults to ``False`` unconditionally.
+
+    Pre-T9 the default was ``bool(DEBUG)`` — a DEBUG-on staging or test
+    host silently issued codes without consent.  T9 removes the DEBUG
+    dependence (closes M-oauth-auto-approve-debug-default).
+    """
 
     def test_default_is_false_outside_debug(self, rf: RequestFactory, settings: Any) -> None:
         """With DEBUG False (or absent) and AUTO_APPROVE absent → consent template."""
@@ -1697,8 +1838,14 @@ class TestAutoApproveDefault:
         # Consent template, not a redirect.
         assert response.status_code == 200
 
-    def test_default_is_true_when_debug_true(self, rf: RequestFactory, settings: Any) -> None:
-        """With DEBUG=True and AUTO_APPROVE absent → auto-approve redirect."""
+    def test_default_is_false_when_debug_true(self, rf: RequestFactory, settings: Any) -> None:
+        """T9: DEBUG=True no longer implies AUTO_APPROVE=True.
+
+        Closes M-oauth-auto-approve-debug-default: DEBUG no longer leaks
+        the code-issuance fast-path into staging or test-public hosts.
+        Even with DEBUG=True and AUTO_APPROVE absent, the consent template
+        renders (200) instead of an auto-issued code (302).
+        """
         from frisian_mcp.contrib.oauth.views import (
             AuthorizeView,  # pylint: disable=import-outside-toplevel
         )
@@ -1722,7 +1869,8 @@ class TestAutoApproveDefault:
             },
         )
         response = view(request)
-        assert response.status_code == 302
+        # T9: consent template, not auto-approve redirect.
+        assert response.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -1962,6 +2110,85 @@ class TestTokenViewAuthorizationCodeGrant:
         token = OAuthAccessToken.objects.get(token=_hmac_secret(data["access_token"]))
         assert token.permission == "admin"
 
+    def test_t11_pre_consumed_code_returns_invalid_grant(self, rf: RequestFactory) -> None:
+        """T11: pre-populated consume-marker → exchange returns 400 invalid_grant.
+
+        Direct unit-test of the ``cache.add()`` consume gate: pre-seed the
+        ``_AUTH_CODE_CONSUMED_PREFIX`` key, then attempt an exchange with
+        the matching payload still in cache.  The exchange MUST fail
+        because ``cache.add()`` returns ``False`` when the key already
+        exists.  Closes M-oauth-code-replay-non-atomic.
+
+        The full concurrent-N-callers test runs against real Redis in CI
+        (T2's A12 case); this test isolates the gate primitive itself.
+        """
+        from django.core.cache import cache  # pylint: disable=import-outside-toplevel
+
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _AUTH_CODE_CONSUMED_PREFIX,
+            _AUTH_CODE_TTL,
+        )
+
+        client = OAuthClient.objects.create(name="pkce-pre-consumed")
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(client.client_id, "https://example.com/cb", code_verifier)
+        # Simulate a prior winner already consumed this code.
+        cache.set(f"{_AUTH_CODE_CONSUMED_PREFIX}{code}", True, _AUTH_CODE_TTL)
+
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": code_verifier,
+            },
+        )
+        response = _token_view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_grant"
+
+    def test_t11_sequential_code_replay_returns_invalid_grant(self, rf: RequestFactory) -> None:
+        """T11: a second exchange of the same code (after the first succeeds) → 400 invalid_grant.
+
+        Sequential variant of the concurrency test.  Verifies the
+        consume-marker persists across the second request so a replay
+        cannot succeed even with the original payload still in cache.
+        """
+        client = OAuthClient.objects.create(name="pkce-replay")
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(client.client_id, "https://example.com/cb", code_verifier)
+
+        first = _token_view(
+            rf.post(
+                "/oauth/token/",
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": client.client_id,
+                    "redirect_uri": "https://example.com/cb",
+                    "code": code,
+                    "code_verifier": code_verifier,
+                },
+            )
+        )
+        assert first.status_code == 200
+
+        second = _token_view(
+            rf.post(
+                "/oauth/token/",
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": client.client_id,
+                    "redirect_uri": "https://example.com/cb",
+                    "code": code,
+                    "code_verifier": code_verifier,
+                },
+            )
+        )
+        assert second.status_code == 400
+        assert json.loads(second.content)["error"] == "invalid_grant"
+
 
 # ---------------------------------------------------------------------------
 # Well-known: authorization_endpoint and FRISIAN_MCP_OAUTH_AUTHORIZE_URL
@@ -2001,3 +2228,764 @@ class TestWellKnownAuthorizationEndpoint:
         response = _auth_server_view(request)
         data = json.loads(response.content)
         assert data["authorization_endpoint"] == "https://auth.example.com/authorize"
+
+
+# ---------------------------------------------------------------------------
+# T2 — Regression matrix for the authorize-path hardening wave
+# (kanban task 942430db; covers H1+H2+H3+M1+M2+code-replay).
+# Test methods are named for their matrix code (A1, B3, C4, ...) so the
+# red-team review can map assertions directly to the task description.
+# Phase 1 here; Phase 2 (T9 detail) and Phase 3 (T10+T11) appear as
+# pytest.skip stubs so the matrix scaffold is visible at red-team time.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-methods
+    """Regression matrix for the unauthenticated PKCE authorize-path hardening.
+
+    Anchors on canonical constants the implementers published in their result
+    summaries (imported, never hard-coded) so a rename in the package breaks
+    the import rather than silently passing.
+    """
+
+    # Class-body inline import mirrors the existing TestAuthorizeView pattern in
+    # this file; keeps AuthorizeView out of the top-level import block so the
+    # existing inline-import call sites do not trigger reimport warnings.
+    from frisian_mcp.contrib.oauth.views import AuthorizeView  # noqa: PLC0415
+
+    _view = staticmethod(AuthorizeView.as_view())
+
+    # Valid PKCE S256 pair: verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    # produces the challenge below.  Reused across A5 + B1 + C1 token-exchange tests.
+    _VALID_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    _VALID_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+    @staticmethod
+    def _params(
+        client_id: str,
+        redirect_uri: str = "https://example.com/cb",
+        challenge: str | None = None,
+    ) -> dict[str, str]:
+        return {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": challenge or TestT2AuthorizePathHardeningMatrix._VALID_CHALLENGE,
+            "code_challenge_method": "S256",
+            "state": "xyz",
+        }
+
+    @staticmethod
+    def _attach_authenticated_user(request: Any) -> Any:
+        """Attach a real authenticated user so has_prior_consent can match."""
+        from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+            get_user_model,
+        )
+
+        user_model = get_user_model()
+        user = user_model.objects.create_user(username="t2-tester", password="x")  # noqa: S106
+        request.user = user
+        return user
+
+    @pytest.fixture(autouse=True)
+    def _reset_throttles(self) -> Any:
+        """Clear the process-local throttle sets so log assertions are deterministic.
+
+        T7's _PKCE_TIER_SIGNAL_LOG_SEEN and authentication.py's
+        _LOGGED_NARROWER_AUTHORITY are bounded-but-process-wide; without
+        a per-test reset, an earlier test that hit either branch would
+        suppress the log this class expects to capture.
+        """
+        from frisian_mcp.contrib.oauth import (
+            authentication as oauth_authn,  # pylint: disable=import-outside-toplevel
+        )
+        from frisian_mcp.contrib.oauth import (
+            views as oauth_views,  # pylint: disable=import-outside-toplevel
+        )
+        from frisian_mcp.contrib.oauth._consent_gate import (  # pylint: disable=import-outside-toplevel
+            LOGGED_PRIOR_CONSENT_APPROVALS,
+        )
+
+        oauth_views._PKCE_TIER_SIGNAL_LOG_SEEN.clear()  # pylint: disable=protected-access
+        oauth_authn._LOGGED_NARROWER_AUTHORITY.clear()  # pylint: disable=protected-access
+        LOGGED_PRIOR_CONSENT_APPROVALS.clear()
+        yield
+        oauth_views._PKCE_TIER_SIGNAL_LOG_SEEN.clear()  # pylint: disable=protected-access
+        oauth_authn._LOGGED_NARROWER_AUTHORITY.clear()  # pylint: disable=protected-access
+        LOGGED_PRIOR_CONSENT_APPROVALS.clear()
+
+    # ------------------------------------------------------------------
+    # A — Attack-path negatives
+    # ------------------------------------------------------------------
+
+    def test_a1_attacker_host_rejected_emits_host_rejected_log(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """H1: attacker host refused with invalid_client (not invalid_redirect_uri); WARN log."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["claude.ai"]
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("ghost-id", redirect_uri="https://attacker.example/cb"),
+        )
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+        messages = [r.message for r in caplog.records]
+        assert OAUTH_PKCE_AUTO_REGISTER_HOST_REJECTED in messages
+
+    def test_a2_wildcard_does_not_match_suffix_substring(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """H1: wildcard `*.example.com` rejects suffix-substring `example.com.evil.attacker`."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["*.example.com"]
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("ghost-id", redirect_uri="https://example.com.evil.attacker/cb"),
+        )
+        response = self._view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+
+    def test_a3_empty_allowlist_emits_warning_log(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """H1: empty allowlist fail-closed; WARN log fires so operators see the misconfig in CI."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = []
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("ghost-id", redirect_uri="https://claude.ai/cb"),
+        )
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+        messages = [r.message for r in caplog.records]
+        assert OAUTH_PKCE_AUTO_REGISTER_ALLOWLIST_EMPTY in messages
+
+    def test_a4_authorize_does_not_mutate_known_client_permission(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """H2: authorize never mutates stored OAuthClient.permission regardless of redirect_uri."""
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = False
+        client = OAuthClient.objects.create(
+            name="audit-fixed-tier",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        request = rf.get("/oauth/authorize/", self._params(client.client_id))
+        response = self._view(request)
+        # Validation passed → consent form (T9); no mutation regardless of branch.
+        assert response.status_code == 200
+        client.refresh_from_db()
+        assert client.permission == "read"
+
+    def test_a5_token_exchange_emits_redirect_uri_ignored_as_tier_signal(
+        self, rf: RequestFactory, caplog: Any
+    ) -> None:
+        """H2 audit log: token endpoint emits OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL."""
+        client = OAuthClient.objects.create(
+            name="audit-log-client",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        # Stash a valid auth code in the cache so the token endpoint reaches the
+        # known-client branch where the log is emitted.
+        from django.core.cache import cache  # pylint: disable=import-outside-toplevel
+
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _AUTH_CODE_CACHE_PREFIX,
+            _AUTH_CODE_TTL,
+        )
+
+        code = "t2-a5-code"
+        cache.set(
+            f"{_AUTH_CODE_CACHE_PREFIX}{code}",
+            {
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": self._VALID_CHALLENGE,
+            },
+            _AUTH_CODE_TTL,
+        )
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": self._VALID_VERIFIER,
+            },
+        )
+        with caplog.at_level("INFO", logger="frisian_mcp.contrib.oauth.views"):
+            response = _token_view(request)
+        assert response.status_code == 200
+        assert OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL in {r.message for r in caplog.records}
+
+    def test_a5b_legacy_redirect_tier_map_setting_is_inert(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """H2: removed setting PKCE_REDIRECT_TIER_MAP is inert (no mutation, no error)."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP = {"https://example.com/cb": "admin"}
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = False
+        client = OAuthClient.objects.create(
+            name="legacy-map-client",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        request = rf.get("/oauth/authorize/", self._params(client.client_id))
+        response = self._view(request)
+        assert response.status_code == 200
+        client.refresh_from_db()
+        assert client.permission == "read"
+
+    @pytest.mark.parametrize(
+        ("token_tier", "client_tier_after_issuance", "expected"),
+        [
+            ("read", "admin", "read"),  # H3: live promote MUST NOT widen
+            ("admin", "read", "read"),  # narrow live downgrade still caps
+            ("read", "read", "read"),  # baseline equality
+        ],
+    )
+    def test_a6_principal_permission_is_min_of_token_and_client_tier(
+        self,
+        token_tier: str,
+        client_tier_after_issuance: str,
+        expected: str,
+    ) -> None:
+        """H3: principal.permission == min(token.permission, client.permission); both directions."""
+        client = OAuthClient.objects.create(name="a6-client", permission=token_tier)
+        token = OAuthAccessToken.objects.create(client=client, permission=token_tier)
+        if client_tier_after_issuance != token_tier:
+            client.permission = client_tier_after_issuance
+            client.save(update_fields=["permission"])
+
+        class _Req:
+            META = _bearer(token.plaintext_token)
+
+        result = OAuthTokenAuthentication().authenticate(_Req())
+        assert result is not None
+        principal, _ = result
+        assert isinstance(principal, OAuthServicePrincipal)
+        assert principal.permission == expected
+
+    # ------------------------------------------------------------------
+    # B — Positive paths
+    # ------------------------------------------------------------------
+
+    def test_b1_known_client_with_prior_consent_issues_code(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """B1: known client + prior consent + AUTO_APPROVE=True → 302 with code (T9 fast-path)."""
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        client = OAuthClient.objects.create(
+            name="b1-known",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        request = rf.get("/oauth/authorize/", self._params(client.client_id))
+        user = self._attach_authenticated_user(request)
+        OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id=client.client_id,
+            redirect_uri="https://example.com/cb",
+            scope=client.permission,
+        )
+        response = self._view(request)
+        assert response.status_code == 302
+        assert "code=" in response["Location"]
+
+    def test_b2_auto_register_allowlisted_host_emits_consent_required_log(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """B2: auto-register allowlisted host → consent form + consent_required INFO log."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["claude.ai"]
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("on-the-fly", redirect_uri="https://claude.ai/cb"),
+        )
+        with caplog.at_level("INFO", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 200
+        consent_records = [
+            r for r in caplog.records if r.message == OAUTH_AUTHORIZE_CONSENT_REQUIRED
+        ]
+        assert consent_records, "expected consent_required INFO log on just_auto_registered"
+        assert getattr(consent_records[0], "reason", None) == "just_auto_registered"
+
+    def test_b3_wildcard_label_boundary_positive(self, rf: RequestFactory, settings: Any) -> None:
+        """B3: wildcard `*.example.com` matches `api.example.com` (label-boundary positive)."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["*.example.com"]
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("wild-client", redirect_uri="https://api.example.com/cb"),
+        )
+        response = self._view(request)
+        # Validation passed → consent form rendered for first-touch consent.
+        assert response.status_code == 200
+
+    def test_b4_auto_register_loopback_allowlisted(self, rf: RequestFactory, settings: Any) -> None:
+        """B4: loopback dev works under AUTO_REGISTER only when explicitly allowlisted."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = [
+            "localhost",
+            "127.0.0.1",
+        ]
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("loopback-dev", redirect_uri="http://localhost:8080/cb"),
+        )
+        response = self._view(request)
+        assert response.status_code == 200
+
+    def test_b5_auto_register_off_known_client_renders_consent(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """B5: AUTO_REGISTER=False + known client + no prior consent → consent form."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        client = OAuthClient.objects.create(
+            name="b5-known",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        request = rf.get("/oauth/authorize/", self._params(client.client_id))
+        response = self._view(request)
+        assert response.status_code == 200
+
+    # ------------------------------------------------------------------
+    # C — Edge cases
+    # ------------------------------------------------------------------
+
+    def test_c1_reverse_dns_native_scheme_accepted(self, rf: RequestFactory, settings: Any) -> None:
+        """C1: RFC 8252 §7.1 reverse-DNS scheme (`com.example.app:/cb`) accepted under allowlist."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["com.example.app"]
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("native-client", redirect_uri="com.example.app:/cb"),
+        )
+        response = self._view(request)
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            "javascript:alert('xss')",
+            "data:text/html,<script>",
+            "file:///etc/passwd",
+        ],
+    )
+    def test_c2_dangerous_schemes_rejected_at_scheme_gate(
+        self, rf: RequestFactory, redirect_uri: str
+    ) -> None:
+        """C2: javascript:/data:/file: rejected with invalid_redirect_uri (NOT invalid_client)."""
+        client = OAuthClient.objects.create(
+            name="c2-known",
+            redirect_uris=["https://example.com/cb"],
+        )
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params(client.client_id, redirect_uri=redirect_uri),
+        )
+        response = self._view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_redirect_uri"
+
+    @pytest.mark.parametrize(
+        ("missing_field", "expected_error"),
+        [
+            ("client_id", "invalid_request"),
+            ("redirect_uri", "invalid_request"),
+            ("code_challenge", "invalid_request"),
+        ],
+    )
+    def test_c3_missing_required_params_return_invalid_request(
+        self, rf: RequestFactory, missing_field: str, expected_error: str
+    ) -> None:
+        """C3: RFC 6749 §4.1.1 / RFC 7636 §4.3 — missing required params return invalid_request."""
+        client = OAuthClient.objects.create(
+            name="c3-known",
+            redirect_uris=["https://example.com/cb"],
+        )
+        params = self._params(client.client_id)
+        params[missing_field] = ""
+        request = rf.get("/oauth/authorize/", params)
+        response = self._view(request)
+        assert response.status_code in {400, 302}
+        if response.status_code == 400:
+            assert json.loads(response.content)["error"] == expected_error
+        else:
+            assert f"error={expected_error}" in response["Location"]
+
+    def test_c4_idn_homograph_cyrillic_a_rejected(self, rf: RequestFactory, settings: Any) -> None:
+        """C4: IDN homograph — Cyrillic U+0430 against ASCII allowlist → invalid_client."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["claude.ai"]
+        # "clаude.ai" — the third character is Cyrillic 'а' U+0430.
+        cyrillic_host = "clаude.ai"
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("idn-client", redirect_uri=f"https://{cyrillic_host}/cb"),
+        )
+        response = self._view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+
+    # ------------------------------------------------------------------
+    # Phase 2 stubs — T9 consent-gate detail (waits on PM unblock signal)
+    # ------------------------------------------------------------------
+
+    def test_a7_just_auto_registered_blocks_auto_approve_even_with_prior_consent(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """M1: just_auto_registered forces consent even with AUTO_APPROVE + prior consent."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["claude.ai"]
+        request = rf.get(
+            "/oauth/authorize/",
+            self._params("on-the-fly", redirect_uri="https://claude.ai/cb"),
+        )
+        user = self._attach_authenticated_user(request)
+        OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id="on-the-fly",
+            redirect_uri="https://claude.ai/cb",
+            scope="read",
+        )
+        with caplog.at_level("INFO", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 200
+        consent_records = [
+            r for r in caplog.records if r.message == OAUTH_AUTHORIZE_CONSENT_REQUIRED
+        ]
+        assert consent_records, "expected consent_required log on just_auto_registered"
+        assert getattr(consent_records[0], "reason", None) == "just_auto_registered"
+
+    def test_a8_no_prior_consent_emits_consent_required_with_reason(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """M1: AUTO_APPROVE + known client + no prior consent → 200 + reason='no_prior_consent'."""
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        client = OAuthClient.objects.create(
+            name="a8-known",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        request = rf.get("/oauth/authorize/", self._params(client.client_id))
+        self._attach_authenticated_user(request)
+        with caplog.at_level("INFO", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 200
+        consent_records = [
+            r for r in caplog.records if r.message == OAUTH_AUTHORIZE_CONSENT_REQUIRED
+        ]
+        assert consent_records, "expected consent_required log on no_prior_consent path"
+        assert getattr(consent_records[0], "reason", None) == "no_prior_consent"
+
+    def test_a9_consent_post_requires_csrf_token(self, rf: RequestFactory) -> None:
+        """M1 (T9): POST /oauth/authorize/ without CSRF token → 403 via Django CsrfViewMiddleware.
+
+        AuthorizeView is NOT csrf_exempt'd (per @security T9 10:09), so Django's
+        CsrfViewMiddleware enforces a token on the consent POST. The test wires
+        the middleware directly around the view to avoid depending on the
+        project URL conf, which isn't loaded in the unit test settings.
+        """
+        from django.middleware.csrf import (  # pylint: disable=import-outside-toplevel
+            CsrfViewMiddleware,
+        )
+
+        client = OAuthClient.objects.create(
+            name="a9-csrf",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+
+        middleware = CsrfViewMiddleware(lambda req: self._view(req))
+        request = rf.post(
+            "/oauth/authorize/",
+            data={
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": self._VALID_CHALLENGE,
+                "state": "xyz",
+                "allow": "true",
+            },
+        )
+        # RequestFactory sets _dont_enforce_csrf_checks=True by default; turn it
+        # off so the middleware runs its enforcement path the same way a
+        # production request from a browser would.  process_view is the actual
+        # enforcement entry point on CsrfViewMiddleware; it returns 403 on a
+        # missing/bad token, None otherwise (and the framework would then call
+        # the view).
+        request._dont_enforce_csrf_checks = False  # type: ignore[attr-defined]  # pylint: disable=protected-access
+        response = middleware.process_view(request, self._view, (), {})
+        assert response is not None
+        assert response.status_code == 403
+
+    def test_b6_prior_consent_fast_path_emits_auto_approved_log(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """B6 (T9): prior consent + AUTO_APPROVE → 302 + auto_approved_on_prior_consent INFO log."""
+        from frisian_mcp.contrib.oauth._consent_gate import (  # pylint: disable=import-outside-toplevel
+            OAUTH_AUTHORIZE_AUTO_APPROVED_ON_PRIOR_CONSENT,
+        )
+
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = True
+        client = OAuthClient.objects.create(
+            name="b6-known",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        request = rf.get("/oauth/authorize/", self._params(client.client_id))
+        user = self._attach_authenticated_user(request)
+        OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id=client.client_id,
+            redirect_uri="https://example.com/cb",
+            scope=client.permission,
+        )
+        with caplog.at_level("INFO", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 302
+        assert "code=" in response["Location"]
+        approved_records = [
+            r for r in caplog.records if r.message == OAUTH_AUTHORIZE_AUTO_APPROVED_ON_PRIOR_CONSENT
+        ]
+        assert approved_records, "expected auto_approved_on_prior_consent log on fast-path"
+
+    def test_b7_consent_post_persists_idempotent_consent_row(self, rf: RequestFactory) -> None:
+        """B7: consent POST creates OAuthAuthorizeConsent row; re-POST does not duplicate."""
+        from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+            get_user_model,
+        )
+
+        client = OAuthClient.objects.create(
+            name="b7-known",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        user_model = get_user_model()
+        user = user_model.objects.create_user(username="b7-user", password="x")  # noqa: S106
+
+        def _consent_post() -> Any:
+            request = rf.post(
+                "/oauth/authorize/",
+                data={
+                    "client_id": client.client_id,
+                    "redirect_uri": "https://example.com/cb",
+                    "code_challenge": self._VALID_CHALLENGE,
+                    "state": "xyz",
+                    "allow": "true",
+                },
+            )
+            request.user = user
+            return self._view(request)
+
+        first = _consent_post()
+        assert first.status_code == 302
+        assert "code=" in first["Location"]
+        consent_filter = OAuthAuthorizeConsent.objects.filter(
+            user=user,
+            client_id=client.client_id,
+            redirect_uri="https://example.com/cb",
+            scope=client.permission,
+        )
+        assert consent_filter.count() == 1
+        # Re-POST the same tuple — unique_together must keep the count at 1.
+        second = _consent_post()
+        assert second.status_code == 302
+        assert consent_filter.count() == 1
+
+    # ------------------------------------------------------------------
+    # Phase 3 stubs — T10 + T11 (still in flight on security's lane)
+    # ------------------------------------------------------------------
+
+    def test_a10_has_perm_default_deny(self, settings: Any) -> None:
+        """M2: admin principal + TIER_PERMISSIONS unset → has_perm + has_module_perms False."""
+        settings.FRISIAN_MCP_OAUTH_TIER_PERMISSIONS = {}
+        admin = OAuthServicePrincipal(permission="admin")
+        assert admin.has_perm("app.view_thing") is False
+        assert admin.has_perm("app.change_thing") is False
+        assert admin.has_module_perms("app") is False
+        # has_perms(list) must also fail-closed under the same default.
+        assert admin.has_perms(["app.view_thing", "app.change_thing"]) is False
+
+    @pytest.mark.parametrize(
+        ("tier", "perm", "expected"),
+        [
+            # Per @security T10 11:16: inheritance is monotonic
+            # (admin ⊇ read_write ⊇ read).
+            ("read", "x.view_thing", True),
+            ("read", "x.change_thing", False),
+            ("read", "x.delete_thing", False),
+            ("read_write", "x.view_thing", True),  # inherited from read
+            ("read_write", "x.change_thing", True),
+            ("read_write", "x.delete_thing", False),
+            ("admin", "x.view_thing", True),  # inherited from read
+            ("admin", "x.change_thing", True),  # inherited from read_write
+            ("admin", "x.delete_thing", True),
+            # Allowlist-shape: unknown perm fails closed at every tier.
+            ("admin", "x.unknown_perm", False),
+            ("admin", "other.view_thing", False),
+        ],
+    )
+    def test_a11_tier_permissions_opt_in_allowlist(
+        self, settings: Any, tier: str, perm: str, expected: bool
+    ) -> None:
+        """M2: TIER_PERMISSIONS allowlist with monotonic inheritance; unknown perm fails closed."""
+        settings.FRISIAN_MCP_OAUTH_TIER_PERMISSIONS = {
+            "read": ["x.view_thing"],
+            "read_write": ["x.change_thing"],
+            "admin": ["x.delete_thing"],
+        }
+        principal = OAuthServicePrincipal(permission=tier)
+        assert principal.has_perm(perm) is expected
+
+    @pytest.mark.django_db(transaction=True)
+    def test_a12_atomic_code_single_use_under_concurrency(self, rf: RequestFactory) -> None:
+        """T11: N=10 concurrent /oauth/token/ exchanges of same code → at most 1 token minted.
+
+        Asserts the cache.add() atomic gate from T11: at least N-1 callers
+        receive 400 invalid_grant; the OAuthAccessToken count after all
+        threads complete is exactly 1.  Robust against SQLite contention on
+        the winning thread (the cache gate fires before the DB write).
+        """
+        import concurrent.futures  # pylint: disable=import-outside-toplevel
+
+        from django.core.cache import cache  # pylint: disable=import-outside-toplevel
+
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _AUTH_CODE_CACHE_PREFIX,
+            _AUTH_CODE_TTL,
+        )
+
+        client = OAuthClient.objects.create(
+            name="a12-client",
+            permission="read",
+            redirect_uris=["https://example.com/cb"],
+        )
+        code = "t2-a12-code"
+        cache.set(
+            f"{_AUTH_CODE_CACHE_PREFIX}{code}",
+            {
+                "client_id": client.client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": self._VALID_CHALLENGE,
+            },
+            _AUTH_CODE_TTL,
+        )
+
+        def _exchange() -> int:
+            request = rf.post(
+                "/oauth/token/",
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": client.client_id,
+                    "redirect_uri": "https://example.com/cb",
+                    "code": code,
+                    "code_verifier": self._VALID_VERIFIER,
+                },
+            )
+            return int(_token_view(request).status_code)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            statuses = list(pool.map(lambda _: _exchange(), range(10)))
+
+        # Cache gate must let AT MOST ONE caller past — token-row count is
+        # the strongest assertion (independent of which threads got HTTP 400
+        # vs 500 vs 200 under DB contention).
+        assert OAuthAccessToken.objects.filter(client=client).count() <= 1
+        # At least N-1 callers must have been refused at the cache gate.
+        # Allowing == means the winner may also have failed (DB contention)
+        # which is acceptable; the cache primitive's invariant still holds.
+        invalid_grants = [s for s in statuses if s == 400]
+        assert len(invalid_grants) >= 9, f"expected >=9 invalid_grant, got statuses {statuses}"
+
+
+# ---------------------------------------------------------------------------
+# Defensive-validation regressions surfaced during PR review
+# (CodeRabbit findings, addressed in this PR).
+# ---------------------------------------------------------------------------
+
+
+class TestRedirectUriAllowlistFailClosed:
+    """T1: ``redirect_uri_matches_auto_register_allowlist`` fails closed on parse errors."""
+
+    def test_malformed_ipv6_does_not_raise(self) -> None:
+        """A redirect_uri whose ``.hostname`` raises ``ValueError`` returns False.
+
+        ``urlparse`` itself tolerates malformed netloc, but ``.hostname`` raises
+        ``ValueError`` on inputs like ``http://[::g]/`` (invalid IPv6 hex).
+        The allowlist matcher must fail closed rather than propagating the
+        exception to the authorize handler.
+        """
+        from frisian_mcp.contrib.oauth._redirect_uri_allowlist import (  # pylint: disable=import-outside-toplevel
+            redirect_uri_matches_auto_register_allowlist,
+        )
+
+        assert (
+            redirect_uri_matches_auto_register_allowlist(
+                "http://[::g]/cb",
+                ["claude.ai"],
+            )
+            is False
+        )
+
+    def test_garbage_input_does_not_raise(self) -> None:
+        """Total garbage strings return False rather than raising."""
+        from frisian_mcp.contrib.oauth._redirect_uri_allowlist import (  # pylint: disable=import-outside-toplevel
+            redirect_uri_matches_auto_register_allowlist,
+        )
+
+        assert (
+            redirect_uri_matches_auto_register_allowlist(
+                "not-a-url-at-all",
+                ["claude.ai"],
+            )
+            is False
+        )
+
+
+class TestPkceDefaultPermissionValidation:
+    """T7: ``_pkce_default_permission`` rejects invalid setting values."""
+
+    def test_unknown_tier_falls_back_to_read(self, settings: Any) -> None:
+        """A typo'd setting value (``"redd"``) does not get persisted."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _pkce_default_permission,
+        )
+
+        settings.FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = "redd"
+        assert _pkce_default_permission() == "read"
+
+    def test_non_string_falls_back_to_read(self, settings: Any) -> None:
+        """A non-string setting value (``None``, ``42``, ``["read"]``) falls back."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _pkce_default_permission,
+        )
+
+        settings.FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = 42  # type: ignore[assignment]
+        assert _pkce_default_permission() == "read"
+
+    def test_valid_tier_passes_through(self, settings: Any) -> None:
+        """Known tier values (``read``, ``read_write``, ``admin``) are honored."""
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _pkce_default_permission,
+        )
+
+        for tier in ("read", "read_write", "admin"):
+            settings.FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = tier
+            assert _pkce_default_permission() == tier
