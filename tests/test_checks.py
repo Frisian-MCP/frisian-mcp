@@ -200,6 +200,21 @@ class TestApiKeysHashedCheck:
         warnings = check_api_keys_are_hashed()
         assert "mcp_hash_api_key" in warnings[0].hint
 
+    def test_warning_fires_for_invalid_tier_value(self, settings: Any) -> None:
+        """A typo'd API-key tier value triggers W002."""
+        settings.FRISIAN_MCP_API_KEYS = {"a" * 64: "Admin"}
+        warnings = check_api_keys_are_hashed()
+        assert len(warnings) == 1
+        assert warnings[0].id == W002_PLAINTEXT_API_KEYS
+        assert "invalid permission tier" in warnings[0].msg
+
+    def test_warning_hint_lists_valid_tiers_for_invalid_value(self, settings: Any) -> None:
+        """The invalid-tier warning tells operators the allowed values."""
+        settings.FRISIAN_MCP_API_KEYS = {"a" * 64: "write"}
+        warnings = check_api_keys_are_hashed()
+        assert "read_write" in warnings[0].hint
+        assert "case-sensitive" in warnings[0].hint
+
 
 # ---------------------------------------------------------------------------
 # W003 — FRISIAN_MCP_SERVICE_ACCOUNT_USER in production

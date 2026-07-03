@@ -20,6 +20,8 @@ from rest_framework.permissions import BasePermission
 logger = logging.getLogger(__name__)
 
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
+_VALID_PERMISSION_TIERS: frozenset[str] = frozenset(_TIER_RANK)
+
 
 #: Single-key argument dicts whose value is a list are treated as bulk-create
 #: (or bulk-update/destroy) bodies.  When detected in :meth:`ToolRegistry.dispatch`
@@ -33,6 +35,14 @@ _TOKEN_TIER_MAP_ROLE_PROBES: tuple[tuple[str, str], ...] = (
     ("superuser", "is_superuser"),
     ("staff", "is_staff"),
 )
+
+
+def _validate_permission_tier(tier: str, *, field_name: str = "permission_tier") -> str:
+    """Return *tier* when valid, otherwise raise a configuration error."""
+    if tier not in _VALID_PERMISSION_TIERS:
+        valid = ", ".join(sorted(_VALID_PERMISSION_TIERS))
+        raise ValueError(f"Invalid {field_name} {tier!r}; expected one of: {valid}")
+    return tier
 
 
 def _resolve_tier_hook() -> Callable[[Any], str | None] | None:
@@ -364,6 +374,7 @@ class ToolRegistry:
                 accessible to the requesting user.
 
         """
+        permission_tier = _validate_permission_tier(permission_tier)
         with self._lock:
             self._tools[name] = _ToolEntry(
                 name=name,

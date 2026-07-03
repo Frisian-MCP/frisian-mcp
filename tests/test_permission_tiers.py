@@ -144,6 +144,19 @@ class TestMcpToolPermissionTier:
         assert entry is not None
         assert entry.permission_tier == "read"
 
+    def test_register_rejects_invalid_permission_tier(self) -> None:
+        """A typo'd permission_tier must not silently become read-tier."""
+        reg = ToolRegistry()
+        with pytest.raises(ValueError, match="Invalid permission_tier"):
+            reg.register(
+                "typo.tool",
+                lambda _a, _r: {},
+                "Typo tool.",
+                {},
+                permission_tier="write",
+            )
+        assert reg.get_entry("typo.tool") is None
+
 
 # ---------------------------------------------------------------------------
 # tools/list tier filtering — registry level
