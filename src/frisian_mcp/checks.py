@@ -15,11 +15,12 @@ Registered checks
 ``frisian_mcp.W002``
     Warns when any key in ``FRISIAN_MCP_API_KEYS`` does not look like a
     64-character lowercase hex string (the expected HMAC-SHA256 digest
-    format).  Raw plaintext keys in settings are a security risk — if
-    settings are captured by error-tracking or logging, the raw secret is
-    directly usable as a Bearer token.  Use
-    ``python manage.py mcp_hash_api_key <raw-key>`` to generate the correct
-    digest.
+    format), or when any value is not a valid permission tier.  Raw plaintext
+    keys in settings are a security risk — if settings are captured by
+    error-tracking or logging, the raw secret is directly usable as a Bearer
+    token.  Use ``python manage.py mcp_hash_api_key <raw-key>`` to generate
+    the correct digest.  Valid tier values are ``read``, ``read_write``, and
+    ``admin``.
 
 ``frisian_mcp.W003``
     Warns when ``FRISIAN_MCP_SERVICE_ACCOUNT_USER`` is set in a non-DEBUG
@@ -63,7 +64,7 @@ from django.core.checks import (  # pylint: disable=redefined-builtin
     register,
 )
 
-from frisian_mcp.registry import tool_registry
+from frisian_mcp.registry import _VALID_PERMISSION_TIERS, tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -143,13 +144,17 @@ def check_api_keys_are_hashed(  # pylint: disable=unused-argument
     **kwargs: Any,  # noqa: ARG001
 ) -> list[Warning]:
     """
-    Warn when any ``FRISIAN_MCP_API_KEYS`` entry does not look like a hashed key.
+    Warn when any ``FRISIAN_MCP_API_KEYS`` entry is unsafe or invalid.
 
     :class:`~frisian_mcp.contrib.tokens.authentication.FrisianMcpApiKeyAuthentication`
     now hashes the incoming Bearer value before comparison, so keys stored in
     ``FRISIAN_MCP_API_KEYS`` must be 64-character lowercase hex HMAC-SHA256
     digests.  A key that is not 64 lowercase hex characters is almost certainly
     a raw plaintext value left over from a pre-hardening configuration.
+
+    Values must also be valid MCP permission tiers.  Typos such as ``"write"``
+    or ``"Admin"`` otherwise resolve to the lowest tier at runtime, creating
+    confusing and potentially unsafe policy drift.
 
     Generate the correct digest with::
 
@@ -159,26 +164,46 @@ def check_api_keys_are_hashed(  # pylint: disable=unused-argument
     if not api_keys:
         return []
 
-    plain_keys = [k for k in api_keys if not _HEX64_RE.match(k)]
-    if not plain_keys:
-        return []
+    warnings: list[Warning] = []
 
-    count = len(plain_keys)
-    noun = "key does" if count == 1 else "keys do"
-    return [
-        Warning(
-            f"FRISIAN_MCP_API_KEYS contains {count} entr{'y' if count == 1 else 'ies'} "
-            f"that {noun} not look like HMAC-SHA256 digests (64 lowercase hex characters). "
-            "Raw plaintext keys in settings are a security risk — if settings are captured "
-            "by error-tracking or logging, the raw secret is directly usable as a Bearer token.",
-            hint=(
-                "Replace each raw key with its HMAC-SHA256 digest: "
-                "python manage.py mcp_hash_api_key <raw-key>.  "
-                "Update FRISIAN_MCP_API_KEYS to use the printed digest as the dict key."
-            ),
-            id=W002_PLAINTEXT_API_KEYS,
+    plain_keys = [k for k in api_keys if not _HEX64_RE.match(k)]
+    if plain_keys:
+        count = len(plain_keys)
+        noun = "key does" if count == 1 else "keys do"
+        warnings.append(
+            Warning(
+                f"FRISIAN_MCP_API_KEYS contains {count} entr{'y' if count == 1 else 'ies'} "
+                f"that {noun} not look like HMAC-SHA256 digests (64 lowercase hex characters). "
+                "Raw plaintext keys in settings are a security risk — if settings are captured "
+                "by error-tracking or logging, the raw secret is directly usable as a "
+                "Bearer token.",
+                hint=(
+                    "Replace each raw key with its HMAC-SHA256 digest: "
+                    "python manage.py mcp_hash_api_key <raw-key>.  "
+                    "Update FRISIAN_MCP_API_KEYS to use the printed digest as the dict key."
+                ),
+                id=W002_PLAINTEXT_API_KEYS,
+            )
         )
-    ]
+
+    invalid_tiers = sorted(
+        {str(tier) for tier in api_keys.values() if tier not in _VALID_PERMISSION_TIERS}
+    )
+    if invalid_tiers:
+        valid = ", ".join(sorted(_VALID_PERMISSION_TIERS))
+        warnings.append(
+            Warning(
+                "FRISIAN_MCP_API_KEYS contains invalid permission tier value"
+                f"{'s' if len(invalid_tiers) != 1 else ''}: {', '.join(invalid_tiers)}.",
+                hint=(
+                    "Set every FRISIAN_MCP_API_KEYS value to one of: "
+                    f"{valid}. Values are case-sensitive."
+                ),
+                id=W002_PLAINTEXT_API_KEYS,
+            )
+        )
+
+    return warnings
 
 
 @register(Tags.security)
