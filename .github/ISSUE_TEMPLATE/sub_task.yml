@@ -1,0 +1,42 @@
+name: Sub-task (Core Maintainers only)
+description: Break down a planned feature into a sub-task. Restricted to Core Maintainers — external submissions will be closed automatically.
+title: "[Sub-task]: "
+labels: ["sub-task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Core Maintainers only.** Sub-tasks are opened during feature planning (e.g. the 1.1 release). External submissions are closed automatically — please file a **Feature request** instead.
+  - type: input
+    id: parent
+    attributes:
+      label: Parent feature
+      description: The feature issue this sub-task belongs to.
+      placeholder: "#123"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What this sub-task covers, and what it explicitly does not.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checklist of what must be true for this sub-task to be considered done.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Design decisions, dependencies, or references.
+    validations:
+      required: false

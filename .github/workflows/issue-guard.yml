@@ -1,0 +1,50 @@
+name: Issue Guard
+
+on:
+  # `reopened` is intentionally omitted. Issue authors can typically reopen
+  # their own closed issues; including `reopened` would create a spam loop
+  # where a non-maintainer keeps reopening and the workflow keeps re-closing
+  # and re-commenting. A maintainer can manually re-close on the rare reopen.
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  restrict-sub-tasks:
+    name: Restrict sub-tasks to Core Maintainers
+    # Only run when:
+    #   - the issue currently carries the `sub-task` label, AND
+    #   - the issue is not already closed (defensive — labels can be added
+    #     to closed issues, which would otherwise re-trigger this job), AND
+    #   - if this is a `labeled` event, the label that was just added is
+    #     `sub-task` (not some other label added to an existing sub-task).
+    if: >
+      contains(github.event.issue.labels.*.name, 'sub-task') &&
+      github.event.issue.state != 'closed' &&
+      (github.event.action != 'labeled' || github.event.label.name == 'sub-task')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify author is a Core Maintainer
+        env:
+          AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Hardcoded mirror of @Frisian-MCP/core-maintainers team roster.
+          # Keep in sync with .github/workflows/pr-validation.yml.
+          # Update both lists when team membership changes:
+          # https://github.com/orgs/Frisian-MCP/teams/core-maintainers
+          case "$AUTHOR" in
+            Jeremy-Friese|salehkabuawad)
+              echo "✓ $AUTHOR is a Core Maintainer — sub-task allowed."
+              ;;
+            *)
+              echo "::warning::Sub-task creation is restricted to Core Maintainers."
+              gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body \
+                "Thanks for the interest! **Sub-tasks are reserved for Core Maintainers** and are opened during feature planning (e.g. the 1.1 release). If this describes something you'd like to see, please open a **Feature request** instead — the maintainers will break it into sub-tasks during planning. Closing this one to keep the tracker tidy."
+              gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason "not planned"
+              ;;
+          esac
