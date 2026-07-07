@@ -1,0 +1,43 @@
+name: Require Linked Issue
+
+on:
+  pull_request:
+    branches: [main]
+    # `edited` is included so that authors who fix a missing/malformed linked
+    # issue by editing the PR body get the check re-run without pushing a new
+    # commit. Kept in its own workflow so PR-body edits don't re-run the full
+    # lint/typecheck/test/build matrix.
+    types: [opened, edited, reopened, synchronize]
+
+concurrency:
+  group: require-linked-issue-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  require-linked-issue:
+    name: Require linked issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR body for Closes/Fixes/Resolves reference
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$PR_BODY" ]; then
+            echo "::error::PR body is empty. It must reference an issue (e.g. 'Closes #123')."
+            exit 1
+          fi
+          # Match: Closes/Fixes/Resolves #N or org/repo#N (case-insensitive).
+          # `\b` prevents false positives on words that contain but do not
+          # start with the keyword (e.g. "disclosed", "unresolved").
+          # Excludes the placeholder 'Closes #' with no number from the template.
+          if echo "$PR_BODY" | grep -Piq '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s*:?\s*(#|[-\w]+/[-\w]+#)[0-9]+'; then
+            echo "✓ PR references a linked issue."
+          else
+            echo "::error::No linked issue found in PR body."
+            echo "::error::Add a line like 'Closes #123' (or 'Fixes #123' / 'Resolves #123')."
+            exit 1
+          fi
