@@ -45,6 +45,11 @@ Registered checks
     without a ``backend_action`` annotation.  The permission adapter cannot
     derive the required Django permission verb for unannotated custom actions.
 
+Per-route configuration checks (``E004``, ``E005``, ``E1xx``, ``E2xx``,
+``W004``–``W007``) live in :mod:`frisian_mcp.route_audit` and are registered
+from there.  They are config-only: the tool registry is empty while system
+checks run, because auto-discovery is deferred to the first request.
+
 The checks module is imported from :class:`frisian_mcp.apps.FrisianMcpConfig`
 so the ``@register`` decorators fire at app load.  It contributes nothing
 at runtime beyond the registrations themselves.

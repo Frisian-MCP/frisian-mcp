@@ -772,11 +772,17 @@ class FrisianMcpConfig(AppConfig):
         # top) keeps the dependency chain inside ready() — the same point where
         # Django guarantees the app registry is populated.
         # pylint: disable-next=import-outside-toplevel,unused-import
-        from frisian_mcp import checks  # noqa: F401
+        from frisian_mcp import checks, route_audit  # noqa: F401
 
         if not getattr(settings, "FRISIAN_MCP_ENABLED", True):
             logger.debug("frisian_mcp disabled — skipping auto-discovery")
             return
+
+        # PR-9 / watch-item 5: a checks.Error does not stop a WSGI server from
+        # booting and serving traffic.  Only an exception out of ready() does.
+        # Raised after the ENABLED guard so a disabled gateway — which mounts
+        # no routes — never refuses to start over a route it will not serve.
+        route_audit.raise_on_fatal_route_config()
 
         # Auto-install the trailing-slash HTTP middleware before any other
         # discovery work.  This must happen on every ready() invocation where
@@ -960,7 +966,7 @@ class FrisianMcpConfig(AppConfig):
         group_count, bundled_count = _install_dispatch_groups()
         if group_count and startup_print:
             print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
-                f"[frisian-mcp] {group_count} dispatch group(s) bundling " f"{bundled_count} tools",
+                f"[frisian-mcp] {group_count} dispatch group(s) bundling {bundled_count} tools",
                 flush=True,
             )
 
@@ -971,3 +977,24 @@ class FrisianMcpConfig(AppConfig):
                 "(surfaced via action='help')",
                 flush=True,
             )
+
+        # PR-6: materialise the per-route tool views now that the registry is
+        # fully populated (auto-discovered + decorator + group-dispatcher tools).
+        # This is the single rebuild trigger under standard Django — process
+        # start / app reload.  A host with genuine runtime plugin registration
+        # calls route_views.rebuild_all() from its own discovery backend; the
+        # package never polls or watches.  When FRISIAN_MCP_ROUTES is unset this
+        # mounts only the backwards-compatible legacy view.
+        from frisian_mcp.route_views import route_views  # pylint: disable=import-outside-toplevel
+
+        route_views.rebuild_all(tool_registry)
+
+        # PR-9a: the surface-dependent half of the route audit (net-empty
+        # exposure, working carve-outs, per-entry grammar findings).  Runs here,
+        # once, because these triggers need the populated registry that does not
+        # exist at Django-check time — the config-only half already fired from
+        # route_audit.check_route_config at boot.  Guarded by _mcp_discovered
+        # above, so this is a one-shot per process, never a per-request cost.
+        from frisian_mcp import route_audit  # pylint: disable=import-outside-toplevel
+
+        route_audit.audit_route_surface()

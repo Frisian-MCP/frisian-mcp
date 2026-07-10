@@ -409,6 +409,18 @@ class ToolRegistry:
         with self._lock:
             return list(self._tools.keys())
 
+    def entries_snapshot(self) -> dict[str, _ToolEntry]:
+        """
+        Return a name→entry snapshot of the registry taken under the lock.
+
+        The mapping is a fresh dict, but the ``_ToolEntry`` values are the live
+        registry objects — :class:`~frisian_mcp.route_views.RouteView` shares
+        surviving flat entries by reference rather than copying them.  Consumers
+        must treat the entries as read-only.
+        """
+        with self._lock:
+            return dict(self._tools)
+
     def set_hidden(self, name: str, hidden: bool = True) -> bool:
         """
         Toggle the *hidden* flag on a registered tool.
