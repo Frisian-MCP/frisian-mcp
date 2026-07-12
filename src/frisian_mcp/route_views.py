@@ -96,6 +96,7 @@ __all__ = [
     "LEGACY_ROUTE_NAME",
     "RouteView",
     "RouteViewRegistry",
+    "resolve_route_ceiling",
     "route_effective_permission_classes",
     "route_is_anonymous_reachable",
     "route_is_anonymous_sse_reachable",
@@ -115,6 +116,43 @@ LEGACY_ROUTE_NAME: str = "__legacy_default__"
 SECURE_DEFAULT_CEILING: Mapping[str, str] = MappingProxyType(
     {"default": "read", "elevated": "read_write", "admin": "admin"}
 )
+
+
+def _min_tier(*tiers: str | None) -> str | None:
+    """
+    Return the most restrictive of *tiers*; ``None`` values mean "no cap".
+
+    This is the ``min`` in ``min(token_tier, route_ceiling, MAX_TIER)`` (ADR-010
+    §8).  ``min`` is monotone — it can only narrow, never widen.  A tier string
+    absent from ``_TIER_RANK`` ranks as ``read`` (most restrictive), so an
+    unrecognised value fails closed rather than open.
+    """
+    present = [t for t in tiers if t is not None]
+    if not present:
+        return None
+    return min(present, key=lambda t: _TIER_RANK.get(t, 0))
+
+
+def resolve_route_ceiling(route: RouteConfig) -> str | None:
+    """
+    Return *route*'s effective tier ceiling, or ``None`` for genuinely uncapped.
+
+    On a **configured** route, an omitted ``highest_tier`` NEVER means uncapped
+    (PM ruling, ADR-010 §8): it resolves to the route key's secure default from
+    :data:`SECURE_DEFAULT_CEILING`.  Otherwise an open ``default`` route with no
+    ``highest_tier`` would be strictly more dangerous than the audit's own FATAL
+    condition, and silent.  Only the implicit :data:`LEGACY_ROUTE_NAME` view —
+    which exists only when ``FRISIAN_MCP_ROUTES`` is unset — stays uncapped;
+    absence of the *setting* means legacy, absence of the *key* means secure
+    default, and the two absences must not be conflated.
+    """
+    if route.name == LEGACY_ROUTE_NAME:
+        return route.highest_tier
+    if route.highest_tier is not None:
+        return route.highest_tier
+    # Route names are validated against TIER_KEYS at parse time; the "read"
+    # fallback is fail-closed belt-and-braces, not a reachable branch.
+    return SECURE_DEFAULT_CEILING.get(route.name, "read")
 
 
 # ---------------------------------------------------------------------------

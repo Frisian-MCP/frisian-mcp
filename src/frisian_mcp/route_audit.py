@@ -79,6 +79,7 @@ __all__ = [
     "W011_UNPROVABLE_PERMISSION_CLASS",
     "audit_route_configs",
     "audit_route_surface",
+    "force_tool_discovery",
     "raise_on_fatal_route_config",
 ]
 
@@ -762,3 +763,46 @@ def audit_route_surface() -> list[Any]:
             )
 
     return findings
+
+
+def force_tool_discovery() -> bool:
+    """
+    Force the one-shot deferred tool discovery to run now, out of band.
+
+    Django system checks and management commands run with **no HTTP request**, so
+    ``_run_deferred_discovery`` (wired to ``request_started`` per the PKG-21
+    deferral) never fires and the tool registry stays empty.  An explicit,
+    side-effect-accepting caller — ``mcp_doctor`` here, and the ``E003`` surface
+    that CR-21 will add — uses this to populate the registry so a
+    surface-dependent audit has something real to read.
+
+    This is the shared seam for exactly that.  It must **never** be called from a
+    Django check: forcing discovery inside ``manage.py check`` is option (b),
+    rejected on sight, because it re-introduces the very ordering bug PKG-21's
+    deferral exists to prevent (host apps that append to ``INSTALLED_APPS`` after
+    ours would be scanned before their ``ready()`` runs).
+
+    Idempotent: returns ``True`` when this call ran discovery, ``False`` when the
+    registry was already populated in this process (e.g. a prior request).  Note
+    that ``_run_deferred_discovery`` runs :func:`audit_route_surface` itself as
+    its final step, so a caller that also wants the findings can call
+    :func:`audit_route_surface` after this returns; the second pass is pure over
+    the same snapshot.
+
+    Returns:
+        ``True`` if discovery ran on this call, ``False`` if already done.
+
+    """
+    from typing import cast  # pylint: disable=import-outside-toplevel
+
+    from django.apps import apps as django_apps  # pylint: disable=import-outside-toplevel
+
+    from frisian_mcp.apps import (  # pylint: disable=import-outside-toplevel
+        FrisianMcpConfig,
+    )
+
+    app_config = cast(FrisianMcpConfig, django_apps.get_app_config("frisian_mcp"))
+    if app_config._mcp_discovered:  # noqa: SLF001  # pylint: disable=protected-access
+        return False
+    app_config._run_deferred_discovery()  # noqa: SLF001  # pylint: disable=protected-access
+    return True

@@ -136,7 +136,17 @@ def _resolve_request_tier(request: Any) -> str:
     Defined at module level so :class:`ToolRegistry` can enforce tier at
     dispatch time without importing :mod:`frisian_mcp.views` (avoiding a
     circular import).
+
+    ``request._mcp_effective_tier`` short-circuits everything: it is the
+    ``min(token_tier, route_ceiling, FRISIAN_MCP_MAX_TIER)`` result computed
+    once in :meth:`~frisian_mcp.views.McpView.post` (ADR-010 §8).  Every later
+    read in the same request — discovery, dispatch-time enforcement, error
+    messages — returns that one value; nothing recomputes it.
     """
+    stamped: str | None = getattr(request, "_mcp_effective_tier", None)
+    if stamped is not None:
+        return str(stamped)
+
     hook = _resolve_tier_hook()
     if hook is not None:
         try:

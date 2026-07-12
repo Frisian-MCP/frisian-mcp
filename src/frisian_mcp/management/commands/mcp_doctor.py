@@ -29,7 +29,7 @@ class Command(BaseCommand):
     help = "Audit frisian-mcp configuration and report integration issues."
 
     def add_arguments(self, parser: Any) -> None:
-        """Add --security flag for the extended OAuth security audit."""
+        """Add the --security and --strict flags."""
         parser.add_argument(
             "--security",
             action="store_true",
@@ -38,6 +38,19 @@ class Command(BaseCommand):
                 "Run extended OAuth security checks in addition to the standard audit.  "
                 "Surfaces misconfigurations that could allow privilege escalation, "
                 "credential exposure, or unauthenticated access."
+            ),
+        )
+        parser.add_argument(
+            "--strict",
+            action="store_true",
+            default=False,
+            help=(
+                "Escalate LOUD per-route surface findings (e.g. a deny_list that fully "
+                "zeroes its allow_list) to errors, so this command exits non-zero and "
+                "CI can gate on it.  These findings cannot be surfaced by "
+                "'manage.py check' — the tool registry is empty at check time, so "
+                "mcp_doctor forces discovery to evaluate them.  Without --strict they "
+                "are reported as warnings.  SOFT findings stay warnings either way."
             ),
         )
 
@@ -56,6 +69,7 @@ class Command(BaseCommand):
         self._check_oauth_authorize_url(warnings)
         self._check_oauth_tier_permissions(warnings)
         self._check_oauth_pkce_redirect_tier_map(warnings)
+        self._check_route_surface(warnings, errors, strict=bool(options.get("strict")))
 
         if options.get("security"):
             self.stdout.write("")
@@ -90,6 +104,55 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
     # Individual checks
     # ------------------------------------------------------------------
+
+    def _check_route_surface(self, warnings: list[str], errors: list[str], *, strict: bool) -> None:
+        """
+        Surface the per-route findings that ``manage.py check`` structurally cannot.
+
+        The net-empty (W008 LOUD), working-carve-out (W009 SOFT), and
+        entry-matched-nothing (W110–W113) triggers need a populated tool
+        registry, which is empty when Django checks run.  This command is an
+        explicit, side-effect-accepting audit, so it forces discovery and runs
+        the *same* surface-audit pass — imported, never re-implemented — then
+        renders the findings.  With ``--strict`` a LOUD finding becomes an error
+        (non-zero exit) so CI can gate here instead of on ``check``.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from frisian_mcp import route_audit
+
+        routes = getattr(settings, "FRISIAN_MCP_ROUTES", None)
+        if not routes:
+            self._ok(
+                "No FRISIAN_MCP_ROUTES configured — per-route surface audit not applicable "
+                "(legacy single-mount gateway)"
+            )
+            return
+
+        try:
+            route_audit.force_tool_discovery()
+            findings = route_audit.audit_route_surface()
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            # The doctor must finish its other checks even if discovery blows up
+            # on a broken host; surface the failure rather than abort.
+            self._warn_msg(warnings, f"per-route surface audit could not run: {exc}")
+            return
+
+        if not findings:
+            self._ok("Per-route surface audit clean (allow/deny lists resolve as intended)")
+            return
+
+        for finding in findings:
+            detail = finding.message
+            # Config-audit (W008/W009) messages already name the route; grammar
+            # findings (W110–W113) do not — prefix only when it is missing, so
+            # the route is always attributed exactly once.
+            if finding.route_name and f"route {finding.route_name!r}" not in detail:
+                detail = f"route {finding.route_name!r}: {detail}"
+            message = f"[{finding.code}] {detail}"
+            if finding.severity == "LOUD" and strict:
+                self._fail(errors, message)
+            else:
+                self._warn_msg(warnings, message)
 
     def _check_installed_apps(self, errors: list[str]) -> None:
         """Verify frisian_mcp and any installed contrib apps are consistent."""

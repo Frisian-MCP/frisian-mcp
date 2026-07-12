@@ -480,3 +480,118 @@ class TestMcpDoctorAutoApproveConsentRecords:
         """No drift warning when AUTO_APPROVE is False."""
         out, _ = _run(security=True)
         assert "no OAuthAuthorizeConsent rows exist" not in out
+
+
+class TestMcpDoctorRouteSurface:
+    """
+    PR-18: mcp_doctor surfaces the per-route findings ``manage.py check`` cannot.
+
+    These need a populated tool registry (empty at check time), so the command
+    forces discovery and runs the *same* surface-audit pass PR-9a built.  The
+    ``--strict`` flag escalates LOUD findings to errors so CI can gate here.
+    Each test seeds a controlled registry and restores global state, so the
+    forced discovery cannot bleed into other tests.
+    """
+
+    @staticmethod
+    def _seed_and_check(routes: Any, *, strict: bool) -> tuple[list[str], list[str]]:
+        """Seed a neutral group surface, run only the route-surface check, restore state."""
+        from django.apps import apps as django_apps
+
+        from frisian_mcp.backends.group_dispatcher import (
+            build_group_input_schema,
+            make_group_invoke,
+        )
+        from frisian_mcp.registry import tool_registry
+
+        app_config = django_apps.get_app_config("frisian_mcp")
+        saved_tools = dict(tool_registry._tools)  # noqa: SLF001
+        saved_discovered = getattr(app_config, "_mcp_discovered", False)
+        try:
+            tool_registry._tools.clear()  # noqa: SLF001
+            members = ["item_list", "item_create", "order_list"]
+            for name in members:
+                tool_registry.register(
+                    name=name,
+                    fn=lambda _a, _r, _n=name: {"tool": _n},
+                    description=name,
+                    input_schema={"type": "object", "properties": {}},
+                    permission_classes=[],
+                    permission_tier="read_write" if name.endswith("create") else "read",
+                    is_write=name.endswith("create"),
+                )
+            tool_registry.register(
+                name="catalog",
+                fn=make_group_invoke(
+                    "catalog", frozenset(members), tool_registry, frozenset({"item", "order"})
+                ),
+                description="group",
+                input_schema=build_group_input_schema(),
+                permission_classes=[],
+                permission_tier="read",
+                is_dispatcher=True,
+                group_tool_names=frozenset(members),
+            )
+            # Pretend discovery already ran so force_tool_discovery keeps our seed.
+            app_config._mcp_discovered = True  # noqa: SLF001
+
+            warnings: list[str] = []
+            errors: list[str] = []
+            with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=routes):
+                Command(stdout=StringIO())._check_route_surface(warnings, errors, strict=strict)
+            return warnings, errors
+        finally:
+            tool_registry._tools.clear()  # noqa: SLF001
+            tool_registry._tools.update(saved_tools)  # noqa: SLF001
+            app_config._mcp_discovered = saved_discovered  # noqa: SLF001
+
+    def test_not_applicable_when_routes_unset(self) -> None:
+        """A legacy (no FRISIAN_MCP_ROUTES) host reports cleanly, not an error."""
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False):
+            warnings: list[str] = []
+            errors: list[str] = []
+            with override_settings(FRISIAN_MCP_ROUTES=None):
+                Command(stdout=StringIO())._check_route_surface(warnings, errors, strict=True)
+        assert not warnings and not errors
+
+    def test_clean_route_reports_nothing(self) -> None:
+        """A route that exposes tools with no dead entries is clean."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["*"]}}, strict=True
+        )
+        assert not warnings and not errors
+
+    def test_net_empty_is_warning_without_strict(self) -> None:
+        """W008 (deny zeroes allow) is a warning by default — no error, no exit."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["catalog"], "deny_list": ["catalog"]}},
+            strict=False,
+        )
+        assert any("W008" in w for w in warnings)
+        assert not errors
+
+    def test_net_empty_is_error_under_strict(self) -> None:
+        """W008 escalates to an error under --strict, so CI exits non-zero."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["catalog"], "deny_list": ["catalog"]}},
+            strict=True,
+        )
+        assert any("W008" in e for e in errors)
+
+    def test_soft_carve_out_stays_warning_under_strict(self) -> None:
+        """W009 (a working carve-out) is SOFT — --strict must NOT escalate it."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["*"], "deny_list": ["catalog:item"]}},
+            strict=True,
+        )
+        assert any("W009" in w for w in warnings)
+        assert not errors
+
+    def test_route_attributed_exactly_once(self) -> None:
+        """The rendered finding names its route once, never doubled."""
+        warnings, _ = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["catalog"], "deny_list": ["catalog"]}},
+            strict=False,
+        )
+        assert warnings
+        assert warnings[0].count("route 'default'") == 1

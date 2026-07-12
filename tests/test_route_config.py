@@ -183,12 +183,12 @@ class TestRequiredAndTypedFields:
     def test_non_list_allow_list_rejected(self) -> None:
         """A bare-string ``allow_list`` is a type error — the schema requires a list."""
         with pytest.raises(ImproperlyConfigured):
-            parse_route_config("default", {"path": "/mcp", "allow_list": "dns"})
+            parse_route_config("default", {"path": "/mcp", "allow_list": "catalog"})
 
     def test_non_string_allow_list_entry_rejected(self) -> None:
         """A non-string entry inside ``allow_list`` is a type error."""
         with pytest.raises(ImproperlyConfigured):
-            parse_route_config("default", {"path": "/mcp", "allow_list": ["dns", 42]})
+            parse_route_config("default", {"path": "/mcp", "allow_list": ["catalog", 42]})
 
     def test_non_string_highest_tier_rejected(self) -> None:
         """A non-string ``highest_tier`` value is a type error at parse."""
@@ -211,13 +211,13 @@ class TestRawGrammarPassThrough:
 
     def test_allow_list_preserved(self) -> None:
         """``allow_list`` entries land verbatim in the returned tuple."""
-        cfg = parse_route_config("default", {"path": "/mcp", "allow_list": ["*", "dns:arecord"]})
-        assert cfg.allow_list == ("*", "dns:arecord")
+        cfg = parse_route_config("default", {"path": "/mcp", "allow_list": ["*", "catalog:item"]})
+        assert cfg.allow_list == ("*", "catalog:item")
 
     def test_deny_list_preserved(self) -> None:
         """``deny_list`` entries land verbatim in the returned tuple."""
-        cfg = parse_route_config("default", {"path": "/mcp", "deny_list": ["dns", "app:tool"]})
-        assert cfg.deny_list == ("dns", "app:tool")
+        cfg = parse_route_config("default", {"path": "/mcp", "deny_list": ["catalog", "app:tool"]})
+        assert cfg.deny_list == ("catalog", "app:tool")
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ class TestParseRouteConfigs:
                 "highest_tier": "admin",
                 "auto_register": True,
                 "allow_list": ["*"],
-                "deny_list": ["dns"],
+                "deny_list": ["catalog"],
             },
         }
         parsed = parse_route_configs(raw)
@@ -251,7 +251,7 @@ class TestParseRouteConfigs:
         assert parsed["elevated"].auto_discover is True
         assert parsed["admin"].auto_register is True
         assert parsed["admin"].allow_list == ("*",)
-        assert parsed["admin"].deny_list == ("dns",)
+        assert parsed["admin"].deny_list == ("catalog",)
 
     def test_non_dict_top_level_rejected(self) -> None:
         """A non-mapping top-level ``FRISIAN_MCP_ROUTES`` value is a type error."""

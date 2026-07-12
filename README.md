@@ -56,7 +56,7 @@ Measured numbers from real integrations:
 | Scenario | Default MCP shape | frisian-mcp | Reduction |
 |---|---|---|---|
 | `tools/list` for a 50-action Django app | ~15,000–25,000 tokens | 500–2,000 tokens with `FRISIAN_MCP_DISPATCH_GROUPS` | ~95% |
-| `tools/list` for a Nautobot 3.x deployment | 1,737 flat tools | 15 dispatcher tools | tool surface reduced ~99% |
+| `tools/list` for a large infrastructure Django app | 1,737 flat tools | 15 dispatcher tools | tool surface reduced ~99% |
 | 60-device bulk-create response | ~10,798 tokens (full echo) | 24 tokens (lean envelope) | 99.8% |
 | 200-device bulk-create response | ~36,000 tokens | 24 tokens (constant) | 99.9% |
 
@@ -218,7 +218,7 @@ frisian-mcp delegates authentication to DRF — any DRF authentication class wor
 | `frisian_mcp.contrib.oauth` | Full OAuth 2.0 — authorization code (PKCE) + client credentials; redirect URI allowlist |
 | `frisian_mcp.contrib.agents` | Per-credential tool allowlists; connections fail-closed when the credential is deactivated |
 
-Gateway-level access is controlled by `FRISIAN_MCP_PERMISSION_CLASSES`. Tool-level access is controlled by permission tiers (`read` / `write` / `admin`) mapped via `FRISIAN_MCP_TOKEN_TIER_MAP`. Use `FRISIAN_MCP_MAX_TIER` to cap all callers on an endpoint regardless of their credential tier.
+Gateway-level access is controlled by `FRISIAN_MCP_PERMISSION_CLASSES`. Tool-level access is controlled by permission tiers (`read` / `read_write` / `admin`) mapped via `FRISIAN_MCP_TOKEN_TIER_MAP`. Use `FRISIAN_MCP_MAX_TIER` to cap all callers on an endpoint regardless of their credential tier.
 
 ### Hardened-by-default posture (1.0.x)
 
@@ -235,6 +235,10 @@ The defaults are oriented toward production safety rather than walk-up convenien
 ### Authorize-path hardening
 
 The unauthenticated OAuth authorize path (`AUTO_REGISTER`) is a walk-up surface: request inputs describe what the caller wants, never what the caller is permitted to do. See [ADR-009](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md) for the design rationale and [docs/Security/security.md](docs/Security/security.md) for the threat model and recommended deployment patterns.
+
+### Per-route permission tiers
+
+`FRISIAN_MCP_ROUTES` mounts `read`, `read_write`, and `admin` surfaces on separate paths, each with its own tool allow/deny list and tier ceiling on a deny-all baseline. A tool denied on a route does not exist there — it is absent from discovery and invocation, not merely rejected at call time. Misconfigurations are caught at startup; a route that would serve a privileged surface anonymously refuses to boot. See [ADR-010](docs/ADR/adr-010-per-route-permission-model.md) for the model and its security rationale.
 
 ---
 

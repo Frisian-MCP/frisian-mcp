@@ -69,14 +69,22 @@ from frisian_mcp.protocol import (
     JsonRpcId,
 )
 from frisian_mcp.registry import (
+    _TIER_RANK,
     ToolInputError,
     ToolInvocationError,
     ToolNotFoundError,
     tool_registry,
 )
 from frisian_mcp.resources import ResourceNotFoundError, resource_registry
+from frisian_mcp.route_views import RouteView, route_views
 
 logger = logging.getLogger(__name__)
+
+#: DOC-7 pre-wire: the audit-context seam.  One structured record per resolved
+#: ``tools/call``, emitted on a dedicated child logger so a durable sink can
+#: attach a handler to ``frisian_mcp.audit`` and consume the records without
+#: transformation — and without inheriting this module's operational noise.
+audit_logger = logging.getLogger("frisian_mcp.audit")
 
 _TOOLS_LIST_CACHE_KEY = "frisian_mcp:tools_list"
 _HEAVY_CACHE_PREFIX = "frisian_mcp:heavy:"
@@ -198,13 +206,17 @@ def invalidate_tools_list_cache() -> None:
     ``FRISIAN_MCP_TOOLS_LIST_CACHE_TTL`` is set, rather than waiting for the
     TTL to expire naturally.
     """
-    from frisian_mcp.registry import _TIER_RANK  # pylint: disable=import-outside-toplevel
-
     # Delete per-tier keys + the legacy :all key (written by any custom code using
     # max_tier=None → cache_key={key}:all in older deployments).
     keys = [f"{_TOOLS_LIST_CACHE_KEY}:all"] + [
         f"{_TOOLS_LIST_CACHE_KEY}:{tier}" for tier in _TIER_RANK
     ]
+    # Per-route keys (FRISIAN_MCP_ROUTES): each mounted route caches its own
+    # manifest per tier, because two routes at the same tier expose different
+    # deny-carved surfaces.
+    for route_name in route_views.names():
+        keys.append(f"{_TOOLS_LIST_CACHE_KEY}:{route_name}:all")
+        keys.extend(f"{_TOOLS_LIST_CACHE_KEY}:{route_name}:{tier}" for tier in _TIER_RANK)
     django_cache.delete_many(keys)
 
 
@@ -244,9 +256,7 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
         else:
             # Static API keys (_ApiKeyAuth) have no PK; fall back to the
             # type + permission tier so two distinct tiers don't collide.
-            auth_id = (
-                f"{type(auth_obj).__name__}:tier=" f"{getattr(auth_obj, 'permission', 'unknown')}"
-            )
+            auth_id = f"{type(auth_obj).__name__}:tier={getattr(auth_obj, 'permission', 'unknown')}"
 
     user = getattr(request, "user", None)
     user_pk = getattr(user, "pk", None) if user is not None else None
@@ -263,7 +273,7 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
     session_id = (request.META or {}).get("HTTP_MCP_SESSION_ID", "")
     session_part = f":session={session_id}" if session_id else ""
 
-    return f"tool={tool_name}:auth={auth_id}:tier={tier}" f"{user_part}{conn_part}{session_part}"
+    return f"tool={tool_name}:auth={auth_id}:tier={tier}{user_part}{conn_part}{session_part}"
 
 
 def _build_heavy_cache_entry(result: Any, request: Any, tool_name: str) -> dict[str, Any]:
@@ -384,8 +394,86 @@ def _jsonrpc_error(
     return JsonResponse({"jsonrpc": "2.0", "id": request_id, "error": error})
 
 
+def _request_visible_entry(request: Any, tool_name: str) -> Any:
+    """
+    Return the tool entry for *tool_name* as visible to **this request**.
+
+    Absence must hold on every observable surface (WI-1).  The lite escape
+    hatch resolves the entry it is about to hand back through this helper so
+    that, on a per-route mount, it cannot return the schema of a tool the
+    route denies — the "No tool registered" error would arrive carrying the
+    denied tool's full input contract — nor of a tool the effective tier
+    hides, which ``registry.dispatch`` has just reported as nonexistent.
+
+    On a plain mount (no ``request._mcp_route_view``) this is exactly the
+    global-registry lookup the escape hatch always performed; the tier half of
+    the shipped lite-schema exposure is tracked separately (CR-19) and is
+    deliberately not changed here.
+    """
+    route_view: RouteView | None = getattr(request, "_mcp_route_view", None) if request else None
+    if route_view is None:
+        return tool_registry.get_entry(tool_name)
+    entry = route_view.entries.get(tool_name)
+    if entry is None:
+        return None
+    caller_rank = _TIER_RANK.get(_get_token_permission(request), 0)
+    if _TIER_RANK.get(entry.permission_tier, 0) > caller_rank:
+        return None
+    return entry
+
+
+def _log_audit_context(
+    request: Any,
+    tool_name: str,
+    arguments: dict[str, Any],
+    decision: str,
+    reason: str | None,
+) -> None:
+    """
+    Emit one DOC-7 audit-context record for a resolved ``tools/call``.
+
+    Everything in the payload is already computed on the request path — route
+    identity, effective ceiling, effective tier, permission decision — so this
+    seam records it instead of discarding it; the downstream SOC sink attaches
+    a handler to :data:`audit_logger` and consumes the record verbatim.
+
+    The payload carries **routing labels only**: route/tier vocabulary, the
+    canonical mount path, the addressed tool and (for dispatchers) its
+    ``resource``/``action`` labels.  Caller argument *values*, token material,
+    and user identity are deliberately excluded — no PII, no secrets.
+    """
+    route_view: RouteView | None = getattr(request, "_mcp_route_view", None)
+    # resource/action are config-vocabulary labels only on dispatcher calls; on
+    # a flat tool the same argument keys would hold caller data, so they are
+    # gated on the addressed entry actually being a dispatcher.  The entry is
+    # resolved from the route view first — a carved group's dispatcher is a
+    # route-local rebuild that the global registry does not hold.
+    entry = (
+        route_view.entries.get(tool_name)
+        if route_view is not None
+        else tool_registry.get_entry(tool_name)
+    )
+    is_dispatcher = bool(entry is not None and entry.is_dispatcher)
+    audit_logger.info(
+        "mcp_audit_context",
+        extra={
+            "route": route_view.route_name if route_view is not None else None,
+            "route_path": (
+                route_view.path if route_view is not None else getattr(request, "path", None)
+            ),
+            "effective_ceiling": getattr(request, "_mcp_max_tier", None),
+            "effective_tier": getattr(request, "_mcp_effective_tier", None),
+            "tool": tool_name,
+            "resource": arguments.get("resource") if is_dispatcher else None,
+            "tool_action": arguments.get("action") if is_dispatcher else None,
+            "decision": decision,
+            "reason": reason,
+        },
+    )
+
+
 def _lite_enrich_error_content(
-    content: dict[str, Any], tool_name: str, lite: bool
+    content: dict[str, Any], tool_name: str, lite: bool, request: Any = None
 ) -> dict[str, Any]:
     """
     Attach the failing tool's ``inputSchema`` to an ``isError`` content dict.
@@ -393,14 +481,17 @@ def _lite_enrich_error_content(
     ``tools/call`` failures that surface as ``isError=true`` content blocks
     (rather than JSON-RPC ``error`` responses) carry their detail in
     ``content[0].text`` as JSON.  This helper mirrors :func:`_lite_enrich_error`
-    for that path: when *lite* is ``True`` and the tool exists, attach the
-    tool's ``inputSchema`` to the content dict so the agent can self-correct.
+    for that path: when *lite* is ``True`` and the tool exists — as visible to
+    *request* (WI-1) — attach the tool's ``inputSchema`` to the content dict so
+    the agent can self-correct.
 
     Args:
         content: The dict that will be JSON-serialised into
             ``content[0].text`` of an ``isError=true`` response.
         tool_name: The tool name the caller invoked.
         lite: The per-call ``lite`` flag extracted from arguments.
+        request: The current request; scopes the entry lookup to the route
+            view and effective tier when present.
 
     Returns:
         Either *content* unchanged, or a new dict with ``"inputSchema"``
@@ -409,13 +500,15 @@ def _lite_enrich_error_content(
     """
     if not lite or not tool_name:
         return content
-    entry = tool_registry.get_entry(tool_name)
+    entry = _request_visible_entry(request, tool_name)
     if entry is None:
         return content
     return {**content, "inputSchema": entry.input_schema}
 
 
-def _lite_enrich_error(response: JsonResponse, tool_name: str, lite: bool) -> JsonResponse:
+def _lite_enrich_error(
+    response: JsonResponse, tool_name: str, lite: bool, request: Any = None
+) -> JsonResponse:
     """
     Attach the failing tool's ``inputSchema`` to a JSON-RPC error response.
 
@@ -426,8 +519,9 @@ def _lite_enrich_error(response: JsonResponse, tool_name: str, lite: bool) -> Js
     ``tools/list``.  Lite mode normally suppresses scaffolding; a failure
     re-includes it.
 
-    When *lite* is ``False`` or the tool is not registered, *response* is
-    returned unchanged.  Otherwise the response body is rewritten so that
+    When *lite* is ``False`` or the tool is not registered — or not visible to
+    *request*'s route view and effective tier (WI-1) — *response* is returned
+    unchanged.  Otherwise the response body is rewritten so that
     ``error.data`` is a structured dict containing ``"detail"`` (the original
     string data, when present) and ``"inputSchema"`` (the tool's schema).
 
@@ -435,6 +529,8 @@ def _lite_enrich_error(response: JsonResponse, tool_name: str, lite: bool) -> Js
         response: The JSON-RPC error response built by :func:`_jsonrpc_error`.
         tool_name: The tool name the caller invoked.
         lite: The per-call ``lite`` flag extracted from arguments.
+        request: The current request; scopes the entry lookup to the route
+            view and effective tier when present.
 
     Returns:
         Either *response* unchanged, or a new ``JsonResponse`` with the
@@ -443,7 +539,7 @@ def _lite_enrich_error(response: JsonResponse, tool_name: str, lite: bool) -> Js
     """
     if not lite or not tool_name:
         return response
-    entry = tool_registry.get_entry(tool_name)
+    entry = _request_visible_entry(request, tool_name)
     if entry is None:
         return response
     body = json.loads(response.content)
@@ -799,7 +895,18 @@ def _maybe_sse(response: HttpResponse, request: Any) -> HttpResponse | Streaming
 
 
 def _tool_registry_dispatch(request: HttpRequest, tool_name: str, arguments: dict[str, Any]) -> Any:
-    """Inner dispatch callable passed to the middleware chain."""
+    """
+    Inner dispatch callable passed to the middleware chain.
+
+    On a per-route mount (``request._mcp_route_view`` stamped by
+    :meth:`McpView.post`) invocation goes through the route's deny-carved
+    :class:`~frisian_mcp.route_views.RouteView`, so a denied tool raises the
+    same :class:`ToolNotFoundError` a never-registered tool raises.  Plain
+    mounts keep today's global-registry path unchanged.
+    """
+    route_view: RouteView | None = getattr(request, "_mcp_route_view", None)
+    if route_view is not None:
+        return route_view.dispatch(request, tool_name, arguments)
     return tool_registry.dispatch(request, tool_name, arguments)
 
 
@@ -906,9 +1013,21 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
     if conn is None and has_inactive_match:
         return _jsonrpc_success(request_id, {"tools": []})
     max_tier = _get_token_permission(request)
+    # PR-7: on a per-route mount the manifest comes from the route's deny-carved
+    # RouteView, and max_tier is the effective tier stamped in McpView.post()
+    # (min of token tier, route ceiling, and FRISIAN_MCP_MAX_TIER) — discovery
+    # reads the capped tier so a write-capable token on a read-ceiling route is
+    # never shown a write action that would then fail at invoke (WI-2).
+    route_view: RouteView | None = getattr(request, "_mcp_route_view", None)
     cache_ttl: int | None = getattr(settings, "FRISIAN_MCP_TOOLS_LIST_CACHE_TTL", None)
-    # Use a per-tier cache key so authenticated requests benefit from caching too.
-    cache_key = f"{_TOOLS_LIST_CACHE_KEY}:{max_tier or 'all'}"
+    # Use a per-tier cache key so authenticated requests benefit from caching
+    # too.  Per-route mounts get a per-route key: same tier, different route ⇒
+    # different deny-carved surface, so sharing the legacy key would leak one
+    # route's manifest to another.
+    if route_view is not None:
+        cache_key = f"{_TOOLS_LIST_CACHE_KEY}:{route_view.route_name}:{max_tier or 'all'}"
+    else:
+        cache_key = f"{_TOOLS_LIST_CACHE_KEY}:{max_tier or 'all'}"
     # Permission-aware discovery builds a per-user entry filter; bypassing the
     # shared tier-based cache ensures different users see only their own tools.
     perm_aware: bool = getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False)
@@ -927,13 +1046,14 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
         entry_filter = _make_perm_entry_filter(caps)
         action_filter_factory = _make_perm_action_filter_factory(caps)
 
+    _lister = route_view.list_tools if route_view is not None else tool_registry.list_tools
     if use_cache:
         tools: list[dict[str, Any]] | None = django_cache.get(cache_key)
         if tools is None:
-            tools = tool_registry.list_tools(max_tier=max_tier)
+            tools = _lister(max_tier=max_tier)
             django_cache.set(cache_key, tools, cache_ttl)
     else:
-        tools = tool_registry.list_tools(
+        tools = _lister(
             max_tier=max_tier,
             entry_filter=entry_filter,
             action_filter_factory=action_filter_factory,
@@ -1138,11 +1258,16 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         if "verify" in arguments:
             _dispatch_arguments = {k: v for k, v in arguments.items() if k != "verify"}
 
+    # DOC-7 audit-context seam: the permission decision defaults to allow and
+    # is downgraded by the deny branches below; the ``finally`` emits exactly
+    # one record per resolved call, whatever path the handler leaves through.
+    _audit: dict[str, Any] = {"decision": "allow", "reason": None}
     try:
         result = build_middleware_chain(_tool_registry_dispatch, get_middleware_instances())(
             request, tool_name, _dispatch_arguments
         )
     except ToolNotFoundError as exc:
+        _audit.update(decision="deny", reason="absent")
         # JSON-RPC 2.0: -32601 METHOD_NOT_FOUND is the correct code for an unknown
         # tool name.  -32602 INVALID_PARAMS is reserved for structural argument
         # errors; using it for a missing tool misleads clients into thinking their
@@ -1152,29 +1277,38 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # extra tools/list round-trip.  The full tool list is intentionally
         # omitted — listing all names in the error leaks the discovery surface
         # to callers who have not made an explicit tools/list call.
-        known_names = [
-            t["name"] for t in tool_registry.list_tools(max_tier=_get_token_permission(request))
-        ]
+        # On a per-route mount, enumerate the route's own deny-carved view so a
+        # denied tool is never named back in a suggestion — the absence error
+        # this branch wraps would otherwise undo itself one line later (WI-1).
+        _rv: RouteView | None = getattr(request, "_mcp_route_view", None)
+        _known_lister = _rv.list_tools if _rv is not None else tool_registry.list_tools
+        known_names = [t["name"] for t in _known_lister(max_tier=_get_token_permission(request))]
         suggestions = difflib.get_close_matches(tool_name, known_names, n=3, cutoff=0.6)
         data = str(exc)
         if suggestions:
             data += f". Did you mean: {', '.join(suggestions)}?"
         data += _REFRESH_HINT
-        # Lite-mode escape hatch is a no-op here: the tool is unknown so the
-        # registry has no inputSchema to re-include.  The close-match
-        # suggestions in ``data`` are already the agent's recovery path.
+        # Lite-mode escape hatch is a no-op here BY CONSTRUCTION (WI-1): the
+        # tool is absent for this request — never registered, route-denied, or
+        # hidden by the effective tier — and _request_visible_entry resolves
+        # the entry through the same route/tier lens, so there is no schema to
+        # re-include.  A global-registry lookup here would hand a route-denied
+        # tool's full input contract back inside its own absence error.  The
+        # close-match suggestions in ``data`` are the agent's recovery path.
         return _lite_enrich_error(
             _jsonrpc_error(request_id, METHOD_NOT_FOUND, "Unknown tool", data),
             tool_name,
             _lite,
+            request,
         )
     except LookupError as exc:
         # LookupError from inside a registered tool (e.g. group dispatcher raises
         # LookupError for an unknown resource/action pair).  Distinct from the
         # tool-not-found case above: the MCP tool exists, but the sub-action does
         # not.  Surface as isError:true so the agent can self-correct.
+        _audit.update(decision="deny", reason="absent")
         content = _lite_enrich_error_content(
-            {"error": str(exc), "status_code": 404}, tool_name, _lite
+            {"error": str(exc), "status_code": 404}, tool_name, _lite, request
         )
         return _jsonrpc_success(
             request_id,
@@ -1191,6 +1325,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc)),
             tool_name,
             _lite,
+            request,
         )
     except ToolInvocationError as exc:
         # Backend returned ToolResult.is_error=True (non-DRF exception in the ViewSet).
@@ -1199,7 +1334,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         content = exc.content if isinstance(exc.content, dict) else {"error": str(exc.content)}
         if "status_code" not in content:
             content = {**content, "status_code": 500}
-        content = _lite_enrich_error_content(content, tool_name, _lite)
+        content = _lite_enrich_error_content(content, tool_name, _lite, request)
         return _jsonrpc_success(
             request_id,
             {
@@ -1211,8 +1346,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # Return as isError=True tool-level content, not a JSON-RPC protocol error.
         # INVALID_PARAMS (-32602) is reserved for argument structure failures; using
         # it for auth denial misleads agents into thinking their call format is wrong.
+        _audit.update(decision="deny", reason="permission")
         content = _lite_enrich_error_content(
-            {"error": str(exc), "status_code": 403}, tool_name, _lite
+            {"error": str(exc), "status_code": 403}, tool_name, _lite, request
         )
         return _jsonrpc_success(
             request_id,
@@ -1225,7 +1361,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # IT-8: Surface DRF field-level validation errors with structured detail so
         # the caller can display per-field messages without parsing a flat string.
         content = _build_drf_error_content(exc)
-        content = _lite_enrich_error_content(content, tool_name, _lite)
+        content = _lite_enrich_error_content(content, tool_name, _lite, request)
         return _jsonrpc_success(
             request_id,
             {
@@ -1237,7 +1373,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # Surface Django model/form validation errors as structured isError=True content
         # so agents receive actionable feedback in the same format as DRFValidationError.
         msg = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
-        content = _lite_enrich_error_content({"error": msg, "status_code": 400}, tool_name, _lite)
+        content = _lite_enrich_error_content(
+            {"error": msg, "status_code": 400}, tool_name, _lite, request
+        )
         return _jsonrpc_success(
             request_id,
             {
@@ -1251,7 +1389,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # enum value).  Return as a tool-level isError response so the caller gets
         # actionable feedback without a full JSON-RPC error.
         content = _lite_enrich_error_content(
-            {"error": str(exc), "status_code": 400}, tool_name, _lite
+            {"error": str(exc), "status_code": 400}, tool_name, _lite, request
         )
         return _jsonrpc_success(
             request_id,
@@ -1273,6 +1411,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             },
             tool_name,
             _lite,
+            request,
         )
         return _jsonrpc_success(
             request_id,
@@ -1281,6 +1420,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 "isError": True,
             },
         )
+    finally:
+        # Runs on every exit from the try/except construct — the deny branches
+        # above return from inside their handlers, and the success path falls
+        # through to the result shaping below.  Exactly one record per call.
+        _log_audit_context(request, tool_name, arguments, **_audit)
 
     # Unwrap ToolResult from DRF-backed tools so the write-path lean envelope
     # can access the actual HTTP status (201 for creates, 204 for deletes, etc.).
@@ -1612,6 +1756,36 @@ class McpView(APIView):
 
     renderer_classes = [JSONRenderer, _EventStreamRenderer]
 
+    #: Set on the per-route subclasses that ``apps._install_route_urls`` mounts
+    #: when ``FRISIAN_MCP_ROUTES`` is configured.  ``None`` on plain mounts —
+    #: the legacy gateway, extra paths, and the protected path — which keep the
+    #: global-registry behaviour byte-identical to today.
+    _route_name: str | None = None
+    #: The parsed :class:`~frisian_mcp.route_config.RouteConfig` backing a
+    #: per-route mount; carried on the subclass so the tier ceiling and
+    #: permission classes stay enforceable even before the route's view
+    #: snapshot has been materialised.
+    _route_config: Any = None
+
+    def _resolve_route_view(self) -> Any:
+        """
+        Return this mount's :class:`~frisian_mcp.route_views.RouteView`, or ``None``.
+
+        Plain mounts return ``None`` (global-registry path).  A per-route mount
+        resolves its snapshot from the process-scoped registry; if the snapshot
+        is missing (e.g. ``FRISIAN_MCP_AUTODISCOVER = False``, where deferred
+        discovery — the normal rebuild trigger — never runs) it is built now and
+        swapped in atomically.  Falling back to the *global* registry instead
+        would silently drop the route's allow/deny carve-out — fail-open — so
+        the fallback here builds the carved view rather than bypassing it.
+        """
+        if self._route_name is None:
+            return None
+        view = route_views.get(self._route_name)
+        if view is None and self._route_config is not None:
+            view = route_views.rebuild(self._route_config)
+        return view
+
     def _effective_max_tier(self) -> str | None:
         """
         Return the tier cap for this endpoint, or ``None`` for no cap.
@@ -1750,7 +1924,20 @@ class McpView(APIView):
         """Handle POST — dispatch JSON-RPC 2.0 requests."""
         # Stamp the endpoint-level tier cap so _get_token_permission can apply
         # it throughout the request without re-reading settings on each call.
+        # On a per-route mount this is min(route ceiling, FRISIAN_MCP_MAX_TIER)
+        # via the subclass's _effective_max_tier override.
         request._mcp_max_tier = self._effective_max_tier()  # type: ignore[attr-defined]  # pylint: disable=protected-access
+        # Stamp the route view (None on plain mounts) so tools/list, tools/call,
+        # and the not-found suggester all read the same deny-carved surface.
+        request._mcp_route_view = self._resolve_route_view()  # type: ignore[attr-defined]  # pylint: disable=protected-access
+        # ADR-010 §8: the effective tier — min(token_tier, route_ceiling,
+        # FRISIAN_MCP_MAX_TIER) — is computed exactly once per request, here,
+        # and stamped.  _resolve_request_tier short-circuits on the stamp, so
+        # every later read (discovery, dispatch-time enforcement, suggesters,
+        # error paths) returns this one value; nothing recomputes it.  The
+        # stamp must land AFTER _mcp_max_tier so the cap participates in the
+        # resolution it is meant to bound.
+        request._mcp_effective_tier = _get_token_permission(request)  # type: ignore[attr-defined]  # pylint: disable=protected-access
         if not getattr(settings, "FRISIAN_MCP_ENABLED", True):
             return _maybe_sse(
                 JsonResponse(

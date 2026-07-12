@@ -135,6 +135,18 @@ silent about the legacy view. Note the two distinct absences, which §8 relies
 on: absence of the **setting** means legacy; absence of a **key** on a
 configured route means the tier's secure default.
 
+**When `FRISIAN_MCP_ROUTES` is set, the routes are the entire gateway surface.**
+The legacy single-path mount (`_install_mcp_url`), `FRISIAN_MCP_EXTRA_PATHS`, and
+`FRISIAN_MCP_PROTECTED_PATH` are **not mounted**; each legacy path setting that
+is present-but-ignored is logged with a warning naming the route model as its
+replacement. This precedence is a fail-closed security requirement, not an
+ergonomic one: any legacy path would mount the **full unfiltered registry**
+beside the deny-carved routes, and a caller reaching that path would void every
+carve-out. An operator who includes `frisian_mcp.urls` directly in their own
+URLconf is making an explicit choice and is left untouched; the precedence
+governs only the settings-driven mounts. Operators debugging a "missing"
+protected path under `FRISIAN_MCP_ROUTES` should expect it — that is the design.
+
 ### 5. Firewall semantics — deny-all baseline, allow then deny
 
 The baseline is **deny-all**. Nothing is exposed on a route unless explicitly
@@ -248,13 +260,21 @@ dynamic load. Under standard Django there is no runtime "a ViewSet appeared"
 event, so there is **no watcher, no polling thread, no signal-driven refresh** —
 building one would be building a reaction to an event that cannot fire.
 
+**Fail-closed on a missing snapshot.** On the one path where deferred discovery
+never fires (`AUTODISCOVER=False`), a route's view may be absent when the first
+request arrives. `McpView.post()` builds the carved view at request time rather
+than falling back to the global registry — falling back would drop the carve-out
+and fail open. Fail-closed under uncertainty is the standing rule.
+
 ### 8. Effective-tier cap applies to discovery, not only execution
 
 Enforcement uses **`min(token_tier, route_ceiling, FRISIAN_MCP_MAX_TIER)`**,
-computed once in `McpView.post()` and stamped on `request._mcp_effective_tier`.
-`min` is monotone — it can only narrow, never widen. Every reader — discovery,
-invocation, audit logging, error messages — reads that one attribute; nothing
-recomputes it.
+computed once in `McpView.post()` (via `_min_tier`, `route_views.py`) and stamped
+on `request._mcp_effective_tier`. `min` is monotone — it can only narrow, never
+widen. Every reader — discovery, invocation, audit logging, error messages —
+reads that one attribute; `registry._resolve_request_tier` short-circuits on the
+stamp, so nothing recomputes it. `_min_tier` fails closed on an unrecognized tier
+string.
 
 **Discovery must read the capped tier, not the raw token tier.** A write-capable
 token on a `read`-ceiling route sees only `{list, retrieve}` in `tools/list`; it
@@ -263,8 +283,9 @@ and rejecting at invoke would be both an inconsistency and an existence leak.
 Synthesized actions (e.g. `bulk_create`) respect the capped ceiling for free,
 because synthesis runs inside the same tier-filtered schema build.
 
-**An omitted `highest_tier` on a configured route never means uncapped.** It
-resolves to the tier key's secure default: `default` → `read`, `elevated` →
+**An omitted `highest_tier` on a configured route never means uncapped.**
+`resolve_route_ceiling(route)` (`route_views.py`) resolves it to the tier key's
+secure default via `SECURE_DEFAULT_CEILING`: `default` → `read`, `elevated` →
 `read_write`, `admin` → `admin` (the values the §2 example labels as secure
 defaults). The decisive reason: if omission meant *uncapped*, an open `default`
 route with no `highest_tier` would be strictly more dangerous than the FATAL
@@ -280,10 +301,11 @@ Where a global `FRISIAN_MCP_MAX_TIER` caps a route below its declared
 `highest_tier`, the audit emits a SOFT finding (`frisian_mcp.W007`) — otherwise
 an operator's `admin` route is silently inert and nothing says why.
 
-*The `min`-cap resolution and the `W007` finding are shipped; the request-path
-wiring that stamps `request._mcp_effective_tier` in `McpView.post()` lands with
-PR-7. This section is written against the ratified ruling and is reconciled to
-the wired code before PR-14 is marked done.*
+The ceiling extends the absence property for free: when `request._mcp_max_tier`
+is set, `registry.dispatch` converts a tier denial into the same
+`ToolNotFoundError` an unknown tool raises, so a write action above a route's
+ceiling is absent at *both* discovery and invocation — never shown then
+rejected.
 
 ### 9. Absence invariants — error parity, counts, hints
 
@@ -304,6 +326,15 @@ agrees. Three leaks are closed and golden-tested:
   denied resource whose hint still appears in `action="help"` output is a direct
   leak — and an easy one to miss, because hints live in a separate dict from the
   resource tree. §7's `tool_names` pruning closes this by construction.
+
+The error-enrichment path is the same hazard viewed from the other side. The
+lite error hatch (`lite: true`) attaches a tool's `inputSchema` to a validation
+error so a caller can self-correct; resolving that schema through the *global*
+registry would attach a denied or tier-hidden tool's full input contract to its
+own absence error. The enrichment path therefore resolves through the
+route-visible entry (`_request_visible_entry`, `views.py`), so an absence error
+never carries the absent tool's schema. Plain (non-route) mounts keep the global
+lookup unchanged.
 
 ### 10. Startup config-audit — FATAL / LOUD / SOFT
 

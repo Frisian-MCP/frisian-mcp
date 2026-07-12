@@ -34,8 +34,9 @@ Permission-class classification (BLOCKER-1 ruling)
 Rule 3 is **load-bearing security**, not a convenience default: if it fails, an
 admin route silently serves anonymous traffic and nothing else catches it.  The
 resolver is proven live in :class:`TestRule3Resolver`; the wire enforcement it
-depends on is staged in :class:`TestRule3EnforcedOnTheWire` (PR-7).  A resolver
-that returns the right list while the view forgets to call it is the failure
+depends on (anonymous POST to an admin route -> 401) is proven by PR-7's
+``test_route_wiring.py::TestBan6Seam``.  A resolver that returns the right list
+while the view forgets to call it is the failure
 mode, which is why both exist.
 
 The empty-classes-on-admin FATAL is **structurally unreachable** under rule 3.
@@ -72,6 +73,16 @@ from rest_framework.permissions import (
     IsAuthenticatedOrReadOnly,
 )
 
+from frisian_mcp.route_audit import (
+    E004_OPEN_WORLD_DEFAULT_ABOVE_READ,
+    E005_ROUTE_SCHEMA,
+    E006_ANONYMOUS_GRANT_ON_PRIVILEGED,
+    W005_AUTO_REGISTER_ANONYMOUS,
+    W006_AUTO_DISCOVER_ENABLED,
+    W007_MAX_TIER_CAPS_ROUTE,
+    W010_ANONYMOUS_SSE_REACHABLE,
+    W011_UNPROVABLE_PERMISSION_CLASS,
+)
 from frisian_mcp.route_config import RouteConfig, canonical_permission_tier, parse_route_config
 from frisian_mcp.route_grammar import (
     CODE_DENY_WILDCARD,
@@ -166,6 +177,21 @@ def _route(name: str, **raw: Any) -> RouteConfig:
     return parse_route_config(name, raw)
 
 
+def _audit_ids(settings: Any, routes: dict[str, Any], **overrides: Any) -> set[str]:
+    """Run the config-time audit over *routes* and return the set of check ids.
+
+    Assert on ids (``frisian_mcp.E004`` ...), never on message prose. PR-9b's
+    ``audit_route_configs`` reads ``settings.FRISIAN_MCP_ROUTES`` and the global
+    permission classes, so the settings are stamped here.
+    """
+    from frisian_mcp.route_audit import audit_route_configs
+
+    settings.FRISIAN_MCP_ROUTES = routes
+    for key, value in overrides.items():
+        setattr(settings, key, value)
+    return {m.id for m in audit_route_configs()}
+
+
 class _OpenPerm(AllowAny):
     """An unmodified ``AllowAny`` subclass — the fail-open the R1 predicate must catch."""
 
@@ -188,6 +214,74 @@ class _CustomPerm:
     def has_permission(self, request: Any, view: Any) -> bool:
         """Arbitrary host logic the audit cannot classify."""
         return True
+
+
+# ---------------------------------------------------------------------------
+# Minimal self-contained wire harness — for the partial-anonymous POST/GET split.
+#
+# The 401 seam and route mounting are exercised broadly in test_route_wiring.py
+# (PR-7).  This is a small, local harness for the ONE wire behavior that file
+# does not cover: an ``IsAuthenticatedOrReadOnly`` route denying anonymous POST
+# while opening the anonymous GET SSE stream.  Kept self-contained rather than
+# importing that module's private fixtures.
+# ---------------------------------------------------------------------------
+
+_WIRE_PATH = "mcp/admin"
+
+
+def _wire_post(view: Any, path: str, method: str) -> Any:
+    """POST a JSON-RPC call anonymously and return the HTTP response."""
+    from rest_framework.test import APIRequestFactory
+
+    request = APIRequestFactory().post(
+        f"/{path}",
+        {"jsonrpc": "2.0", "id": 1, "method": method, "params": {}},
+        format="json",
+    )
+    return view(request)
+
+
+def _wire_get(view: Any, path: str) -> Any:
+    """Open the SSE channel anonymously and return the HTTP response.
+
+    ``FRISIAN_MCP_SSE_MAX_STREAM_SECONDS=0`` (set by the fixture) closes the
+    stream after one keepalive, so this never blocks a worker.
+    """
+    from rest_framework.test import APIRequestFactory
+
+    request = APIRequestFactory().get(f"/{path}", HTTP_ACCEPT="text/event-stream")
+    return view(request)
+
+
+@pytest.fixture()
+def _wire_route(settings: Any) -> Any:
+    """Mount an admin route gated by ``IsAuthenticatedOrReadOnly`` and yield ``(view, path)``.
+
+    Restores the ``route_views`` singleton afterward so the mount does not leak
+    into other tests.
+    """
+    from frisian_mcp.apps import _make_route_mcp_view
+    from frisian_mcp.registry import ToolRegistry
+    from frisian_mcp.route_views import route_views
+
+    settings.FRISIAN_MCP_PERMISSION_CLASSES = [IsAuthenticatedOrReadOnly]
+    settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
+        "rest_framework.authentication.BasicAuthentication"
+    ]
+    settings.FRISIAN_MCP_SSE_CHANNEL = True
+    settings.FRISIAN_MCP_SSE_MAX_STREAM_SECONDS = 0
+
+    cfg = parse_route_config("admin", {"path": _WIRE_PATH, "highest_tier": "admin"})
+    registry = ToolRegistry()
+
+    with route_views._lock:  # noqa: SLF001
+        saved = dict(route_views._views)  # noqa: SLF001
+    route_views.rebuild(cfg, registry)
+    try:
+        yield _make_route_mcp_view(cfg).as_view(), _WIRE_PATH
+    finally:
+        with route_views._lock:  # noqa: SLF001
+            route_views._views = saved  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------
@@ -592,166 +686,348 @@ class TestAnonymousReachabilityPredicates:
 
 
 # ===========================================================================
-# STAGED — unskip as PR-7 (live endpoint) and PR-9b (config-time audit) land.
+# Audit severity + wire behavior — all deps landed (PR-7, PR-9b).
 # ===========================================================================
 
-_AWAITS_PR9B = pytest.mark.skip(
-    reason="Awaits PR-9b (config-time FATAL/LOUD/SOFT audit + Django-checks wiring)."
-)
-_AWAITS_PR7 = pytest.mark.skip(
-    reason="Awaits PR-7 (McpView.post() route-view + effective-tier wiring; live endpoint)."
-)
 
-
-@_AWAITS_PR9B
 class TestFatalTriggersStopTheProcess:
-    """WI-5: FATAL must genuinely refuse to boot, not merely print a banner."""
+    """WI-5: FATAL must genuinely refuse to boot, not merely print a banner.
 
-    def test_open_world_default_above_read_is_fatal(self) -> None:
-        """Anonymous-reachable `default` with `highest_tier` above `read`.
+    Asserts against PR-9b's shipped `route_audit`: config-time `Error` messages
+    keyed on `frisian_mcp.EXXX`, plus `raise_on_fatal_route_config()` — the
+    function `AppConfig.ready()` calls to make the refusal real, because a
+    `checks.Error` alone does not stop a WSGI server from serving traffic.
+    """
 
-        The trigger that actually protects the flagship config. Independent of
-        the permission-class resolver.
+    def test_open_world_default_above_read_is_fatal(self, settings: Any) -> None:
+        """Anonymous-reachable `default` with `highest_tier` above `read` -> E004.
+
+        The trigger that actually protects the flagship config.
         """
-        raise NotImplementedError
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        ids = _audit_ids(settings, {"default": {"path": "mcp", "highest_tier": "admin"}})
+        assert E004_OPEN_WORLD_DEFAULT_ABOVE_READ in ids
 
-    def test_fatal_fails_check_deploy_with_nonzero_exit(self) -> None:
-        """`manage.py check --deploy` exits non-zero. Not "a message was emitted"."""
-        raise NotImplementedError
+    def test_anonymous_grant_on_admin_is_fatal(self, settings: Any) -> None:
+        """Global `AllowAny` + an `admin` route -> E006."""
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[AllowAny],
+        )
+        assert E006_ANONYMOUS_GRANT_ON_PRIVILEGED in ids
 
-    def test_fatal_raises_improperly_configured_in_app_ready(self) -> None:
-        """Gunicorn never runs `check`. `AppConfig.ready()` must stop the process."""
-        raise NotImplementedError
+    def test_grammar_fatal_is_reported_keyed_on_its_code(self, settings: Any) -> None:
+        """A `GrammarError` surfaces as a check keyed on `frisian_mcp.E1xx`."""
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        ids = _audit_ids(
+            settings,
+            {"default": {"path": "mcp", "deny_list": ["*"]}},
+        )
+        assert f"frisian_mcp.{CODE_DENY_WILDCARD}" in ids
 
-    def test_grammar_fatal_propagates_to_boot(self) -> None:
-        """A `GrammarError` becomes checks.Error + ImproperlyConfigured, keyed on `.code`."""
-        raise NotImplementedError
+    def test_path_fatal_is_reported_keyed_on_its_code(self, settings: Any) -> None:
+        """A `RoutePathError` surfaces as a check keyed on `frisian_mcp.E2xx`."""
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        ids = _audit_ids(
+            settings,
+            {
+                "default": {"path": "mcp"},
+                "admin": {"path": "mcp", "highest_tier": "admin"},
+            },
+        )
+        assert f"frisian_mcp.{CODE_DUPLICATE_PATH}" in ids
 
-    def test_path_fatal_propagates_to_boot(self) -> None:
-        """A `RoutePathError` becomes checks.Error + ImproperlyConfigured, keyed on `.code`."""
-        raise NotImplementedError
+    def test_schema_error_is_reported_as_e005(self, settings: Any) -> None:
+        """An unknown key / bad type surfaces as E005."""
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        ids = _audit_ids(settings, {"default": {"path": "mcp", "bogus_key": True}})
+        assert E005_ROUTE_SCHEMA in ids
+
+    def test_fatal_raises_improperly_configured_at_boot(self, settings: Any) -> None:
+        """`raise_on_fatal_route_config()` raises — the WI-5 mechanism.
+
+        Gunicorn never runs `manage.py check`; only an exception out of
+        `AppConfig.ready()` stops it serving traffic.
+        """
+        from frisian_mcp.route_audit import raise_on_fatal_route_config
+
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        settings.FRISIAN_MCP_ROUTES = {"default": {"path": "mcp", "highest_tier": "admin"}}
+        with pytest.raises(ImproperlyConfigured):
+            raise_on_fatal_route_config()
+
+    def test_clean_config_does_not_raise_at_boot(self, settings: Any) -> None:
+        """A well-formed config must boot — `raise_on_fatal_route_config()` is silent."""
+        from frisian_mcp.route_audit import raise_on_fatal_route_config
+
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        settings.FRISIAN_MCP_ROUTES = {"admin": {"path": "mcp/admin", "highest_tier": "admin"}}
+        raise_on_fatal_route_config()  # must not raise
+
+    def test_warnings_alone_do_not_raise_at_boot(self, settings: Any) -> None:
+        """LOUD/SOFT are checks-framework warnings; only `Error` stops the boot."""
+        from frisian_mcp.route_audit import raise_on_fatal_route_config
+
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        # auto_discover -> W006 (SOFT), no Error.
+        settings.FRISIAN_MCP_ROUTES = {"default": {"path": "mcp", "auto_discover": True}}
+        raise_on_fatal_route_config()  # warnings present, but must not raise
+
+    def test_check_is_registered_with_the_framework(self) -> None:
+        """`check_route_config` is a registered Django system check.
+
+        This is what makes `manage.py check` surface the FATAL — the framework
+        wiring, asserted without the noise of the test env's unrelated checks
+        (driving the full `call_command("check")` here would fail on those, not
+        on route config).
+        """
+        from django.core.checks import registry as checks_registry
+
+        from frisian_mcp.route_audit import check_route_config
+
+        assert check_route_config in checks_registry.registry.registered_checks
+
+    def test_registered_check_emits_the_fatal_error(self, settings: Any) -> None:
+        """The registered check reports the E004 `Error` `manage.py check` fails on."""
+        from django.core.checks import Error as CheckError
+
+        from frisian_mcp.route_audit import check_route_config
+
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        settings.FRISIAN_MCP_ROUTES = {"default": {"path": "mcp", "highest_tier": "admin"}}
+        messages = check_route_config()
+        errors = [m for m in messages if isinstance(m, CheckError)]
+        assert any(m.id == E004_OPEN_WORLD_DEFAULT_ABOVE_READ for m in errors)
+
+    def test_registered_check_is_clean_for_a_well_formed_config(self, settings: Any) -> None:
+        """A well-formed config yields no `Error` from the registered check."""
+        from django.core.checks import Error as CheckError
+
+        from frisian_mcp.route_audit import check_route_config
+
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        settings.FRISIAN_MCP_ROUTES = {"admin": {"path": "mcp/admin", "highest_tier": "admin"}}
+        assert not [m for m in check_route_config() if isinstance(m, CheckError)]
 
 
-@_AWAITS_PR9B
 class TestPermissionClassAuditSeverity:
     """The FATAL/LOUD grading each bucket earns in the config-time audit.
 
     The bucket *predicate* is proven live in
     :class:`TestPermissionClassBucketPredicate`; these assert the audit
-    *consequence* of each bucket, which needs PR-9b's grading.
+    *consequence* — anonymous-granting -> E006 (FATAL), opaque -> W011 (LOUD).
     """
 
-    def test_literal_allow_any_on_admin_is_fatal(self) -> None:
-        """Global `AllowAny` + an `admin` route: incoherent, refuse to boot.
+    def test_literal_allow_any_on_admin_is_fatal(self, settings: Any) -> None:
+        """Global `AllowAny` + an `admin` route -> E006.
 
         Not silently overridden to `IsAuthenticated` — a silent fix trains
         operators to trust a config that means the opposite of what it says.
         """
-        raise NotImplementedError
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[AllowAny],
+        )
+        assert E006_ANONYMOUS_GRANT_ON_PRIVILEGED in ids
 
-    def test_unmodified_allow_any_subclass_on_admin_is_fatal(self) -> None:
-        """`class OpenPerm(AllowAny): pass` grades FATAL, not silence."""
-        raise NotImplementedError
+    def test_unmodified_allow_any_subclass_on_admin_is_fatal(self, settings: Any) -> None:
+        """`class OpenPerm(AllowAny): pass` grades E006, not silence.
 
-    def test_allow_any_subclass_that_overrides_gate_is_loud_not_fatal(self) -> None:
-        """The opaque bucket grades LOUD, not FATAL."""
-        raise NotImplementedError
+        `OpenPerm is AllowAny` is False; the predicate catches the subclass.
+        """
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[_OpenPerm],
+        )
+        assert E006_ANONYMOUS_GRANT_ON_PRIVILEGED in ids
 
-    def test_opaque_custom_permission_class_is_loud(self) -> None:
-        """Not statically recognizable as authentication-requiring -> LOUD."""
-        raise NotImplementedError
+    def test_allow_any_subclass_that_overrides_gate_is_loud_not_fatal(self, settings: Any) -> None:
+        """Overriding `has_permission` -> opaque -> W011, and NOT E006."""
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[_NarrowedPerm],
+        )
+        assert W011_UNPROVABLE_PERMISSION_CLASS in ids
+        assert E006_ANONYMOUS_GRANT_ON_PRIVILEGED not in ids
+
+    def test_opaque_custom_permission_class_is_loud(self, settings: Any) -> None:
+        """A class the audit cannot statically classify -> W011 (LOUD), not FATAL."""
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[_CustomPerm],
+        )
+        assert W011_UNPROVABLE_PERMISSION_CLASS in ids
+        assert E006_ANONYMOUS_GRANT_ON_PRIVILEGED not in ids
+
+    def test_auth_requiring_classes_produce_no_bucket_finding(self, settings: Any) -> None:
+        """`IsAuthenticated` is the coherent choice — no E006, no W011."""
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[IsAuthenticated],
+        )
+        assert E006_ANONYMOUS_GRANT_ON_PRIVILEGED not in ids
+        assert W011_UNPROVABLE_PERMISSION_CLASS not in ids
 
     def test_audit_imports_the_bucket_predicate_not_a_copy(self) -> None:
-        """PR-9b imports `_bucket` from `route_views`; it never re-derives it.
+        """PR-9b consumes `route_views._bucket`; it never re-derives the classification.
 
-        Two copies of "is this route anonymous" is how the audit and the runtime
-        end up disagreeing.
+        Two copies of "is this class an anonymous grant" is how the audit and the
+        runtime end up disagreeing. Asserted by source: `route_audit` imports the
+        predicate rather than defining its own.
         """
-        raise NotImplementedError
+        import inspect
+
+        from frisian_mcp import route_audit
+
+        source = inspect.getsource(route_audit)
+        # It imports the shipped predicate rather than defining a second copy.
+        assert "from frisian_mcp.route_views import" in source
+        assert "_bucket" in source
+        assert "def _bucket" not in source
 
 
-@_AWAITS_PR7
-class TestRule3EnforcedOnTheWire:
-    """The resolver returning `[IsAuthenticated]` is worthless if the view ignores it.
+class TestRule3StructurallyUnreachableFatal:
+    """The retired empty-classes-on-admin FATAL, kept visible for the defense pass.
 
-    :class:`TestRule3Resolver` proves the resolver. This proves the endpoint
-    actually applies it — the failure mode where the resolver is right and
-    `post()` forgets to call it.
+    Rule-3 enforcement on the wire (anonymous POST to an admin route -> 401 +
+    `WWW-Authenticate`) is proven by PR-7's
+    `test_route_wiring.py::TestBan6Seam.test_anonymous_post_to_admin_route_gets_401_with_challenge`;
+    the resolver it rests on is `TestRule3Resolver` here.  This class exists only
+    to keep the retired criterion audit-visible.
     """
-
-    def test_anonymous_post_to_admin_route_gets_401(self) -> None:
-        """401 with the `WWW-Authenticate` challenge intact — no 404 masking (deferral #6)."""
-        raise NotImplementedError
 
     @pytest.mark.skip(
         reason="Structurally unreachable under the BLOCKER-1 ruling: rule 3 supplies "
         "[IsAuthenticated] whenever the global setting is empty, so an elevated/admin "
         "route can never resolve to empty permission classes. Retired deliberately, "
-        "not forgotten. The hazard is eliminated by construction and covered by "
-        "TestRule3Resolver; the AllowAny FATAL still earns its place."
+        "not forgotten. Covered by construction (TestRule3Resolver) and by PR-7's "
+        "TestBan6Seam on the wire; the AllowAny FATAL (E006) still earns its place."
     )
     def test_empty_permission_classes_on_admin_is_fatal(self) -> None:
         """Unreachable by construction. See skip reason."""
         raise NotImplementedError
 
 
-@_AWAITS_PR7
+@pytest.mark.usefixtures("_wire_route")
 class TestPartialAnonymousWireBehavior:
-    """`IsAuthenticatedOrReadOnly` on `admin`: assert what actually happens on the wire.
+    """`IsAuthenticatedOrReadOnly` on an admin route: assert the split on the wire.
 
     The filed finding claimed an anonymous caller reaches the admin *tool
-    surface* at read tier.  They do not.  `tools/list` and `tools/call` are
-    JSON-RPC inside `McpView.post()`, and `POST` is not a DRF `SAFE_METHOD`, so
-    the permission layer denies anonymous before any tier logic runs.  The
-    resolver-level proof is :meth:`TestAnonymousReachabilityPredicates`; these
-    assert the wire, and they assert the **opposite** of what was filed.
+    surface* at read tier.  They do not: `tools/list` / `tools/call` ride
+    `McpView.post()`, and `POST` is not a DRF `SAFE_METHOD`.  What anonymous
+    *does* reach is `McpView.get()` — the SSE keepalive.  This is the wire proof
+    of the split (`TestAnonymousReachabilityPredicates` proves the predicate,
+    `TestLoudAndSoftTriggers` proves the W010 audit); PR-7's `TestBan6Seam`
+    covers the *empty-global* rule-3 401, so this covers the genuinely-uncovered
+    `IsAuthenticatedOrReadOnly` case and asserts the opposite of what was filed.
     """
 
-    def test_anonymous_post_tools_list_is_denied(self) -> None:
-        """POST is not a SAFE_METHOD -> 401. No enumeration, no invocation."""
-        raise NotImplementedError
+    def test_anonymous_post_is_denied_even_though_class_permits_reads(
+        self, _wire_route: Any
+    ) -> None:
+        """POST is unsafe -> 401, even under a class that permits anonymous reads."""
+        view, path = _wire_route
+        response = _wire_post(view, path, "tools/list")
+        assert response.status_code == 401
+        assert response.headers.get("WWW-Authenticate")
 
-    def test_anonymous_get_opens_sse_stream(self) -> None:
-        """GET is safe -> the SSE keepalive opens. Resource exhaustion, not disclosure."""
-        raise NotImplementedError
+    def test_anonymous_get_opens_the_sse_stream(self, _wire_route: Any) -> None:
+        """GET is safe -> the keepalive opens. Resource exhaustion, not disclosure."""
+        view, path = _wire_route
+        response = _wire_get(view, path)
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers.get("Content-Type", "")
 
-    def test_unauthenticated_tier_is_never_consulted_on_post(self) -> None:
-        """The denial happens above the tier layer entirely."""
-        raise NotImplementedError
 
-
-@_AWAITS_PR9B
 class TestLoudAndSoftTriggers:
-    """LOUD warns; SOFT informs. Both boot successfully."""
+    """LOUD warns; SOFT informs. Both boot successfully (produce no `Error`)."""
 
-    def test_partial_anonymous_is_loud_never_conditioned_on_tier(self) -> None:
-        """`_PARTIAL_ANONYMOUS` -> LOUD on every route, NEVER gated on `highest_tier`.
+    def test_partial_anonymous_is_loud_via_sse(self, settings: Any) -> None:
+        """`IsAuthenticatedOrReadOnly` on a route -> W010 (anonymous SSE reachable).
 
-        Conditioning severity on the ceiling would tell an operator that
-        lowering `highest_tier` mitigates an anonymous-SSE hole. It does not.
+        The finding names the SSE mechanism, and its severity is never gated on
+        `highest_tier` — lowering the ceiling does not close an anonymous-GET
+        keepalive.
         """
-        raise NotImplementedError
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[IsAuthenticatedOrReadOnly],
+        )
+        assert W010_ANONYMOUS_SSE_REACHABLE in ids
+        assert E006_ANONYMOUS_GRANT_ON_PRIVILEGED not in ids
 
-    def test_auto_register_on_anonymous_reachable_route_is_loud(self) -> None:
-        """`route_is_anonymous_reachable(route) and route.auto_register`."""
-        raise NotImplementedError
+    def test_partial_anonymous_sse_loud_does_not_depend_on_ceiling(self, settings: Any) -> None:
+        """Same W010 whether the ceiling is `read` or `admin` — severity is tier-blind."""
+        low = _audit_ids(
+            settings,
+            {"elevated": {"path": "mcp/e", "highest_tier": "read"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[IsAuthenticatedOrReadOnly],
+        )
+        high = _audit_ids(
+            settings,
+            {"elevated": {"path": "mcp/e", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[IsAuthenticatedOrReadOnly],
+        )
+        assert W010_ANONYMOUS_SSE_REACHABLE in low
+        assert W010_ANONYMOUS_SSE_REACHABLE in high
 
-    def test_sse_reachable_loud_is_suppressed_under_allow_unauthenticated(self) -> None:
+    def test_sse_reachable_loud_is_suppressed_under_allow_unauthenticated(
+        self, settings: Any
+    ) -> None:
         """The acknowledged open demo must not be double-warned (W001 already covers it)."""
-        raise NotImplementedError
+        ids = _audit_ids(
+            settings,
+            {"default": {"path": "mcp"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[],
+            FRISIAN_MCP_ALLOW_UNAUTHENTICATED=True,
+        )
+        assert W010_ANONYMOUS_SSE_REACHABLE not in ids
 
-    def test_auto_discover_true_is_soft(self) -> None:
-        """`auto_discover` alone carries no privilege."""
-        raise NotImplementedError
+    def test_auto_register_on_anonymous_reachable_route_is_loud(self, settings: Any) -> None:
+        """`auto_register` on an anonymous-POST-reachable route -> W005."""
+        ids = _audit_ids(
+            settings,
+            {"default": {"path": "mcp", "auto_register": True}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[],
+        )
+        assert W005_AUTO_REGISTER_ANONYMOUS in ids
 
-    def test_global_max_tier_capping_a_route_below_its_ceiling_is_soft(self) -> None:
+    def test_auto_discover_true_is_soft(self, settings: Any) -> None:
+        """`auto_discover` alone carries no privilege -> W006 (SOFT)."""
+        ids = _audit_ids(
+            settings,
+            {"default": {"path": "mcp", "auto_discover": True}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[],
+        )
+        assert W006_AUTO_DISCOVER_ENABLED in ids
+
+    def test_global_max_tier_capping_a_route_below_its_ceiling_is_soft(self, settings: Any) -> None:
         """`min(token, route_ceiling, FRISIAN_MCP_MAX_TIER)` — `min` narrows only.
 
         Where a global `MAX_TIER` caps a route below its declared `highest_tier`,
-        the operator's `admin` route is silently inert. SOFT tells them why.
+        the operator's `admin` route is silently inert. W007 (SOFT) tells them why.
         """
-        raise NotImplementedError
+        ids = _audit_ids(
+            settings,
+            {"admin": {"path": "mcp/admin", "highest_tier": "admin"}},
+            FRISIAN_MCP_PERMISSION_CLASSES=[IsAuthenticated],
+            FRISIAN_MCP_MAX_TIER="read",
+        )
+        assert W007_MAX_TIER_CAPS_ROUTE in ids
 
-    def test_loud_and_soft_boot_successfully(self) -> None:
-        """`check --deploy` exits zero. Only FATAL refuses."""
-        raise NotImplementedError
+    def test_loud_and_soft_produce_no_fatal(self, settings: Any) -> None:
+        """None of the warning triggers refuses to boot."""
+        from frisian_mcp.route_audit import raise_on_fatal_route_config
+
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = [IsAuthenticatedOrReadOnly]
+        settings.FRISIAN_MCP_ROUTES = {
+            "admin": {"path": "mcp/admin", "highest_tier": "admin", "auto_discover": True}
+        }
+        raise_on_fatal_route_config()  # warnings only — must not raise

@@ -318,6 +318,150 @@ def _install_protected_mcp_url() -> bool:
     return True
 
 
+_MCP_ROUTE_URL_ATTR: str = "_frisian_mcp_route_url"
+
+
+def _make_route_mcp_view(cfg: Any) -> Any:
+    """
+    Build the per-route ``McpView`` subclass for one parsed route config.
+
+    The subclass carries the route identity (``_route_name`` / ``_route_config``)
+    that :meth:`~frisian_mcp.views.McpView.post` uses to stamp
+    ``request._mcp_route_view`` and ``request._mcp_effective_tier``, and it
+    overrides the two per-endpoint knobs:
+
+    * ``get_permissions`` — resolved per request through
+      :func:`~frisian_mcp.route_views.route_effective_permission_classes`
+      (BLOCKER-1): a non-empty global setting wins verbatim; with no global
+      classes an ``elevated``/``admin`` route gets ``[IsAuthenticated]`` (rule 3,
+      load-bearing — without it an admin route silently serves anonymous
+      traffic) and ``default`` stays open.
+    * ``_effective_max_tier`` — ``min(FRISIAN_MCP_MAX_TIER, route ceiling)``,
+      where an omitted ``highest_tier`` resolves to the route key's secure
+      default, never to uncapped (ADR-010 §8).
+    """
+    from frisian_mcp.route_views import (  # pylint: disable=import-outside-toplevel
+        _min_tier,
+        resolve_route_ceiling,
+        route_effective_permission_classes,
+    )
+    from frisian_mcp.views import McpView  # pylint: disable=import-outside-toplevel
+
+    class _RouteMcpView(McpView):
+        _route_name = cfg.name
+        _route_config = cfg
+
+        def get_permissions(self) -> list[Any]:
+            return [cls() for cls in route_effective_permission_classes(self._route_config)]
+
+        def _effective_max_tier(self) -> str | None:
+            return _min_tier(
+                getattr(settings, "FRISIAN_MCP_MAX_TIER", None),
+                resolve_route_ceiling(self._route_config),
+            )
+
+    _RouteMcpView.__name__ = f"_RouteMcpView_{cfg.name}"
+    _RouteMcpView.__qualname__ = _RouteMcpView.__name__
+    return _RouteMcpView
+
+
+def _install_route_urls() -> int:
+    """
+    Mount one ``McpView`` subclass per configured route (``FRISIAN_MCP_ROUTES``).
+
+    Patterns are built from :func:`~frisian_mcp.route_views._configured_route_configs`,
+    whose paths are the canonical mapping ``validate_route_paths`` returned —
+    mounting never re-derives normalisation, so validation and mounting cannot
+    drift (PR-5 contract).  Each pattern is exact-match (``^{path}/?$``), so
+    shared-prefix nesting between routes (``mcp`` / ``mcp/elevated``) resolves
+    by exactness rather than pattern order.  A tier absent from the setting is
+    not mounted at all — no URL, no handler (ADR-010 §4).
+
+    Idempotent via the ``_MCP_ROUTE_URL_ATTR`` sentinel.  Returns the number of
+    routes mounted by this call.
+    """
+    if not getattr(settings, "FRISIAN_MCP_ROUTES", None):
+        return 0
+    if not getattr(settings, "ROOT_URLCONF", None):
+        return 0
+
+    from django.urls import (  # pylint: disable=import-outside-toplevel
+        clear_url_caches,
+        get_resolver,
+        re_path,
+    )
+
+    from frisian_mcp.route_views import (  # pylint: disable=import-outside-toplevel
+        _configured_route_configs,
+    )
+
+    resolver = get_resolver()
+    if any(getattr(p, _MCP_ROUTE_URL_ATTR, False) for p in resolver.url_patterns):
+        return 0
+
+    installed = 0
+    for cfg in _configured_route_configs().values():
+        pattern = re_path(rf"^{re.escape(cfg.path)}/?$", _make_route_mcp_view(cfg).as_view())
+        setattr(pattern, _MCP_ROUTE_URL_ATTR, True)
+        resolver.url_patterns.insert(0, pattern)
+        installed += 1
+
+    if installed:
+        clear_url_caches()
+    return installed
+
+
+def _install_gateway_urls() -> None:
+    """
+    Mount the MCP gateway surface — per-route views or the legacy mounts.
+
+    PR-7: with ``FRISIAN_MCP_ROUTES`` configured, the routes ARE the gateway
+    surface — one exact-match mount per configured route, nothing else.  A tier
+    absent from the setting is not mounted (ADR-010 §4), so the legacy
+    single-path mount, extra paths, and the protected path are skipped: each
+    would re-expose the full unfiltered registry beside the deny-carved routes
+    and silently defeat every carve-out.  When ``FRISIAN_MCP_ROUTES`` is unset,
+    the legacy mounts run exactly as before.
+    """
+    if getattr(settings, "FRISIAN_MCP_ROUTES", None):
+        route_count = _install_route_urls()
+        if route_count:
+            logger.debug(
+                "frisian_mcp: auto-registered %d per-route McpView mount(s)",
+                route_count,
+            )
+        for _ignored in ("FRISIAN_MCP_EXTRA_PATHS", "FRISIAN_MCP_PROTECTED_PATH"):
+            if getattr(settings, _ignored, None):
+                logger.warning(
+                    "frisian_mcp: %s is ignored while FRISIAN_MCP_ROUTES is "
+                    "configured — it would mount the full unfiltered tool "
+                    "surface beside the per-route views. Declare the path "
+                    "as a route instead.",
+                    _ignored,
+                )
+        return
+
+    if _install_mcp_url():
+        logger.debug(
+            "frisian_mcp: auto-registered McpView URL at path %r",
+            getattr(settings, "FRISIAN_MCP_PATH", "mcp").strip("/"),
+        )
+
+    extra_count = _install_extra_mcp_paths()
+    if extra_count:
+        logger.debug(
+            "frisian_mcp: auto-registered McpView at %d extra path(s): %s",
+            extra_count,
+            getattr(settings, "FRISIAN_MCP_EXTRA_PATHS", []),
+        )
+
+    if _install_protected_mcp_url():
+        logger.debug(
+            "frisian_mcp: auto-registered auth-required McpView at path %r",
+            getattr(settings, "FRISIAN_MCP_PROTECTED_PATH", "").strip("/"),
+        )
+
+
 def _install_oauth_urls() -> bool:
     """
     Auto-register OAuth endpoint URLs when ``frisian_mcp.contrib.oauth`` is installed.
@@ -795,25 +939,7 @@ class FrisianMcpConfig(AppConfig):
                 TRAILING_SLASH_MIDDLEWARE_PATH,
             )
 
-        if _install_mcp_url():
-            logger.debug(
-                "frisian_mcp: auto-registered McpView URL at path %r",
-                getattr(settings, "FRISIAN_MCP_PATH", "mcp").strip("/"),
-            )
-
-        extra_count = _install_extra_mcp_paths()
-        if extra_count:
-            logger.debug(
-                "frisian_mcp: auto-registered McpView at %d extra path(s): %s",
-                extra_count,
-                getattr(settings, "FRISIAN_MCP_EXTRA_PATHS", []),
-            )
-
-        if _install_protected_mcp_url():
-            logger.debug(
-                "frisian_mcp: auto-registered auth-required McpView at path %r",
-                getattr(settings, "FRISIAN_MCP_PROTECTED_PATH", "").strip("/"),
-            )
+        _install_gateway_urls()
 
         if _install_oauth_urls():
             logger.debug("frisian_mcp: auto-registered OAuth URLs at /oauth/")
@@ -941,11 +1067,24 @@ class FrisianMcpConfig(AppConfig):
         # See PKG-9.
         startup_print: bool = getattr(settings, "FRISIAN_MCP_STARTUP_PRINT", True)
         mcp_path = getattr(settings, "FRISIAN_MCP_PATH", "mcp").strip("/")
+        # Under FRISIAN_MCP_ROUTES the legacy path is not mounted (PR-7); name
+        # the actual route mounts in the summary instead of a path that 404s.
+        if getattr(settings, "FRISIAN_MCP_ROUTES", None):
+            from frisian_mcp.route_views import (  # pylint: disable=import-outside-toplevel
+                _configured_route_configs,
+            )
+
+            _route_paths = ", ".join(
+                f"/{cfg.path}/" for cfg in _configured_route_configs().values()
+            )
+            mcp_path_display = _route_paths or f"/{mcp_path}/"
+        else:
+            mcp_path_display = f"/{mcp_path}/"
         if tool_defs:
             logger.info("frisian_mcp: auto-discovery registered %d tools", len(tool_defs))
             if startup_print:
                 print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
-                    f"[frisian-mcp] registered {len(tool_defs)} tools at /{mcp_path}/",
+                    f"[frisian-mcp] registered {len(tool_defs)} tools at {mcp_path_display}",
                     flush=True,
                 )
         else:
@@ -955,7 +1094,7 @@ class FrisianMcpConfig(AppConfig):
             )
             if startup_print:
                 print(  # noqa: T201 — conditionally-on startup summary; see PKG-9
-                    f"[frisian-mcp] registered 0 tools at /{mcp_path}/ "
+                    f"[frisian-mcp] registered 0 tools at {mcp_path_display} "
                     "(use @mcp_tool for manual registration if you rely on @api_view FBVs)",
                     flush=True,
                 )
