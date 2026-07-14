@@ -57,7 +57,7 @@ Add frisian-mcp to your Claude Code MCP config. The config file is at `~/.claude
   "mcpServers": {
     "frisian-mcp": {
       "type": "http",
-      "url": "https://mcp.frisian-mcp.com/mcp",
+      "url": "https://mcp.frisian-mcp.com/mcp/",
       "headers": {
         "Authorization": "Bearer <your-token>"
       }

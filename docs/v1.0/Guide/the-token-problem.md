@@ -57,17 +57,17 @@ The dispatcher pattern collapses many underlying operations into a small number 
 | Approach | Tools exposed | Schema tokens |
 |---|---|---|
 | Flat (raw API) | 1,967 | ~490,000 |
-| `FRISIAN_MCP_AUTODISPATCH = True` | ~200 | ~60,000 |
-| `FRISIAN_MCP_DISPATCH_GROUPS` | 13 | ~2,000–4,000 |
+| `FRISIAN_MCP_DISPATCH_GROUPS` (one group per resource) | ~200 | ~60,000 |
+| `FRISIAN_MCP_DISPATCH_GROUPS` (grouped by domain) | 13 | ~2,000–4,000 |
 
 A 99%+ reduction at the schema level. The agent's full reasoning budget is preserved.
 
-The two configuration paths differ in operator effort versus precision:
+The two configuration paths differ in operator effort versus control:
 
-- **`FRISIAN_MCP_AUTODISPATCH`** automatically groups by resource. One dispatcher per resource, no operator decisions required. Useful starting point.
-- **`FRISIAN_MCP_DISPATCH_GROUPS`** lets the operator define logical domain groupings (e.g. "all DCIM resources under one dispatcher"). More precise compression at the cost of explicit configuration.
+- **`FRISIAN_MCP_DISPATCH_GROUPS`** lets the operator declare logical groupings in settings (e.g. "all DCIM resources under one dispatcher"). Coarser groups compress more; finer groups stay closer to the flat surface. No code required.
+- **`@mcp_dispatcher`** registers a hand-written dispatcher in host code, for full control over a tool's name, description, and action set — at the cost of writing the dispatcher.
 
-Both compose. A project can use auto-dispatch for most resources and explicit groups for cross-resource concerns.
+Both compose. A project can declare groups for most resources and hand-write a `@mcp_dispatcher` for cross-resource concerns.
 
 ### Real Numbers
 
@@ -234,7 +234,7 @@ For a small Django app with a handful of ViewSets, none of the three problems is
 
 For medium applications, default pagination plus `@mcp_heavy` on any list endpoint that could return more than a few dozen records is the practical baseline. Write-path filtering (`@mcp_light`) is applied automatically by default — no additional configuration is needed unless you need to customize which fields appear in the lean envelope.
 
-For large multi-app applications — the kind of system where MCP is most valuable, because the surface is too large for an agent to navigate without help — the dispatcher pattern is a requirement, not an optimization. `FRISIAN_MCP_AUTODISPATCH = True` is the simplest starting point. Move to `FRISIAN_MCP_DISPATCH_GROUPS` once the natural domain boundaries are clear. Pair with `@mcp_heavy` on list endpoints and rely on the `@mcp_light` lean default for write operations.
+For large multi-app applications — the kind of system where MCP is most valuable, because the surface is too large for an agent to navigate without help — the dispatcher pattern is a requirement, not an optimization. `FRISIAN_MCP_DISPATCH_GROUPS` is the simplest starting point — declare a group per app or domain, and refine the boundaries as they become clear. Pair with `@mcp_heavy` on list endpoints and rely on the `@mcp_light` lean default for write operations.
 
 ---
 
@@ -242,7 +242,7 @@ For large multi-app applications — the kind of system where MCP is most valuab
 
 The MCP community has draft proposals addressing related problems:
 
-- **SEP-2084** (Primitive Grouping) — formalizes a way to group tools at the protocol level. As of late April 2026 this remains in draft with active discussion.
+- **SEP-2084** (Primitive Grouping) — proposes a way to group tools at the protocol level; it remains under active working-group discussion rather than a finalized part of the spec.
 - **SEP-1300** (Tool Filtering) — would let clients request a filtered subset of tools at connection time.
 - **SEP-993** (Namespaces) — addresses tool naming collisions across servers.
 

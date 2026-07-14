@@ -62,7 +62,7 @@ For a server with 20 tools, this is a few thousand tokens. Manageable. The agent
 
 For a server with 2,000 tools, this can be hundreds of thousands of tokens. The tool list alone exceeds the agent's available context. The agent cannot do useful work because there is no context budget left.
 
-This is the core problem frisian-mcp addresses with the dispatcher pattern, documented separately as ADR 002 and explained in detail in "The Token Problem at MCP Scale." Understanding the `tools/list` mechanic is the foundation for understanding why those design choices matter.
+This is the core problem frisian-mcp addresses with the dispatcher pattern, documented separately in [ADR-002](../../ADR/adr-002-dispatcher-pattern.md) and explained in detail in "The Token Problem at MCP Scale." Understanding the `tools/list` mechanic is the foundation for understanding why those design choices matter.
 
 ---
 

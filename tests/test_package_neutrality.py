@@ -65,6 +65,19 @@ _LEGACY_ALLOWLIST = frozenset(
     }
 )
 
+# Python 3.12+ emits f-string literal text as FSTRING_MIDDLE rather than
+# STRING (and 3.14+ does the same for t-strings); older versions lack the
+# attribute entirely.
+_STRING_TOKEN_TYPES = frozenset(
+    tok_type
+    for tok_type in (
+        tokenize.STRING,
+        getattr(tokenize, "FSTRING_MIDDLE", None),
+        getattr(tokenize, "TSTRING_MIDDLE", None),
+    )
+    if tok_type is not None
+)
+
 _THIS_FILE = "tests/test_package_neutrality.py"
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCAN_ROOTS = ("src", "tests")
@@ -86,7 +99,7 @@ def _offending_tokens(path: Path) -> list[tuple[int, str, str]]:
         for tok in tokens:
             if tok.type == tokenize.COMMENT:
                 continue  # provenance comments are allowed
-            if tok.type not in (tokenize.NAME, tokenize.STRING):
+            if tok.type != tokenize.NAME and tok.type not in _STRING_TOKEN_TYPES:
                 continue
             match = _VENDOR_RE.search(tok.string)
             if match:

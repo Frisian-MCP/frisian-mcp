@@ -44,17 +44,7 @@ INSTALLED_APPS = [
 FRISIAN_MCP_AUTODISCOVER = True  # expose all DRF ViewSets automatically
 ```
 
-You do **not** need to edit `urls.py` — the package auto-registers the endpoint at `FRISIAN_MCP_PATH` (default `mcp/`) from `AppConfig.ready()`. Mount it manually only if you want a custom location beyond `FRISIAN_MCP_PATH`, and if you do, include the package URLs rather than wiring `McpView` yourself so you get the full URL set:
-
-```python
-# urls.py — optional; only if you are NOT relying on FRISIAN_MCP_PATH auto-registration
-from django.urls import include, path
-
-urlpatterns = [
-    path('mcp/', include('frisian_mcp.urls')),
-    ...
-]
-```
+You do **not** need to edit `urls.py` — the package auto-registers the endpoint at `FRISIAN_MCP_PATH` (default `mcp/`) from `AppConfig.ready()`. To serve it at a different path, set `FRISIAN_MCP_PATH` (e.g. `FRISIAN_MCP_PATH = 'api/mcp'`); to expose the same surface at additional paths, use `FRISIAN_MCP_EXTRA_PATHS`. Adding your own `urls.py` entry is unnecessary, and mounting one at the same path would double-register the endpoint.
 
 Connect your MCP client to `https://your-domain.com/mcp/`. That's the full install for a brownfield app with existing ViewSets.
 

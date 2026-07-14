@@ -176,13 +176,13 @@ These numbers are what the token efficiency claim in section 5 is grounded in.
 
 ### 7. The SEP-2084 context
 
-The MCP community recognized this problem. **SEP-2084 (Primitive Grouping)** was a formal spec proposal to solve tool overload at the protocol level — grouping tools so agents don't receive a flat, unbounded list at session start. It was rejected by the AAIF in late April 2026.
+The MCP community recognized this problem. **SEP-2084 (Primitive Grouping)** is a spec proposal to solve tool overload at the protocol level — grouping tools so agents don't receive a flat, unbounded list at session start. As of this writing it remains under active working-group discussion rather than adopted into the spec.
 
 frisian-mcp's dispatcher pattern solves the same problem today, at the application layer, without waiting for spec consensus and without requiring client-side changes. The dispatcher works in the existing MCP specification as ratified.
 
-The distinction is worth understanding: SEP-2084 would have given clients a protocol hint about groupings. The dispatcher gives agents a navigable tool surface they can explore autonomously — `action=help` returns the resource/action tree on demand, context is consumed only for what the agent actually needs, and the pattern composes across any DRF application without custom tooling.
+The distinction is worth understanding: SEP-2084 would give clients a protocol hint about groupings. The dispatcher gives agents a navigable tool surface they can explore autonomously — `action=help` returns the resource/action tree on demand, context is consumed only for what the agent actually needs, and the pattern composes across any DRF application without custom tooling.
 
-The rejection of SEP-2084 does not leave a gap. The application-layer solution is already running in production.
+Whether or not a grouping primitive is eventually adopted, there is no gap to wait on — the application-layer solution is already running in production.
 
 ---
 

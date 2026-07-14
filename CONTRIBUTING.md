@@ -210,7 +210,7 @@ Coverage is measured but not gated at a hard threshold. Aim to keep coverage abo
 
 frisian-mcp follows a semantic-ish scheme. Apply the bump that matches the change **in the same PR** — reviewers check for it. The rules are ordered by precedence; apply the **first** that matches:
 
-1. **New feature → minor bump.** For example, the per-route permission work was the `1.0.12 → 1.1.0` minor. A feature that also touches `src/` still takes the minor bump — the feature rule wins, and you do **not** additionally apply the patch rule.
+1. **New feature → minor bump.** For example, the per-route permission work was the `1.0.12 → 1.1.0` minor; subsequent `src/` fixes on top of it then advanced the patch level (the current release is `1.1.1`). A feature that also touches `src/` still takes the minor bump — the feature rule wins, and you do **not** additionally apply the patch rule.
 2. **Any *non-feature* change that touches `src/`** (bug fix, refactor, performance) **→ patch bump of `+0.0.1`** (`1.1.0 → 1.1.1 → 1.1.2 …`), required even for a one-line fix.
 3. **A change that does not touch `src/` does not bump.** Changes confined to `tests/`, `docs/`, or tooling/config leave the version untouched.
 

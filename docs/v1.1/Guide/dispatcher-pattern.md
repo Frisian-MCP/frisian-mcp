@@ -73,7 +73,7 @@ The dispatcher extracts `resource` and `action`, locates the corresponding ViewS
 
 ## Configuration
 
-Two configuration paths are available. They can be used together.
+frisian-mcp offers two ways to build dispatchers, which can be used together: `FRISIAN_MCP_DISPATCH_GROUPS` (settings-driven, below) and `@mcp_dispatcher` (hand-written in host code — see Explicit Dispatcher Registration).
 
 ### FRISIAN_MCP_DISPATCH_GROUPS
 
@@ -96,34 +96,11 @@ Resources not listed in any group remain as flat tools. This means partial adopt
 
 **Choosing group boundaries:** Natural domain boundaries make the best groups. A DRF application structured around apps — each app with its own models and ViewSets — typically maps cleanly. Group by app. Resources within the same app are usually related enough that an agent working on one may need others; keeping them in one group reduces help calls.
 
-### FRISIAN_MCP_AUTODISPATCH
+### Granularity
 
-Automatic grouping with no operator configuration required.
+`FRISIAN_MCP_DISPATCH_GROUPS` controls how aggressively you compress. Coarse groups (one per domain or app) give the largest reduction — a 200-operation application grouped into 6 domains exposes 6 tools. Finer groups (closer to one per resource) compress less but keep the tool surface nearer the underlying API. Group the domains you want to compress and leave the rest as flat tools; partial adoption is safe.
 
-```python
-FRISIAN_MCP_AUTODISPATCH = True
-```
-
-When `FRISIAN_MCP_AUTODISPATCH = True`, frisian-mcp automatically creates one dispatcher per resource. A resource named `device` becomes a dispatcher that wraps all device operations: `device_list`, `device_create`, `device_retrieve`, `device_update`, `device_partial_update`, `device_destroy`, and any `@action` methods on the DeviceViewSet.
-
-Auto-dispatch reduces the tool count significantly but not as dramatically as explicit groups: one dispatcher per resource versus one dispatcher per domain. A 200-operation application with 40 resources auto-dispatched exposes 40 tools; the same application with 6 explicit groups exposes 6 tools.
-
-Auto-dispatch is the right starting point. Move to explicit groups once you understand the natural domain boundaries in your application.
-
-### Composing Both
-
-The two settings compose. A project can define explicit groups for high-value domains and let auto-dispatch handle the rest:
-
-```python
-FRISIAN_MCP_AUTODISPATCH = True
-
-FRISIAN_MCP_DISPATCH_GROUPS = {
-    'dcim': ['device', 'rack', 'interface', 'cable', 'location', 'site'],
-    'ipam': ['ipaddress', 'prefix', 'vlan', 'vrf', 'asn'],
-}
-```
-
-Resources covered by an explicit group are routed through that group's dispatcher. Resources not covered by any explicit group are auto-dispatched.
+For a dispatcher whose name, description, and action set you want to control directly — rather than deriving from resource prefixes — register one explicitly in host code with `@mcp_dispatcher` (next section). The two approaches compose: declare `FRISIAN_MCP_DISPATCH_GROUPS` for most resources and hand-write a `@mcp_dispatcher` for cross-resource concerns.
 
 ---
 

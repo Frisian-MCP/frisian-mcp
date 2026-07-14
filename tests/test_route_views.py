@@ -250,6 +250,32 @@ class TestPruneSites:
             {"item_list", "item_create", "order_list"}
         )
 
+    @override_settings(FRISIAN_MCP_TOOL_NAME_SEPARATOR=SEP)
+    def test_carved_group_discovery_has_no_action_enum_to_leak(
+        self, registry: ToolRegistry
+    ) -> None:
+        """A rebuilt group dispatcher lists a free-form schema — no action enum (WI-2).
+
+        Group dispatchers deliberately do not enumerate resources/actions in
+        their tools/list schema (``build_group_input_schema``), so ``dispatcher_meta``
+        is ``None`` for them by construction (unlike ``@mcp_dispatcher``).  There
+        is therefore no action enum for the rebuild to carry or prune, and no
+        above-tier action can leak via discovery.  Tier/carve-out enforcement for
+        a group lives in ``action="help"`` (below) and in per-member dispatch.
+        """
+        view = RouteView.build(registry, _cfg(allow=("*",), deny=("catalog:item",)))
+        listed = {t["name"]: t for t in view.list_tools(max_tier="read")}
+        schema = listed["catalog"]["inputSchema"]
+        assert "enum" not in schema["properties"]["action"]
+
+    @override_settings(FRISIAN_MCP_TOOL_NAME_SEPARATOR=SEP)
+    def test_carved_group_help_omits_denied_resource(self, registry: ToolRegistry) -> None:
+        """action='help' on a partially-denied group omits the denied resource."""
+        view = RouteView.build(registry, _cfg(allow=("*",), deny=("catalog:item",)))
+        result = view.dispatch(_req(), "catalog", {"action": "help"})
+        assert "order" in result["resources"]
+        assert "item" not in result["resources"]
+
 
 # ---------------------------------------------------------------------------
 # Dispatch parity / error parity (WI-1)

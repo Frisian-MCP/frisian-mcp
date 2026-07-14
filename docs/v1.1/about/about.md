@@ -58,13 +58,13 @@ In this model, agents are first-class users.
 
 This is not a framework. It's a Django package. Install it, register your ViewSets, and it works.
 
-This is not opinionated about your data models. It introspects your OpenAPI schema and builds MCP tools dynamically. Your models, your serializers, your permissions.
+This is not opinionated about your data models. It introspects your DRF routers, ViewSets, and serializers and builds MCP tools dynamically. Your models, your serializers, your permissions.
 
 ## How It Works
 
 frisian-mcp uses Django's existing infrastructure:
 
-- **Discovery backend:** Reads your DRF OpenAPI schema to find ViewSets and actions (intentionally blocks UI ViewSets)
+- **Discovery backend:** Introspects your DRF routers and ViewSets to find actions (intentionally blocks UI ViewSets)
 - **Invocation backend:** Routes MCP calls to your ViewSet methods
 - **Permission backend:** Uses Django's permission system to filter exposed operations
 

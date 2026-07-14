@@ -111,7 +111,11 @@ class MyPermissionAdapter:
         """
         try:
             return frozenset(str(p) for p in user.get_all_permissions())
-        except Exception:
+        except Exception as exc:  # narrow this to your backend's expected errors
+            logger.warning(
+                "Permission adapter failed for %r; returning no capabilities (fail-closed): %s",
+                user, exc,
+            )
             return frozenset()
 
     def is_unrestricted(self, user) -> bool:

@@ -33,7 +33,7 @@ guide — both docs already describe the feature; the implementation now matches
 
 ## v0.9.0 — 2026-05
 
-The dispatcher release. Adds the `FRISIAN_MCP_DISPATCH_GROUPS` pattern, `FRISIAN_MCP_AUTODISPATCH`, URL auto-registration, and a complete test suite now at 978 passing tests.
+The dispatcher release. Adds the `FRISIAN_MCP_DISPATCH_GROUPS` pattern, URL auto-registration, and a complete test suite now at 978 passing tests.
 
 ### New: FRISIAN_MCP_DISPATCH_GROUPS
 
@@ -50,10 +50,6 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 Token arithmetic validated against a 1,967-tool Django application: 5 dispatcher groups replace 1,967 flat tool schemas. Schema token load drops from ~490,000 tokens to ~2,000–4,000 tokens — a 99%+ reduction. Resources not included in any group remain as flat tools with no breaking change.
 
 Each dispatcher accepts `action=help` to return the full resource/action tree for that group. Tool schemas are loaded lazily, only when the agent is about to use them.
-
-### New: FRISIAN_MCP_AUTODISPATCH
-
-Automatic resource-level dispatching without manual group configuration. Set `FRISIAN_MCP_AUTODISPATCH = True` to group all discovered tools by resource name automatically. One dispatcher per resource rather than one tool per action.
 
 ### New: URL auto-registration
 
