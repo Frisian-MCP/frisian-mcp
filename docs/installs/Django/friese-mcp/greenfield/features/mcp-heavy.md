@@ -1,7 +1,7 @@
 # Feature: @mcp_heavy — Large-Response Negotiation
 
 **Audience:** Developers working with tools that return large datasets  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 

@@ -1,7 +1,7 @@
 # Feature: @mcp_resource, @mcp_ignore, Permission Tiers & Settings Reference
 
 **Audience:** Developers configuring frisian-mcp in production  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 

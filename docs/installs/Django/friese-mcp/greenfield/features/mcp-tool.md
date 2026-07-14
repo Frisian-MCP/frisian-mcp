@@ -1,7 +1,7 @@
 # Feature: @mcp_tool — Manual Tool Registration
 
 **Audience:** Developers registering custom tools or function-based views  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 

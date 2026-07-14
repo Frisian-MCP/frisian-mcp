@@ -1,7 +1,7 @@
 # Feature: @mcp_dispatcher + @mcp_action
 
 **Audience:** Developers managing large API surfaces  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 

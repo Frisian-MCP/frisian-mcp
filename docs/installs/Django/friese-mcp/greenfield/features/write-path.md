@@ -1,7 +1,7 @@
 # Feature: Write-Path Response Filtering
 
 **Audience:** Developers managing write-operation token costs  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 

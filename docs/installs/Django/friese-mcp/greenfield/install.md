@@ -2,7 +2,7 @@
 
 **Audience:** Django developers adding MCP gateway support to a new or existing project  
 **Platform:** Django 4.2+ · Django REST Framework 3.14+ · Python 3.11+  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 
