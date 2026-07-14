@@ -23,6 +23,8 @@ Add the following to your agent's `mcp.json`:
 
 This is a demo server and requires no authentication.
 
+> **Security:** Use this endpoint only with non-sensitive test data. Do not send production credentials or confidential payloads through it.
+
 ## Connect an LLM
 
 ### Claude.ai (Anthropic)

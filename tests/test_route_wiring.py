@@ -118,6 +118,15 @@ def _make_registry() -> ToolRegistry:
         is_dispatcher=True,
         group_tool_names=frozenset(members),
     )
+    # Production (apps.py:825) marks group members hidden after installing the
+    # dispatcher: they collapse INTO `catalog` and never appear as flat tools in
+    # tools/list.  Mirror that here so route tests validate the surface the host
+    # actually exposes, not one where members leak alongside their dispatcher.
+    # Hidden entries stay dispatchable by name (registry.py) and inside the
+    # RouteView, so the tier cap is asserted via the dispatcher's action tree
+    # (action='help'), which is how it manifests in production.
+    for m in members:
+        reg.set_hidden(m, True)
     return reg
 
 
@@ -282,19 +291,26 @@ class TestDiscoveryReadsCappedTier:
 
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read_write"))
     def test_write_token_on_default_route_sees_no_write_tools(self, registry: ToolRegistry) -> None:
-        """Secure-default read ceiling hides write tools from discovery."""
+        """Secure-default read ceiling hides write actions from discovery.
+
+        Members are hidden in production, so the top-level surface is just the
+        genuine flat tool `ping` and the `catalog` dispatcher; the read cap
+        manifests in `catalog`'s action tree, which must expose `list` but not
+        `create` on the `item` resource.
+        """
         # `default` omits highest_tier -> secure default ceiling `read`.
         view = _mount(_cfg("default", GATEWAY), registry)
         names = _tool_names(_post_jsonrpc(view, GATEWAY, "tools/list", user=_StubUser()))
-        assert "item_create" not in names
-        assert {"item_list", "order_list", "ping", "catalog"} <= names
+        assert names == {"ping", "catalog"}  # hidden members do not leak as flat tools
+        item_actions = _help_actions(view, GATEWAY, "item")
+        assert "list" in item_actions
+        assert "create" not in item_actions
 
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read_write"))
     def test_same_token_on_read_write_ceiling_sees_writes(self, registry: ToolRegistry) -> None:
-        """A read_write ceiling admits the same token's write tools."""
+        """A read_write ceiling admits the same token's write actions."""
         view = _mount(_cfg("elevated", GATEWAY_ELEVATED, highest_tier="read_write"), registry)
-        names = _tool_names(_post_jsonrpc(view, GATEWAY_ELEVATED, "tools/list", user=_StubUser()))
-        assert "item_create" in names
+        assert "create" in _help_actions(view, GATEWAY_ELEVATED, "item")
 
     @override_settings(
         FRISIAN_MCP_RESOLVE_TIER=_tier_hook("admin"),
@@ -304,8 +320,7 @@ class TestDiscoveryReadsCappedTier:
         """FRISIAN_MCP_MAX_TIER participates in the min()."""
         # admin token, admin-ceiling route, but MAX_TIER=read -> min() wins.
         view = _mount(_cfg("admin", GATEWAY_ADMIN, highest_tier="admin"), registry)
-        names = _tool_names(_post_jsonrpc(view, GATEWAY_ADMIN, "tools/list", user=_StubUser()))
-        assert "item_create" not in names
+        assert "create" not in _help_actions(view, GATEWAY_ADMIN, "item")
 
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read"))
     def test_min_never_widens_a_read_token(self, registry: ToolRegistry) -> None:
@@ -313,8 +328,7 @@ class TestDiscoveryReadsCappedTier:
         # read token on a read_write-ceiling route stays read: the ceiling is
         # a cap, never a grant.
         view = _mount(_cfg("elevated", GATEWAY_ELEVATED, highest_tier="read_write"), registry)
-        names = _tool_names(_post_jsonrpc(view, GATEWAY_ELEVATED, "tools/list", user=_StubUser()))
-        assert "item_create" not in names
+        assert "create" not in _help_actions(view, GATEWAY_ELEVATED, "item")
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +382,9 @@ def _make_tiered_registry() -> ToolRegistry:
         is_dispatcher=True,
         group_tool_names=frozenset(members),
     )
+    # Members hidden to match the production post-group shape (see _make_registry).
+    for m in members:
+        reg.set_hidden(m, True)
     return reg
 
 
@@ -451,15 +468,23 @@ class TestAdminTokenOnReadCeiling:
         assert actions == ["list"]
 
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("admin"))
-    def test_admin_only_member_hidden_from_tools_list_under_read_ceiling(
+    def test_tools_list_exposes_only_the_dispatcher_under_read_ceiling(
         self, tiered_registry: ToolRegistry
     ) -> None:
-        """The admin-tier flat member never appears at `tools/list` under the cap."""
+        """`tools/list` shows only the `catalog` dispatcher; no member leaks, no admin/write.
+
+        Members are hidden in production, so the top-level surface is just the
+        dispatcher.  The admin/write actions (`purge`, `bulk_create`) are absent
+        from `catalog`'s read-capped action tree — the cap does the work, not
+        member visibility.
+        """
         view = _mount(_cfg("default", GATEWAY), tiered_registry)
         names = _tool_names(_post_jsonrpc(view, GATEWAY, "tools/list", user=_StubUser()))
-        assert "item_purge" not in names
-        assert "item_bulk_create" not in names
-        assert "item_list" in names
+        assert names == {"catalog"}
+        actions = _help_actions(view, GATEWAY, "item")
+        assert "purge" not in actions
+        assert "bulk_create" not in actions
+        assert "list" in actions
 
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("admin"))
     def test_admin_token_dispatch_time_tier_is_capped_to_read(

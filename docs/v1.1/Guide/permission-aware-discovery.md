@@ -15,7 +15,7 @@ By default, frisian-mcp exposes the same tool surface to every caller of a given
 This serves two related goals:
 
 1. **Agent focus** — an agent assigned a narrow task works from a narrow surface. It does not need to reason about or navigate through operations unrelated to its task.
-2. **Blast radius reduction** — out-of-scope tools are unknown to the agent, not merely forbidden. A compromised or prompt-injected agent cannot be steered toward operations that are not in its context.
+2. **Context reduction** — out-of-scope tools are absent from the agent's `tools/list`, so a compromised or prompt-injected agent is much less likely to be steered toward them. This shrinks the surface an agent is *aware* of; it is **not** an execution boundary — a caller that already knows or guesses a tool name can still attempt to invoke it, so execution must be enforced separately (see below).
 
 > **Important:** This feature controls tool *visibility* (discovery), not *execution* enforcement. Read [Security Guidance](permission-aware-discovery-security.md) before deploying this feature in production.
 
@@ -207,7 +207,7 @@ If `backend_action` is missing on a non-CRUD action and `FRISIAN_MCP_PERMISSION_
 
 ## V1 Scope and Limitations
 
-- **Content-type + action granularity only.** Discovery filters at the model level, not the object level. An agent scoped to "devices in region X" sees device tools, not only region-X device tools. Object-level constraints are enforced automatically at execution time by the host backend's query restriction machinery.
+- **Content-type + action granularity only.** Discovery filters at the model level, not the object level. An agent scoped to "devices in region X" sees device tools, not only region-X device tools. Object-level authorization is **not** provided by this feature and is not automatic in Django — the host application must enforce it during execution (for example per-user queryset scoping such as Nautobot's `restrict()`, or explicit object-permission checks). Discovery filtering does not substitute for that.
 - **Class-based dispatchers are not filtered.** Only group-based dispatcher tools participate in the capability filter. This limitation is documented in ADR-008 and will be addressed in V2.
 - **Anonymous callers.** Anonymous users are not authenticated, so `get_capabilities()` returns an empty set under most auth backends. An anonymous caller will see no tools when `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY` is enabled.
 

@@ -130,6 +130,17 @@ class TestLegacyKeyRejection:
         assert "auto_discover" in str(excinfo.value)
         assert "auto_register" in str(excinfo.value)
 
+    def test_non_string_unknown_key_raises_improperly_configured(self) -> None:
+        """A non-string key yields ImproperlyConfigured, not a TypeError from sorted().
+
+        ``sorted(unknown)`` over mixed str/int keys would raise TypeError and
+        bypass the promised friendly diagnostic; the (type, repr) sort key keeps
+        it well-formed.
+        """
+        with pytest.raises(ImproperlyConfigured) as excinfo:
+            parse_route_config("default", {"path": "/mcp", 1: True})
+        assert "unknown key" in str(excinfo.value)
+
     def test_hyphen_variant_rejected(self) -> None:
         """A hyphenated alias must not silently work."""
         with pytest.raises(ImproperlyConfigured):

@@ -56,7 +56,7 @@ There are additional methods for resources (file-like data the agent can read), 
 
 This is where the practical implications of MCP become important for server design.
 
-When the client receives the `tools/list` response, it loads every tool's full schema into the agent's context window. These schemas remain in context for the rest of the session. The agent uses them to decide which tools to call and how to construct the arguments.
+When the client receives the `tools/list` response, most clients load every returned tool schema into the agent's context window, where they typically remain for the rest of the session. This is common host/client behavior, not a protocol guarantee — MCP defines `tools/list` (and its pagination), but does not require a client to keep every schema in context. Where clients do, the agent uses those schemas to decide which tools to call and how to construct the arguments.
 
 For a server with 20 tools, this is a few thousand tokens. Manageable. The agent has plenty of context budget remaining for actual reasoning.
 
@@ -116,7 +116,7 @@ In practice, AI clients have converged on OAuth 2.0:
 - **GPT/ChatGPT Actions** also use OAuth 2.0 Authorization Code + PKCE, with similar discovery requirements but a different redirect URI pattern.
 - **Coding agents** (Cursor, Windsurf, etc.) typically support both OAuth and simpler Bearer token authentication, configurable per server.
 
-frisian-mcp ships `frisian_mcp.contrib.oauth` to handle the full OAuth 2.0 flow for any host application without requiring custom auth code. The contrib module implements all the discovery endpoints, the authorization flow with PKCE verification, and dynamic client registration. Operators configure `FRISIAN_MCP_OAUTH_ISSUER` and the rest works automatically.
+frisian-mcp ships `frisian_mcp.contrib.oauth` to handle OAuth 2.0 for host applications without custom auth code. The contrib module implements the discovery endpoints, the authorization-code flow with PKCE verification, and dynamic client registration. Which flow a given client uses and what discovery it performs is client-dependent and changes over time, so check each client's current documentation; operators configure `FRISIAN_MCP_OAUTH_ISSUER` to get started.
 
 For simpler use cases, `frisian_mcp.contrib.tokens` provides Bearer token authentication with database-backed token management.
 
@@ -157,7 +157,7 @@ That is the developer-facing surface. The protocol mechanics happen below.
 
 ## Common Misconceptions
 
-**"MCP is an AI feature."** It is a protocol. The fact that AI clients are the primary consumers does not make the protocol AI-specific. An MCP server is just a server that speaks JSON-RPC over HTTP with a specific schema. Anything that can speak JSON-RPC can be an MCP client — including command-line tools, test harnesses, and other automation.
+**"MCP is an AI feature."** It is a protocol. The fact that AI clients are the primary consumers does not make the protocol AI-specific. An MCP server is just a server that speaks JSON-RPC with a specific schema and lifecycle. Any implementation that speaks MCP over JSON-RPC — command-line tools, test harnesses, other automation — can be an MCP client; a *generic* JSON-RPC client is not automatically one, because it must also implement MCP's `initialize`/lifecycle and message contract.
 
 **"MCP servers run AI models."** They do not. The AI is on the client side. The server provides tools the AI can use. frisian-mcp running on a Django backend is just a normal Django process — there is no model inference happening server-side.
 
@@ -178,7 +178,7 @@ If you are evaluating frisian-mcp:
 If you want to go deeper on the protocol itself:
 
 - The MCP specification is the authoritative reference. Per the Anthropic and Linux Foundation announcements of December 2025, Anthropic donated MCP to the Agentic AI Foundation (AAIF), a fund under the Linux Foundation co-founded with Block and OpenAI and supported by other major vendors, alongside official SDKs in multiple languages. Day-to-day governance is unchanged — the same maintainer ladder and SEP (specification enhancement proposal) process continue under neutral foundation stewardship rather than moving to foundation control.
-- The MCP community publishes specification enhancement proposals (SEPs) for protocol evolution. SEP-2084 (Primitive Grouping) proposes a `Groups` primitive to organize tools, prompts, and resources into named collections — directly targeting the tool-surface-scale problem. As of this writing it is an active proposal under community review, with a chartered interest group; it has not been standardized or merged. Until a grouping primitive lands in the spec, the tool-surface problem frisian-mcp addresses through the dispatcher pattern has no protocol-level solution — which is why the package solves it at the server.
+- The MCP community publishes specification enhancement proposals (SEPs) for protocol evolution. Primitive grouping — organizing tools, prompts, and resources into named collections — is an active area of working-group discussion (tracked in the project's proposal/PR activity and a chartered interest group) rather than a finalized part of the spec. It directly targets the tool-surface-scale problem, but until such a primitive lands in the spec, the problem frisian-mcp addresses through the dispatcher pattern has no protocol-level solution — which is why the package solves it at the server.
 
 frisian-mcp's role is to implement the server side of the protocol cleanly for Django + DRF applications, including solving problems the protocol itself has not yet addressed. Understanding the protocol gives you the foundation to use the package effectively and to understand why specific design decisions were made.
 

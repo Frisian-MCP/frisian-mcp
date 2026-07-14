@@ -247,7 +247,11 @@ def parse_route_config(name: str, raw: Any) -> RouteConfig:
 
     unknown = set(raw) - ROUTE_CONFIG_KEYS
     if unknown:
-        sorted_unknown = sorted(unknown)
+        # Sort by (type name, repr) so a non-string key (e.g. ``{1: True}``)
+        # does not raise TypeError on a mixed-type ``sorted`` and bypass the
+        # promised ImproperlyConfigured — the operator still gets the friendly
+        # unknown-key diagnostic, with the offending key shown.
+        sorted_unknown = sorted(unknown, key=lambda key: (type(key).__name__, repr(key)))
         raise ImproperlyConfigured(
             f"FRISIAN_MCP_ROUTES[{name!r}] contains unknown key(s): "
             f"{sorted_unknown!r}.  Valid keys are "

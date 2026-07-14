@@ -133,8 +133,15 @@ class Command(BaseCommand):
             findings = route_audit.audit_route_surface()
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             # The doctor must finish its other checks even if discovery blows up
-            # on a broken host; surface the failure rather than abort.
-            self._warn_msg(warnings, f"per-route surface audit could not run: {exc}")
+            # on a broken host; record the failure rather than abort.  Under
+            # --strict this is an *error*, not a warning: the whole point of
+            # strict mode is to gate CI here, so an audit that could not run must
+            # not let a strict run exit zero as if the surface were clean.
+            message = f"per-route surface audit could not run: {exc}"
+            if strict:
+                self._fail(errors, message)
+            else:
+                self._warn_msg(warnings, message)
             return
 
         if not findings:
@@ -220,9 +227,7 @@ class Command(BaseCommand):
         tokens_installed = "frisian_mcp.contrib.tokens" in getattr(settings, "INSTALLED_APPS", [])
         oauth_installed = "frisian_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
 
-        token_auth = (
-            "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"  # noqa: S105
-        )
+        token_auth = "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"  # noqa: S105
         oauth_auth = "frisian_mcp.contrib.oauth.authentication.OAuthTokenAuthentication"
 
         if tokens_installed and token_auth not in auth_classes:

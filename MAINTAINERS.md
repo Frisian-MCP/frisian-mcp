@@ -16,7 +16,7 @@ The **Affiliation** column reflects the capacity in which each person maintains 
 | --- | --- | --- |
 | Jeremy Friese  | [Jeremy-Friese](https://github.com/Jeremy-Friese) | Independent |
 | Saleh Abuawad | [salehkabuawad](https://github.com/salehkabuawad) | Independent |
-| Paul Vulf |  [PineappleBun](https://github.com/PineapppleBun) | Independent |
+| Paul Vulf | [PineappleBun](https://github.com/PineappleBun) | Independent |
 
 ## Emeritus
 

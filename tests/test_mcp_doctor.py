@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import StringIO
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from django.conf import settings
@@ -553,6 +554,33 @@ class TestMcpDoctorRouteSurface:
             with override_settings(FRISIAN_MCP_ROUTES=None):
                 Command(stdout=StringIO())._check_route_surface(warnings, errors, strict=True)
         assert not warnings and not errors
+
+    def test_audit_failure_is_error_under_strict_but_warning_otherwise(self) -> None:
+        """A discovery/audit failure must fail --strict, not exit zero as if clean.
+
+        Regression: under --strict an audit that could not run was downgraded to
+        a warning, so a strict CI gate passed despite auditing nothing.
+        """
+        routes = {"default": {"path": "mcp", "allow_list": ["*"]}}
+        with (
+            override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=routes),
+            patch(
+                "frisian_mcp.route_audit.force_tool_discovery",
+                side_effect=RuntimeError("discovery blew up"),
+            ),
+        ):
+            warn_strict: list[str] = []
+            err_strict: list[str] = []
+            Command(stdout=StringIO())._check_route_surface(warn_strict, err_strict, strict=True)
+
+            warn_lax: list[str] = []
+            err_lax: list[str] = []
+            Command(stdout=StringIO())._check_route_surface(warn_lax, err_lax, strict=False)
+
+        assert any("could not run" in e for e in err_strict)
+        assert not warn_strict
+        assert any("could not run" in w for w in warn_lax)
+        assert not err_lax
 
     def test_clean_route_reports_nothing(self) -> None:
         """A route that exposes tools with no dead entries is clean."""

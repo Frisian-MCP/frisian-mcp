@@ -1,6 +1,6 @@
 # Compliance & Standards
 
-frisian-mcp is built on published, widely-adopted specifications. The tables below list every protocol, RFC, and standard implemented by the system. Security-sensitive flows (Bearer token transmission, PKCE, the full OAuth 2.0 authorization suite) follow the relevant RFCs exactly — no shortcuts, no proprietary extensions. This is deliberate: AI agents operate across a wide range of infrastructure and clients, and strict standards compliance is the foundation that makes interoperability reliable.
+frisian-mcp is built on published, widely-adopted specifications. The tables below map the key protocols, RFCs, and standards the package implements to where each is used. The security-sensitive flows (Bearer token transmission, PKCE, the OAuth 2.0 authorization endpoints) are implemented against the referenced RFCs — this table identifies which standard governs which behavior; it is not a formal conformance certification. Standards alignment is deliberate: AI agents operate across a wide range of infrastructure and clients, and following common standards is what makes interoperability reliable.
 
 ---
 

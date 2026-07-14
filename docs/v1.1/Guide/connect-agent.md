@@ -19,10 +19,10 @@ Screenshots for each client are in `connect-agent/` (sibling of this Guide direc
 The live MCP endpoint for the hosted demo instance is:
 
 ```text
-https://mcp.frisian-mcp.com/mcp
+https://mcp.frisian-mcp.com/mcp/
 ```
 
-For self-hosted deployments, the endpoint path is controlled by the `FRISIAN_MCP_PATH` setting in your Django config. The default is `mcp`, giving an endpoint of `https://your-domain.example/mcp`. Some deployments override it — Nautobot installations, for example, commonly mount it at `api/mcp` (`https://your-domain.example/api/mcp`).
+For self-hosted deployments, the endpoint path is controlled by the `FRISIAN_MCP_PATH` setting in your Django config. The default is `mcp`, mounted with a trailing slash — connect to `https://your-domain.example/mcp/`. Some deployments override it — Nautobot installations, for example, commonly mount it at `api/mcp/`. Use the exact slash-terminated path; some MCP clients do not follow the redirect from `/mcp` to `/mcp/` during initialization.
 
 ---
 

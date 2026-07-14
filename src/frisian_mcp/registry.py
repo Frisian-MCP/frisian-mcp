@@ -145,7 +145,13 @@ def _resolve_request_tier(request: Any) -> str:
     """
     stamped: str | None = getattr(request, "_mcp_effective_tier", None)
     if stamped is not None:
-        return str(stamped)
+        # ``_mcp_effective_tier`` already incorporates the endpoint cap by
+        # construction (it is ``min(token_tier, route_ceiling, MAX_TIER)``), so
+        # re-applying the cap is normally a no-op.  Do it anyway as a
+        # defense-in-depth invariant: if the stamp is ever stale or a bug stamps
+        # it above ``_mcp_max_tier``, the endpoint cap still holds and dispatch
+        # cannot be tricked into serving write/admin tools past the ceiling.
+        return _apply_max_tier_cap(str(stamped), request)
 
     hook = _resolve_tier_hook()
     if hook is not None:
