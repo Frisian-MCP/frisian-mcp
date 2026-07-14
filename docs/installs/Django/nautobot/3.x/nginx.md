@@ -239,7 +239,7 @@ curl https://your-nautobot.example.com/backend/healthcheck/
 
 ---
 
-See [Troubleshooting](../../../../troubleshooting/Django/nautobot/3.x/troubleshooting.md) for common problems and solutions including proxy-specific issues.
+See [Troubleshooting](../../../../v1.1/troubleshooting/Django/nautobot/3.x/troubleshooting.md) for common problems and solutions including proxy-specific issues.
 
 ---
 

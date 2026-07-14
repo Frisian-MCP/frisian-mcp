@@ -1,67 +1,75 @@
 """
-Permission adapter that honours ``EXEMPT_VIEW_PERMISSIONS``.
+DEPRECATED — retained only so existing dotted-path settings keep importing.
 
-Some Django applications mark certain models as globally readable via an
-``EXEMPT_VIEW_PERMISSIONS`` setting.  Models listed there are implicitly
-viewable by all authenticated users without an explicit object permission
-being assigned, so their ``"view_<model>"`` capability must be synthesized
-for ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to include the corresponding
-tools in ``tools/list``.
+``ExemptViewPermissionAdapter`` existed because the default adapter used to
+derive capabilities by *enumerating* ``user.get_all_permissions()``, which
+cannot see a host's ``EXEMPT_VIEW_PERMISSIONS`` setting.  On a host with a view
+exemption that produced an **absence lie**: the tool was hidden from discovery
+while the caller could still invoke it by name and receive every row.  This
+adapter patched that gap by synthesizing the missing ``view_*`` capabilities —
+but only for that one host mechanism, and only for that one setting.
 
-This subclass of :class:`~frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter`
-adds that synthesis on top of the standard ``user.get_all_permissions()`` lookup.
+Since v1.1.1 the default
+:class:`~frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter` resolves
+capabilities through ``user.has_perm()``, the same predicate the host itself
+authorizes with.  View exemptions — and custom auth backends, and any future
+host authorization mechanism ``has_perm`` honours — are therefore respected
+**natively**, with no adapter to select and no wildcard to parse.
+
+Migration
+---------
+Delete the setting.  Nothing replaces it::
+
+    # before
+    FRISIAN_MCP_PERMISSION_ADAPTER = (
+        "frisian_mcp.contrib.permissions.exempt_view_adapter.ExemptViewPermissionAdapter"
+    )
+
+    # after — omit it entirely; the default adapter is now correct on
+    #         exemption-using hosts.
+
+.. deprecated:: 1.1.1
+   Subclasses :class:`DjangoPermissionAdapter` and adds nothing.  It will be
+   removed in the next minor release.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
-from django.conf import settings
+import warnings
 
 from frisian_mcp.contrib.permissions.base import DjangoPermissionAdapter
+
+__all__ = ["ExemptViewPermissionAdapter"]
+
+_DEPRECATION_MESSAGE = (
+    "ExemptViewPermissionAdapter is deprecated and no longer does anything: the "
+    "default DjangoPermissionAdapter now resolves capabilities via user.has_perm(), "
+    "which honours EXEMPT_VIEW_PERMISSIONS (and custom auth backends) natively. "
+    "Remove FRISIAN_MCP_PERMISSION_ADAPTER from your settings; nothing replaces it. "
+    "This class will be removed in the next minor release."
+)
 
 
 class ExemptViewPermissionAdapter(DjangoPermissionAdapter):
     """
-    Django permission adapter with ``EXEMPT_VIEW_PERMISSIONS`` support.
+    Deprecated no-op alias of :class:`DjangoPermissionAdapter`.
 
-    Extends :class:`DjangoPermissionAdapter` by synthesizing
-    ``"app_label.view_<model>"`` capabilities for every model listed in
-    ``settings.EXEMPT_VIEW_PERMISSIONS``.  This ensures that tools backed
-    by globally-readable models appear in ``tools/list`` for all authenticated
-    users, matching the implicit read-access semantics of that setting.
+    Behaviour is identical to the default adapter.  It is kept only so that a
+    host whose settings still name this class by dotted path keeps booting; it
+    emits a :class:`DeprecationWarning` on instantiation.
 
-    Supports both the ``"__all__"`` / ``"*"`` shorthand (all installed models
-    become view-capable) and an explicit list of ``"app_label.model_name"``
-    strings.  When the wildcard form is used, models listed in
-    ``settings.EXEMPT_EXCLUDE_MODELS`` are excluded from synthesis — matching
-    the semantics of the host application's own permission enforcement.
-    ``EXEMPT_EXCLUDE_MODELS`` is expected to be a sequence of
-    ``(app_label, model_name)`` tuples (e.g. ``[("auth", "group")]``).
+    Its historical behaviour is not merely redundant now — it would be *wrong*.
+    Synthesizing ``view_*`` capabilities from a wildcard exemption handed every
+    authenticated principal read access to every model, silently defeating
+    per-principal discovery scoping.  ``has_perm`` asks the host for its answer
+    about *this* principal instead.
     """
 
-    def get_capabilities(self, user: Any) -> frozenset[str]:
-        """Return capabilities from Django permissions plus synthesized EXEMPT_VIEW_PERMISSIONS."""
-        base = super().get_capabilities(user)
-        extra: set[str] = set()
-        exempt: list[str] | str = getattr(settings, "EXEMPT_VIEW_PERMISSIONS", [])
-        if exempt in ("__all__", "*"):
-            # All view permissions are globally exempt — add view_<model> for every
-            # installed model so no tool is filtered out on a view-action basis,
-            # but honour EXEMPT_EXCLUDE_MODELS so protected models stay gated.
-            from django.apps import apps  # pylint: disable=import-outside-toplevel
+    def __init__(self) -> None:
+        """Warn that the class is a deprecated no-op, then behave as the default."""
+        warnings.warn(_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2)
 
-            exclude: set[tuple[str, str]] = set(
-                getattr(settings, "EXEMPT_EXCLUDE_MODELS", None) or ()
-            )
-            for model in apps.get_models():
-                meta = model._meta  # pylint: disable=protected-access
-                if (meta.app_label, meta.model_name) not in exclude:
-                    extra.add(f"{meta.app_label}.view_{meta.model_name}")
-        else:
-            for model_label in exempt or []:
-                parts = str(model_label).split(".", 1)
-                if len(parts) == 2:
-                    app_label, model_name = parts
-                    extra.add(f"{app_label}.view_{model_name}")
-        return base | extra
+    # No method overrides: capability resolution is inherited verbatim from
+    # DjangoPermissionAdapter.  The absence of an override IS the deprecation —
+    # this class adds nothing and exists only to keep a stale dotted-path
+    # setting importable for one release.

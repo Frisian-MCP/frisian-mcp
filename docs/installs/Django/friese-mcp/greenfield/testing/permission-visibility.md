@@ -106,4 +106,4 @@ Tier ranks: `read (0) < read_write (1) < admin (2)`
 
 - [Access Control](access-control.md)
 - [Open-World Write Exposure](open-world-write-exposure.md)
-- [Installation & Configuration Reference](../../../../../Reference/installation-configuration-reference.md)
+- [Installation & Configuration Reference](../../../../../v1.1/Reference/installation-configuration-reference.md)

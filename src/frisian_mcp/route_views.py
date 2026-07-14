@@ -233,11 +233,17 @@ def route_effective_permission_classes(route: RouteConfig) -> list[type]:
       ``elevated`` / ``admin`` route gets ``[IsAuthenticated]``.  Rule 3 is
       load-bearing: without it, an ``admin`` route with no global classes would
       silently serve anonymous traffic and nothing else would catch it.
+    * The implicit :data:`LEGACY_ROUTE_NAME` view stays open (``[]``), mirroring
+      the ``default`` carve-out and :func:`resolve_route_ceiling`.  The legacy
+      view exists only when ``FRISIAN_MCP_ROUTES`` is unset and must preserve
+      today's open-by-default behaviour; treating it as an unnamed privileged
+      route (``[IsAuthenticated]``) would report the legacy mount as auth-gated
+      when it is not, and would gate it if a caller ever routes it through here.
     """
     global_classes = _resolve_global_permission_classes()
     if global_classes:
         return list(global_classes)
-    if route.name == "default":
+    if route.name in ("default", LEGACY_ROUTE_NAME):
         return []
     return [IsAuthenticated]
 
@@ -303,7 +309,11 @@ def _list_entries(
     # pylint: disable=import-outside-toplevel
     from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
 
-    max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
+    # ``max_tier is None`` means "no cap" (rank 2, show all) — the intentional
+    # legacy/internal path.  A non-None but UNRECOGNISED tier string fails
+    # CLOSED (rank 0 = read), matching this module's _min_tier convention, so a
+    # garbled cap can never widen visibility to admin-tier tools.
+    max_rank = 2 if max_tier is None else _TIER_RANK.get(max_tier, 0)
     tools: list[dict[str, Any]] = []
     for entry in entries.values():
         if entry.hidden:
@@ -526,10 +536,22 @@ class RouteView:  # pylint: disable=too-many-instance-attributes
         the byte-identical message the global registry raises for a
         never-registered tool (WI-1 error parity).  Flat tools and un-pruned
         dispatchers delegate to :meth:`ToolRegistry.dispatch` — the route entry is
-        the same object, so validation, tier, and permission checks are
-        unchanged.  A *rebuilt* (pruned) group dispatcher is invoked through its
-        route-local closure so denied resources are unroutable; its member calls
-        still re-enter ``registry.dispatch`` for full per-tool enforcement.
+        the same object, so validation, tier, and permission checks are unchanged.
+
+        A *rebuilt* (pruned) group dispatcher is invoked through its route-local
+        closure so denied resources are unroutable.  Calling ``entry.fn`` directly
+        rather than ``registry.dispatch(name)`` bypasses **no** enforcement,
+        because a group dispatcher carries no top-level gate to bypass: it is
+        registered ``permission_tier="read"`` with ``permission_classes=[]``, and
+        ``ToolRegistry.dispatch`` skips the tier check for ``is_dispatcher``
+        entries (per-action tier enforcement is delegated to the invoke closure).
+        The dispatcher's actual enforcement happens *inside* the closure — the
+        ``_mcp_perm_entry_filter`` gate and each member's re-entry into
+        ``registry.dispatch``, which re-runs full per-tool tier + permission +
+        schema validation against the capped ``_mcp_effective_tier``.  This
+        relies on that read/``[]`` registration invariant (``apps.py``
+        ``_install_dispatch_groups``); a group dispatcher carrying a non-trivial
+        tier or permission class would need the shared-enforcement path instead.
         """
         entry = self.entries.get(name)
         if entry is None:

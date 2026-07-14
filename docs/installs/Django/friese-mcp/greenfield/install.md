@@ -133,10 +133,10 @@ No settings are required to get auto-discovery running. The defaults are:
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `frisian_MCP_ENABLED` | `True` | Enable/disable the gateway |
-| `frisian_MCP_AUTODISCOVER` | `True` | Auto-register ViewSet actions on startup |
-| `frisian_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests |
-| `frisian_MCP_SERVER_NAME` | `"frisian-mcp"` | Server name in the `initialize` handshake |
+| `FRISIAN_MCP_ENABLED` | `True` | Enable/disable the gateway |
+| `FRISIAN_MCP_AUTODISCOVER` | `True` | Auto-register ViewSet actions on startup |
+| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests |
+| `FRISIAN_MCP_SERVER_NAME` | `"frisian-mcp"` | Server name in the `initialize` handshake |
 
 A common minimum configuration:
 
@@ -145,10 +145,10 @@ A common minimum configuration:
 
 # Expose read-tier tools to unauthenticated callers.
 # Set to None or "none" to require authentication for all tools.
-frisian_MCP_UNAUTHENTICATED_TIER = "read"
+FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 
 # Optional: name your server
-frisian_MCP_SERVER_NAME = "my-app-mcp"
+FRISIAN_MCP_SERVER_NAME = "my-app-mcp"
 ```
 
 For a full settings reference, see `features/configuration.md`.
@@ -187,7 +187,7 @@ A successful response looks like:
 If `tools` is an empty array, auto-discovery found no ViewSet actions. Check that:
 
 - Your ViewSets are registered in the URL resolver (not just defined)
-- `frisian_MCP_AUTODISCOVER` is not set to `False`
+- `FRISIAN_MCP_AUTODISCOVER` is not set to `False`
 - No `@mcp_ignore` decorator was applied to all ViewSets
 
 ---
@@ -219,7 +219,7 @@ claude mcp add my-app \
   http://localhost:8000/mcp
 ```
 
-See [connect-agent](../../../../Guide/connect-agent.md) for Claude.ai, ChatGPT, and Grok OAuth connection steps.
+See [connect-agent](../../../../v1.1/Guide/connect-agent.md) for Claude.ai, ChatGPT, and Grok OAuth connection steps.
 
 ---
 
@@ -249,7 +249,7 @@ For large APIs (hundreds of ViewSet actions), use dispatchers to keep `tools/lis
 
 Cross-references to the design rationale behind these features:
 
-- [dispatcher-pattern](../../../../Guide/dispatcher-pattern.md)
-- [the-token-problem](../../../../Guide/the-token-problem.md)
-- [read-response-filtering](../../../../Guide/read-response-filtering.md)
-- [write-path-response-filtering](../../../../Guide/write-path-response-filtering.md)
+- [dispatcher-pattern](../../../../v1.1/Guide/dispatcher-pattern.md)
+- [the-token-problem](../../../../v1.1/Guide/the-token-problem.md)
+- [read-response-filtering](../../../../v1.1/Guide/read-response-filtering.md)
+- [write-path-response-filtering](../../../../v1.1/Guide/write-path-response-filtering.md)

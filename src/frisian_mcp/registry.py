@@ -484,7 +484,11 @@ class ToolRegistry:
                 write/delete actions the requesting user lacks permission for.
 
         """
-        max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
+        # ``max_tier is None`` means "no cap" (rank 2, show all).  A non-None but
+        # UNRECOGNISED tier string fails CLOSED (rank 0 = read) so a garbled cap
+        # can never widen visibility to admin-tier tools.  Kept identical to
+        # frisian_mcp.route_views._list_entries — the two must not diverge.
+        max_rank = 2 if max_tier is None else _TIER_RANK.get(max_tier, 0)
 
         # Lazy-import to avoid a circular dependency with backends.dispatcher,
         # which itself imports from this module.

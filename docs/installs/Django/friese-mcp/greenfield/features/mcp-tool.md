@@ -161,7 +161,7 @@ Tools are visible in `tools/list` and callable only up to the caller's effective
 
 | Tier | Set via | Visible to |
 |------|---------|-----------|
-| `read` | default | all callers (including unauthenticated if `frisian_MCP_UNAUTHENTICATED_TIER="read"`) |
+| `read` | default | all callers (including unauthenticated if `FRISIAN_MCP_UNAUTHENTICATED_TIER="read"`) |
 | `read_write` | `write=True` | authenticated callers with `read_write` or `admin` tokens |
 | `admin` | `admin=True` | callers with `admin` tokens only |
 
@@ -191,4 +191,4 @@ class MyAppConfig(AppConfig):
 
 - `features/dispatcher.md` — for grouping many tools into one dispatcher entry point
 - `features/mcp-heavy.md` — for tools that return large responses
-- [The Token Problem](../../../../../Guide/the-token-problem.md) — why tool surface size matters for agent context
+- [The Token Problem](../../../../../v1.1/Guide/the-token-problem.md) — why tool surface size matters for agent context

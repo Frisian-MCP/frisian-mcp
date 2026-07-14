@@ -92,10 +92,10 @@ def _offending_tokens(path: Path) -> list[tuple[int, str, str]]:
             if match:
                 kind = "identifier" if tok.type == tokenize.NAME else "string"
                 hits.append((tok.start[0], kind, match.group(0)))
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        # A file that will not tokenize is a separate failure the test suite
-        # surfaces elsewhere; don't mask it as a neutrality pass or failure.
-        return []
+    except (tokenize.TokenError, IndentationError, SyntaxError) as exc:
+        # Fail loud: the scan covers files pytest never imports, so an
+        # untokenizable file is not guaranteed to surface anywhere else.
+        raise AssertionError(f"Could not tokenize {path}") from exc
     return hits
 
 

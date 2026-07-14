@@ -42,7 +42,7 @@ import logging
 import secrets
 import time
 import uuid
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Container, Generator
 from typing import Any
 
 from django.conf import settings
@@ -652,7 +652,7 @@ def _get_permission_adapter() -> Any:
     return cls()
 
 
-def _make_perm_entry_filter(capabilities: frozenset[str]) -> Any:
+def _make_perm_entry_filter(capabilities: Container[str]) -> Any:
     """
     Return a ``_ToolEntry`` filter callable for the given capability set.
 
@@ -682,7 +682,7 @@ def _make_perm_entry_filter(capabilities: frozenset[str]) -> Any:
 
 
 def _make_perm_action_filter_factory(
-    capabilities: frozenset[str],
+    capabilities: Container[str],
 ) -> Any:
     """
     Build an ``action_filter_factory`` for permission-filtered dispatcher action enums.
@@ -722,9 +722,10 @@ def _ensure_perm_context_on_request(request: Any) -> None:
 
     Sets two attributes:
 
-    * ``_mcp_capabilities`` — ``frozenset[str]`` of Django permission strings
-      the requesting user holds, or ``None`` when permission-aware discovery is
-      disabled or the user is unrestricted (superuser).
+    * ``_mcp_capabilities`` — a ``Container[str]`` of Django permission strings
+      the requesting user holds (lazy: resolved via ``has_perm`` on lookup), or
+      ``None`` when permission-aware discovery is disabled or the user is
+      unrestricted (superuser).
     * ``_mcp_perm_entry_filter`` — a ``(_ToolEntry) -> bool`` callable built
       from the capabilities, or ``None`` for the same conditions.
 
@@ -758,7 +759,7 @@ def _ensure_perm_context_on_request(request: Any) -> None:
         request._mcp_capabilities = None
         request._mcp_perm_entry_filter = None
         return
-    caps: frozenset[str] = adapter.get_capabilities(user)
+    caps: Container[str] = adapter.get_capabilities(user)
     request._mcp_capabilities = caps
     request._mcp_perm_entry_filter = _make_perm_entry_filter(caps)
 
@@ -1041,7 +1042,7 @@ def _handle_tools_list(  # pylint: disable=too-many-locals
     _ensure_perm_context_on_request(request)
     entry_filter = None
     action_filter_factory = None
-    caps: frozenset[str] | None = getattr(request, "_mcp_capabilities", None)
+    caps: Container[str] | None = getattr(request, "_mcp_capabilities", None)
     if caps is not None:
         entry_filter = _make_perm_entry_filter(caps)
         action_filter_factory = _make_perm_action_filter_factory(caps)

@@ -38,6 +38,7 @@ from frisian_mcp.route_grammar import (
     SEVERITY_LOUD,
     SEVERITY_SOFT,
     GrammarError,
+    RouteMatcher,
     ToolSurface,
     parse_entry,
     parse_lists,
@@ -669,6 +670,40 @@ class TestInertDenySeverity:
         findings = matcher.audit(drift_surfaces["drifted"])
         assert findings[0].severity == SEVERITY_LOUD
         assert findings[0].code == CODE_INERT_DENY
+
+    def test_glob_prefix_ending_in_separator_is_loud(
+        self, drift_surfaces: dict[str, ToolSurface]
+    ) -> None:
+        """Regression: ``product_*`` (prefix already ends in the separator) is LOUD.
+
+        The literal prefix is ``product_``; without stripping the trailing
+        separator the survivor probe re-appended one and searched for
+        ``product__`` (double separator), matched nothing, and silently graded
+        this inert deny SOFT — even though ``product_*`` is the most natural way
+        an operator writes the typo and its tools are still exposed.  It must
+        behave identically to ``product*``.
+        """
+        matcher = parse_lists(["*"], ["product_*"])
+        findings = matcher.audit(drift_surfaces["drifted"])
+        assert findings[0].severity == SEVERITY_LOUD
+        assert findings[0].code == CODE_INERT_DENY
+
+    def test_multi_char_separator_strips_suffix_not_char_set(self) -> None:
+        """Regression: the trailing separator is stripped as a literal suffix.
+
+        ``str.rstrip`` treats its argument as a character *set*.  With a
+        multi-character ``tool_separator`` (documented single-char but not
+        enforced), that over-strips: ``"deviceYX"`` under separator ``"XY"``
+        must probe as ``"deviceYX"`` (no trailing ``"XY"`` suffix), NOT
+        ``"device"`` (which rstrip would produce by chewing the trailing Y and
+        X characters).
+        """
+        entry = parse_entry("deviceYX*", list_name="deny_list")
+        assert entry.kind == KIND_LITERAL_UNMATCHABLE
+        assert RouteMatcher._probe_resource(entry, "XY") == "deviceYX"
+        # And a genuine trailing separator IS stripped, once.
+        entry_sep = parse_entry("deviceXY*", list_name="deny_list")
+        assert RouteMatcher._probe_resource(entry_sep, "XY") == "device"
 
     def test_unprobeable_glob_in_deny_list_stays_soft(
         self, drift_surfaces: dict[str, ToolSurface]

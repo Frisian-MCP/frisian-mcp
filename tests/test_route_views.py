@@ -280,18 +280,28 @@ class TestDispatch:
     def test_flat_tool_dispatch_delegates(
         self, registry: ToolRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A flat tool delegates to the registry the view was built against."""
+        """A flat tool delegates to the registry the view was built against.
+
+        Records all three forwarded arguments, not just the name — otherwise a
+        regression that dropped or swapped ``request``/``arguments`` would still
+        pass while the delegation contract was broken.
+        """
         view = RouteView.build(registry, _cfg(allow=("*",)))
         seen: dict[str, Any] = {}
 
         def fake_dispatch(request: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            seen["request"] = request
             seen["name"] = name
+            seen["arguments"] = arguments
             return {"ok": True}
 
         monkeypatch.setattr(registry, "dispatch", fake_dispatch)
-        result = view.dispatch(_req(), "ping", {"x": 1})
+        request = _req()
+        result = view.dispatch(request, "ping", {"x": 1})
         assert result == {"ok": True}
         assert seen["name"] == "ping"
+        assert seen["request"] is request
+        assert seen["arguments"] == {"x": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +392,16 @@ class TestPermissionResolver:
     def test_empty_global_elevated_route_requires_auth(self) -> None:
         """No global classes gates an ``elevated`` route with IsAuthenticated."""
         assert route_effective_permission_classes(_cfg("elevated")) == [IsAuthenticated]
+
+    @override_settings(FRISIAN_MCP_PERMISSION_CLASSES=None)
+    def test_legacy_route_stays_open_like_default(self) -> None:
+        """The legacy view carves out to [] (open), matching resolve_route_ceiling.
+
+        Regression: treating LEGACY_ROUTE_NAME as an unnamed privileged route
+        would return [IsAuthenticated] and gate today's open-by-default endpoint.
+        """
+        assert route_effective_permission_classes(_cfg(LEGACY_ROUTE_NAME)) == []
+        assert route_is_anonymous_reachable(_cfg(LEGACY_ROUTE_NAME)) is True
 
     @override_settings(FRISIAN_MCP_PERMISSION_CLASSES=["rest_framework.permissions.IsAdminUser"])
     def test_nonempty_global_wins_verbatim_on_every_route(self) -> None:

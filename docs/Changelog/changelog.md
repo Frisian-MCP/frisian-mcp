@@ -22,8 +22,8 @@ class DeviceSerializer(serializers.ModelSerializer):
 ```
 
 This restores the behaviour documented in the
-[Installation & Configuration Reference](../Reference/installation-configuration-reference.md)
-and the [Write-Path Response Filtering](../Guide/write-path-response-filtering.md)
+[Installation & Configuration Reference](../v1.1/Reference/installation-configuration-reference.md)
+and the [Write-Path Response Filtering](../v1.1/Guide/write-path-response-filtering.md)
 guide — both docs already describe the feature; the implementation now matches.
 
 > `mcp_light_key` is a class attribute on the serializer's `Meta`, **not** a

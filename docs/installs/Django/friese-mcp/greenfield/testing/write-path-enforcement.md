@@ -149,6 +149,6 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 
 ## Related Docs
 
-- [Write-Path Response Filtering](../../../../../Guide/write-path-response-filtering.md)
-- [The Token Problem](../../../../../Guide/the-token-problem.md)
+- [Write-Path Response Filtering](../../../../../v1.1/Guide/write-path-response-filtering.md)
+- [The Token Problem](../../../../../v1.1/Guide/the-token-problem.md)
 - [Permission Tiers](permission-visibility.md)

@@ -588,8 +588,8 @@ model.
 - ADR-009 — Authorize-path inputs are never authority. The "request inputs are
   never a credential" invariant, restated here for the path segment (§16,
   Deferrals 1–2).
-- `docs/Security/security.md` — threat model and recommended deployment
+- `../v1.1/Security/security.md` — threat model and recommended deployment
   patterns.
-- `docs/Reference/installation-configuration-reference.md` — the complete
+- `../v1.1/Reference/installation-configuration-reference.md` — the complete
   settings reference, where `FRISIAN_MCP_ROUTES` and the split auto-* flags
   land.

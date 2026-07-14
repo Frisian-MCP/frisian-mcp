@@ -610,9 +610,16 @@ def _install_healthcheck_urls() -> int:
         path,
     )
 
-    paths: list[str] = getattr(
+    paths: list[str] | tuple[str, ...] | str = getattr(
         settings, "FRISIAN_MCP_HEALTHCHECK_PATHS", _DEFAULT_HEALTHCHECK_PATHS
     )
+    # A bare string is a single path, not an iterable of one-character paths.
+    # Coerce it so ``FRISIAN_MCP_HEALTHCHECK_PATHS = "/healthz"`` mounts one
+    # ``/healthz`` view rather than one per character.  Mirrors the coercion in
+    # ``route_paths.reserved_route_paths`` so the mounted paths and the reserved
+    # set cannot diverge.
+    if isinstance(paths, str):
+        paths = (paths,)
     if not paths:
         return 0
 

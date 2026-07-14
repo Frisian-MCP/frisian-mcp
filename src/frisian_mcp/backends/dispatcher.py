@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from typing import Any
 
 import jsonschema
@@ -186,7 +186,7 @@ def _build_perm_action_filter_from_request(
     Called by the ``action="help"`` branch of dispatcher ``invoke`` so that help responses
     respect the same permission filtering as the ``tools/list`` action enum.
     """
-    caps: frozenset[str] | None = getattr(request, "_mcp_capabilities", None)
+    caps: Container[str] | None = getattr(request, "_mcp_capabilities", None)
     if caps is None:
         return None
     # Local imports avoid circular deps (registry imports dispatcher lazily).

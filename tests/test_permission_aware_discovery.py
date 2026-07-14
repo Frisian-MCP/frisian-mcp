@@ -25,12 +25,21 @@ def _noop(arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
 
 
 def _build_request(is_superuser: bool = False, perms: set[str] | None = None) -> Any:
-    """Build a minimal mock request with a user stub."""
+    """Build a minimal mock request with a user stub.
+
+    ``has_perm`` MUST be stubbed to answer from *perms*.  Since v1.1.1 the
+    default adapter resolves capabilities through ``user.has_perm()`` (V11-11),
+    and a bare ``MagicMock`` returns a truthy ``Mock`` for every permission —
+    i.e. it would silently grant EVERYTHING and make these filter tests vacuous.
+    A faithful stub answers exactly as a real permission backend would.
+    """
+    granted = perms or set()
     req = MagicMock()
     req.user = MagicMock()
     req.user.is_authenticated = True
     req.user.is_superuser = is_superuser
-    req.user.get_all_permissions = lambda: perms or set()
+    req.user.get_all_permissions = lambda: set(granted)
+    req.user.has_perm = lambda perm, obj=None: perm in granted
     req._mcp_max_tier = None
     req.auth = None
     return req
@@ -151,29 +160,30 @@ class TestToolEntryPermSlots:
 
 
 class TestDjangoPermissionAdapter:
-    """``DjangoPermissionAdapter`` delegates to ``user.get_all_permissions()``."""
+    """``DjangoPermissionAdapter`` resolves capabilities via ``user.has_perm()`` (V11-11)."""
 
-    def test_get_capabilities_returns_frozenset(self) -> None:
-        """get_capabilities returns a frozenset of permission strings."""
+    def test_get_capabilities_answers_membership_from_has_perm(self) -> None:
+        """Capabilities is a membership container answering from the host predicate."""
         from frisian_mcp.contrib.permissions.base import DjangoPermissionAdapter
 
         adapter = DjangoPermissionAdapter()
+        granted = {"dcim.view_device", "ipam.view_prefix"}
         user = MagicMock()
-        user.get_all_permissions.return_value = {"dcim.view_device", "ipam.view_prefix"}
+        user.has_perm = lambda perm, obj=None: perm in granted
         caps = adapter.get_capabilities(user)
-        assert isinstance(caps, frozenset)
         assert "dcim.view_device" in caps
         assert "ipam.view_prefix" in caps
+        assert "dcim.delete_device" not in caps
 
     def test_get_capabilities_handles_error(self) -> None:
-        """get_capabilities returns frozenset() when get_all_permissions raises."""
+        """A raising permission backend denies every permission (fail-closed, C6)."""
         from frisian_mcp.contrib.permissions.base import DjangoPermissionAdapter
 
         adapter = DjangoPermissionAdapter()
         user = MagicMock()
-        user.get_all_permissions.side_effect = RuntimeError("db down")
+        user.has_perm.side_effect = RuntimeError("db down")
         caps = adapter.get_capabilities(user)
-        assert caps == frozenset()
+        assert "dcim.view_device" not in caps
 
     def test_is_unrestricted_superuser(self) -> None:
         """is_unrestricted returns True for superusers."""
@@ -665,9 +675,9 @@ class TestGroupDispatcherVisibility:
             req = _build_request(perms=set())
             body = self._post_tools_list(req)
             names = [t["name"] for t in body["result"]["tools"]]
-            assert (
-                group_name not in names
-            ), "Group should be hidden when user lacks capabilities for perm-aware children"
+            assert group_name not in names, (
+                "Group should be hidden when user lacks capabilities for perm-aware children"
+            )
 
             # User has the matching permission → group visible.
             req2 = _build_request(perms={"net.view_network"})
@@ -1352,86 +1362,56 @@ class TestHelpBypassFix:
 
 class TestExemptViewAdapterExcludeModels:
     """
-    ExemptViewPermissionAdapter + EXEMPT_EXCLUDE_MODELS.
+    The exempt adapter is a DEPRECATED no-op since v1.1.1 (V11-11).
 
-    When EXEMPT_VIEW_PERMISSIONS is the wildcard form (``"__all__"`` or ``"*"``),
-    models in EXEMPT_EXCLUDE_MODELS must NOT be synthesized as view-capable.
+    It used to synthesize ``view_*`` capabilities from ``EXEMPT_VIEW_PERMISSIONS``
+    (honouring ``EXEMPT_EXCLUDE_MODELS``).  The package no longer parses either
+    setting: capabilities come from ``user.has_perm()``, and the HOST decides
+    what is exempt and what is excluded — including its own exclusion list.
+    Asking the host is what makes this correct for *any* host mechanism rather
+    than one hand-patched setting.
     """
 
-    def _make_user(self, perms: set[str] | None = None) -> Any:
+    def _make_user(self, granted: set[str] | None = None, exempt_views: bool = False) -> Any:
+        """A user whose has_perm mirrors a host backend: exempt ∨ granted."""
+        allowed = granted or set()
+
+        def has_perm(perm: str, obj: Any = None) -> bool:
+            # The host excludes auth.* from its exemption; everything else is exempt.
+            if exempt_views and perm.startswith("dcim.view_"):
+                return True
+            return perm in allowed
+
         user = MagicMock()
         user.is_anonymous = False
         user.is_superuser = False
-        user.get_all_permissions.return_value = perms or set()
+        user.has_perm = has_perm
         return user
 
-    @override_settings(
-        EXEMPT_VIEW_PERMISSIONS="__all__",
-        EXEMPT_EXCLUDE_MODELS=[("auth", "group"), ("auth", "permission")],
-    )
-    def test_exempt_all_excludes_listed_models(self) -> None:
-        """Excluded models are NOT synthesized as view-capable with '__all__'."""
-        from frisian_mcp.contrib.permissions.exempt_view_adapter import (
-            ExemptViewPermissionAdapter,
-        )
+    def test_host_exclusion_decision_is_honoured(self) -> None:
+        """A model the HOST excludes from its exemption stays denied."""
+        from frisian_mcp.contrib.permissions.base import DjangoPermissionAdapter
 
-        adapter = ExemptViewPermissionAdapter()
-        caps = adapter.get_capabilities(self._make_user())
-        assert "auth.view_group" not in caps
+        caps = DjangoPermissionAdapter().get_capabilities(self._make_user(exempt_views=True))
+        assert "dcim.view_device" in caps  # host says exempt -> invocable -> visible
+        assert "auth.view_group" not in caps  # host excludes it -> denied
         assert "auth.view_permission" not in caps
 
-    @override_settings(
-        EXEMPT_VIEW_PERMISSIONS="*",
-        EXEMPT_EXCLUDE_MODELS=[("auth", "group")],
-    )
-    def test_exempt_star_wildcard_excludes_listed_models(self) -> None:
-        """Excluded models are NOT synthesized as view-capable with '*'."""
-        from frisian_mcp.contrib.permissions.exempt_view_adapter import (
-            ExemptViewPermissionAdapter,
-        )
-
-        adapter = ExemptViewPermissionAdapter()
-        caps = adapter.get_capabilities(self._make_user())
-        assert "auth.view_group" not in caps
-
-    @override_settings(
-        EXEMPT_VIEW_PERMISSIONS="__all__",
-        EXEMPT_EXCLUDE_MODELS=[],
-    )
-    def test_exempt_all_empty_exclude_includes_all(self) -> None:
-        """Empty EXEMPT_EXCLUDE_MODELS means all models are synthesized."""
-        from django.apps import apps
+    def test_deprecated_adapter_defers_to_the_default(self) -> None:
+        """The old adapter still boots (warned) and adds no synthesis of its own."""
+        import warnings
 
         from frisian_mcp.contrib.permissions.exempt_view_adapter import (
             ExemptViewPermissionAdapter,
         )
 
-        adapter = ExemptViewPermissionAdapter()
-        caps = adapter.get_capabilities(self._make_user())
-        # Every installed model should appear.
-        for model in apps.get_models():
-            meta = model._meta  # pylint: disable=protected-access
-            assert f"{meta.app_label}.view_{meta.model_name}" in caps
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            adapter = ExemptViewPermissionAdapter()
 
-    @override_settings(
-        EXEMPT_VIEW_PERMISSIONS=["dcim.device"],
-        EXEMPT_EXCLUDE_MODELS=[("dcim", "device")],
-    )
-    def test_explicit_list_form_unaffected_by_exclude_models(self) -> None:
-        """EXEMPT_EXCLUDE_MODELS only applies to the wildcard path, not the list path."""
-        from frisian_mcp.contrib.permissions.exempt_view_adapter import (
-            ExemptViewPermissionAdapter,
-        )
-
-        adapter = ExemptViewPermissionAdapter()
-        caps = adapter.get_capabilities(self._make_user())
-        # Explicit list path still synthesizes the capability regardless of exclude list.
+        caps = adapter.get_capabilities(self._make_user(exempt_views=True))
         assert "dcim.view_device" in caps
-
-
-# ---------------------------------------------------------------------------
-# _ensure_perm_context_on_request — service principal bypass
-# ---------------------------------------------------------------------------
+        assert "auth.view_group" not in caps
 
 
 class TestServicePrincipalBypass:

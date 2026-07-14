@@ -9,7 +9,7 @@ frisian-mcp turns your existing Django REST Framework ViewSets into [Model Conte
 
 **Designed for token-efficient agent workflows.** A 50-action Django app loads in 500–2,000 tokens of `tools/list` schema instead of the 15,000–25,000 conventional flat MCP would emit; a 60-device bulk-write response is 24 tokens instead of ~10,800 of full echo. Same surface, two orders of magnitude less context burned before the agent has done any reasoning. Full numbers in [Token efficiency](#token-efficiency).
 
-**Version:** 1.0.12 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
+**Version:** 1.1.1 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
 
 ```bash
 pip install frisian-mcp
@@ -62,7 +62,7 @@ Measured numbers from real integrations:
 
 The bulk-write savings are constant regardless of batch size — the lean envelope is fixed-shape and the full response is reachable via the continuation token without re-running the write. The dispatcher reduction is opt-in through `FRISIAN_MCP_DISPATCH_GROUPS` (autodiscovery alone gives the conventional flat shape).
 
-See [docs/Guide/the-token-problem.md](docs/Guide/the-token-problem.md), [docs/Guide/dispatcher-pattern.md](docs/Guide/dispatcher-pattern.md), and [docs/Guide/write-path-response-filtering.md](docs/Guide/write-path-response-filtering.md) for the design rationale and full measurements.
+See [The Token Problem](docs/v1.1/Guide/the-token-problem.md), [Dispatcher Pattern](docs/v1.1/Guide/dispatcher-pattern.md), and [Write-Path Response Filtering](docs/v1.1/Guide/write-path-response-filtering.md) for the design rationale and full measurements.
 
 ---
 
@@ -137,7 +137,7 @@ python manage.py mcp_doctor                # standard audit
 python manage.py mcp_doctor --security     # extended OAuth security audit
 ```
 
-Walks the configuration end-to-end and exits non-zero on errors. Run after every install, every config change, and as the first diagnostic step on any unexpected behaviour. See [docs/Guide/mcp-doctor.md](docs/Guide/mcp-doctor.md) for the full check list.
+Walks the configuration end-to-end and exits non-zero on errors. Run after every install, every config change, and as the first diagnostic step on any unexpected behaviour. See the [mcp_doctor guide](docs/v1.1/Guide/mcp-doctor.md) for the full check list.
 
 ---
 
@@ -229,12 +229,12 @@ The defaults are oriented toward production safety rather than walk-up convenien
 - **The PKCE default permission tier is `read`.** Mis-configurations cannot accidentally hand out write or admin scopes on first connect.
 - **Permission-aware discovery** (`FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True`) rebuilds dispatcher action enums per-request — a read-tier token sees only `list` / `retrieve` actions, write and admin actions are hidden from `tools/list` rather than just blocked at execution.
 - **`.well-known` discovery metadata is gated** by `FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY`. With it set to `False`, the OAuth metadata endpoints return parseable JSON 404s so discovery-first MCP clients fall back to their configured Bearer instead of being routed into a dead-end OAuth cascade.
-- **Authenticator chain ordering is no longer load-bearing** for correctness — both `FrisianMcpTokenAuthentication` and `OAuthTokenAuthentication` return `None` on lookup-miss so either order works. Tokens-first is the recommended convention for the WWW-Authenticate challenge shape (see [docs/Getting Started/getting-started.md](docs/Getting%20Started/getting-started.md#using-tokens-and-oauth-together)).
+- **Authenticator chain ordering is no longer load-bearing** for correctness — both `FrisianMcpTokenAuthentication` and `OAuthTokenAuthentication` return `None` on lookup-miss so either order works. Tokens-first is the recommended convention for the WWW-Authenticate challenge shape (see [docs/Getting Started/getting-started.md](docs/v1.1/Getting%20Started/getting-started.md#using-tokens-and-oauth-together)).
 - **SSE keepalive structure is documented**, with a one-time runtime warning when the package detects it is running under a synchronous WSGI worker (which cannot scale SSE without starving the worker pool). The recommended deployment is an ASGI worker class (`uvicorn.workers.UvicornWorker` or `uvicorn` directly).
 
 ### Authorize-path hardening
 
-The unauthenticated OAuth authorize path (`AUTO_REGISTER`) is a walk-up surface: request inputs describe what the caller wants, never what the caller is permitted to do. See [ADR-009](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md) for the design rationale and [docs/Security/security.md](docs/Security/security.md) for the threat model and recommended deployment patterns.
+The unauthenticated OAuth authorize path (`AUTO_REGISTER`) is a walk-up surface: request inputs describe what the caller wants, never what the caller is permitted to do. See [ADR-009](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md) for the design rationale and the [security guide](docs/v1.1/Security/security.md) for the threat model and recommended deployment patterns.
 
 ### Per-route permission tiers
 

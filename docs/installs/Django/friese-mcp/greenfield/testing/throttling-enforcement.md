@@ -157,4 +157,4 @@ class ThrottledMcpView(McpView):
 ## Related Docs
 
 - [Access Control](access-control.md)
-- [Installation & Configuration Reference](../../../../../Reference/installation-configuration-reference.md)
+- [Installation & Configuration Reference](../../../../../v1.1/Reference/installation-configuration-reference.md)

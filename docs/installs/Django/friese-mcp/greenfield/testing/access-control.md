@@ -125,4 +125,4 @@ This is the default behavior. Verify it is intentional for your deployment befor
 
 - [Permission Visibility](permission-visibility.md)
 - [Open-World Write Exposure](open-world-write-exposure.md)
-- [Security Architecture](../../../../../Security/security.md)
+- [Security Architecture](../../../../../v1.1/Security/security.md)

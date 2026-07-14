@@ -13,7 +13,7 @@ When an agent creates or updates an object, the conventional DRF response is the
 - A 200-device bulk create produces ~36,000 tokens of echo
 - Sequential write workflows (create devices → assign IPs → configure VLANs → register DNS) compound the cost at every step
 
-See [Write-Path Response Filtering](../../../../../Guide/write-path-response-filtering.md) and [The Token Problem](../../../../../Guide/the-token-problem.md) for the full analysis including production measurements.
+See [Write-Path Response Filtering](../../../../../v1.1/Guide/write-path-response-filtering.md) and [The Token Problem](../../../../../v1.1/Guide/the-token-problem.md) for the full analysis including production measurements.
 
 ---
 
@@ -134,6 +134,6 @@ FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 10_000
 
 ## See also
 
-- [Write-Path Response Filtering](../../../../../Guide/write-path-response-filtering.md) — design rationale and production measurements
+- [Write-Path Response Filtering](../../../../../v1.1/Guide/write-path-response-filtering.md) — design rationale and production measurements
 - `features/mcp-heavy.md` — large read response negotiation
 - `features/mcp-tool.md` — manual tool registration

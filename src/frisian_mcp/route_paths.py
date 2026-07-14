@@ -224,6 +224,14 @@ def reserved_route_paths() -> tuple[str, ...]:
     raw_healthchecks: Iterable[Any] = getattr(
         settings, "FRISIAN_MCP_HEALTHCHECK_PATHS", _DEFAULT_HEALTHCHECK_PATHS
     )
+    # A bare string is a single path, not an iterable of one-character paths.
+    # Coerce it so ``FRISIAN_MCP_HEALTHCHECK_PATHS = "/healthz"`` reserves
+    # ``healthz`` rather than iterating it into the characters 'h', 'e', ...
+    # (which would leave the real path claimable by a route).  Mirrors the same
+    # coercion in ``apps._install_healthcheck_urls`` so the reserved set and the
+    # actually-mounted paths cannot diverge.
+    if isinstance(raw_healthchecks, str):
+        raw_healthchecks = (raw_healthchecks,)
     healthchecks = tuple(
         cleaned
         for entry in raw_healthchecks

@@ -228,8 +228,8 @@ The client discovers the `/.well-known/oauth-authorization-server` metadata and 
 
 ## Next Steps
 
-- [Troubleshooting](../../../../troubleshooting/Django/paperless/2.x/troubleshooting.md) — common problems and solutions
-- [Installation & Configuration Reference](../../../../Reference/installation-configuration-reference.md) — complete settings reference
+- [Troubleshooting](../../../../v1.1/troubleshooting/Django/paperless/2.x/troubleshooting.md) — common problems and solutions
+- [Installation & Configuration Reference](../../../../v1.1/Reference/installation-configuration-reference.md) — complete settings reference
 
 ---
 

@@ -689,13 +689,23 @@ class RouteMatcher:
         return None
 
     @staticmethod
-    def _probe_resource(entry: ParsedEntry) -> str | None:
+    def _probe_resource(entry: ParsedEntry, tool_separator: str) -> str | None:
         """Return the resource segment used to probe the net surface, or ``None``.
 
         This is *not* a matcher.  Glob semantics are out of scope for v1.1, so a
         partial glob contributes only its literal prefix before the first ``*``;
         a glob with no literal prefix (``"*item"``) is unprobeable and yields
         ``None``, leaving the entry at its SOFT classification.
+
+        A trailing *tool_separator* is stripped from a glob's literal prefix so
+        that the natural typo shape ``"device_*"`` probes as resource
+        ``"device"`` rather than ``"device_"``.  Without the strip,
+        :meth:`_inert_deny_survivors` re-appends the separator and probes for
+        ``"device__"`` (double separator), which matches no real tool — silently
+        leaving an inert deny graded SOFT instead of escalating to
+        :data:`CODE_INERT_DENY` even though the tools the operator meant to deny
+        are still exposed.  ``"device*"`` (no trailing separator) already worked;
+        this makes the two spellings behave the same.
         """
         if entry.kind == KIND_QUALIFIED:
             return entry.resource
@@ -704,7 +714,16 @@ class RouteMatcher:
         if entry.kind == KIND_LITERAL_UNMATCHABLE:
             raw = entry.raw.strip()
             segment = raw.rsplit(_SEGMENT_SEPARATOR, 1)[-1]
-            return segment.split(_WILDCARD, 1)[0] or None
+            literal = segment.split(_WILDCARD, 1)[0]
+            # Strip the separator as a literal SUFFIX (one occurrence), not with
+            # ``rstrip``, which treats its argument as a character *set* and would
+            # over-strip a multi-character separator (e.g. ``"::"`` chewing every
+            # trailing ':').  ``tool_separator`` is documented single-character but
+            # is not enforced, so this stays correct if a host configures a
+            # multi-character FRISIAN_MCP_TOOL_NAME_SEPARATOR.
+            if tool_separator and literal.endswith(tool_separator):
+                literal = literal[: -len(tool_separator)]
+            return literal or None
         return None
 
     def _inert_deny_survivors(
@@ -721,7 +740,7 @@ class RouteMatcher:
         plus separator — so the audit only claims matches the grammar could
         actually have made.
         """
-        resource = self._probe_resource(entry)
+        resource = self._probe_resource(entry, surface.tool_separator)
         if resource is None:
             return ()
         prefix = f"{resource}{surface.tool_separator}"
@@ -757,10 +776,11 @@ class RouteMatcher:
         omitted = len(survivors) - len(shown)
         if omitted:
             rendered += f", +{omitted} more"
+        probed = self._probe_resource(entry, surface.tool_separator)
         return (
             f"deny_list entry {entry.raw!r} matched no tools, but "
             f"{len(survivors)} tool(s) its resource segment "
-            f"{self._probe_resource(entry)!r} would have matched are still exposed "
+            f"{probed!r} would have matched are still exposed "
             f"on this route: {rendered}.  The carve-out is silently a no-op "
             "(fail-open).  Survivors that are 'flat' or sit under a group this "
             "entry does not name indicate the entry's group was renamed or "

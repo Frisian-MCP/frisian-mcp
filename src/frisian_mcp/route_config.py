@@ -50,6 +50,7 @@ runtime tier comparisons in :mod:`frisian_mcp.registry`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -239,7 +240,7 @@ def parse_route_config(name: str, raw: Any) -> RouteConfig:
             "placeholder for tiers you do not use."
         )
 
-    if not isinstance(raw, dict):
+    if not isinstance(raw, Mapping):
         raise ImproperlyConfigured(
             f"FRISIAN_MCP_ROUTES[{name!r}] must be a mapping (got {type(raw).__name__}={raw!r})."
         )
@@ -313,7 +314,7 @@ def parse_route_configs(raw: Any) -> dict[str, RouteConfig]:
             (see :func:`parse_route_config`).
 
     """
-    if not isinstance(raw, dict):
+    if not isinstance(raw, Mapping):
         raise ImproperlyConfigured(
             f"FRISIAN_MCP_ROUTES must be a mapping keyed by route name "
             f"(got {type(raw).__name__}={raw!r})."

@@ -413,8 +413,8 @@ client-credential entry as described above.
 ## Next Steps
 
 - [Nginx Configuration](nginx.md) — proxy settings for production deployments behind a reverse proxy
-- [Troubleshooting](../../../../troubleshooting/Django/nautobot/3.x/troubleshooting.md) — common problems and solutions from real deployments
-- [Installation & Configuration Reference](../../../../Reference/installation-configuration-reference.md) — complete settings reference
+- [Troubleshooting](../../../../v1.1/troubleshooting/Django/nautobot/3.x/troubleshooting.md) — common problems and solutions from real deployments
+- [Installation & Configuration Reference](../../../../v1.1/Reference/installation-configuration-reference.md) — complete settings reference
 
 ---
 

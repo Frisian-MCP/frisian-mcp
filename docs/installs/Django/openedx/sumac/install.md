@@ -286,8 +286,8 @@ The `openedx_frisian_mcp/` plugin app included in this repository contains:
 
 ## Next Steps
 
-- [Troubleshooting](../../../../troubleshooting/Django/openedx/sumac/troubleshooting.md) — common problems and solutions
-- [Installation & Configuration Reference](../../../../Reference/installation-configuration-reference.md) — complete settings reference
+- [Troubleshooting](../../../../v1.1/troubleshooting/Django/openedx/sumac/troubleshooting.md) — common problems and solutions
+- [Installation & Configuration Reference](../../../../v1.1/Reference/installation-configuration-reference.md) — complete settings reference
 
 ---
 

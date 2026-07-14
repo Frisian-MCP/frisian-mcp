@@ -136,6 +136,17 @@ class TestReservedRoutePaths:
         assert reserved.count("oauth") == 1
         assert "" not in reserved
 
+    @override_settings(FRISIAN_MCP_HEALTHCHECK_PATHS="/healthz")
+    def test_scalar_healthcheck_path_reserved_as_one_path(self) -> None:
+        """Regression: a bare string is one path, not an iterable of characters.
+
+        Without coercion ``"/healthz"`` iterates to 'h', 'e', 'a', ... leaving
+        the real ``healthz`` path claimable by a route.
+        """
+        reserved = reserved_route_paths()
+        assert "healthz" in reserved
+        assert "h" not in reserved
+
 
 class TestReservedCollisions:
     """A route may neither nest under a reserved path nor swallow one."""

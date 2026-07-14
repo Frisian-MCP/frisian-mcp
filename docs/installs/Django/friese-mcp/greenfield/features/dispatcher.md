@@ -11,7 +11,7 @@ Auto-discovery registers one MCP tool per ViewSet action. A typical DRF project 
 
 The dispatcher pattern collapses N tools into 1. The agent calls a single dispatcher tool with an `action` parameter to route to the underlying operation. Context overhead stays constant regardless of how many actions the dispatcher covers.
 
-See [Dispatcher Pattern](../../../../../Guide/dispatcher-pattern.md) and [The Token Problem](../../../../../Guide/the-token-problem.md) for the design rationale and measured token numbers.
+See [Dispatcher Pattern](../../../../../v1.1/Guide/dispatcher-pattern.md) and [The Token Problem](../../../../../v1.1/Guide/the-token-problem.md) for the design rationale and measured token numbers.
 
 ---
 
@@ -197,7 +197,7 @@ The dispatcher entry point itself is always registered at `read` tier so it appe
 
 ## See also
 
-- [Dispatcher Pattern](../../../../../Guide/dispatcher-pattern.md) — design rationale and token efficiency measurements
-- [The Token Problem](../../../../../Guide/the-token-problem.md) — why this matters at scale
+- [Dispatcher Pattern](../../../../../v1.1/Guide/dispatcher-pattern.md) — design rationale and token efficiency measurements
+- [The Token Problem](../../../../../v1.1/Guide/the-token-problem.md) — why this matters at scale
 - `features/mcp-tool.md` — for standalone tools that don't need a dispatcher
 - `features/mcp-heavy.md` — for dispatcher actions that return large result sets
