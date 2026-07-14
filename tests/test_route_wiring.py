@@ -749,6 +749,30 @@ class TestRouteUrlMounting:
         assert _install_route_urls() == 0
 
 
+@pytest.mark.usefixtures("clean_route_views")
+class TestResolveRouteViewFailsClosed:
+    """A per-route mount that cannot resolve its view fails loud, never open."""
+
+    def test_missing_view_and_config_raises_rather_than_serving_global(self) -> None:
+        """route_name set + no view + no config -> raise, not None (fail-open)."""
+        from django.core.exceptions import ImproperlyConfigured
+
+        from frisian_mcp.views import McpView
+
+        class _Broken(McpView):
+            _route_name = "unmounted_route_xyz"
+            _route_config = None
+
+        with pytest.raises(ImproperlyConfigured):
+            _Broken()._resolve_route_view()
+
+    def test_plain_mount_still_returns_none(self) -> None:
+        """A genuine plain mount (no route_name) resolves to None as before."""
+        from frisian_mcp.views import McpView
+
+        assert McpView()._resolve_route_view() is None
+
+
 # ---------------------------------------------------------------------------
 # Per-route tools/list cache keys
 # ---------------------------------------------------------------------------

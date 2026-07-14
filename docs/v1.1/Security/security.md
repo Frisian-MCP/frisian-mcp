@@ -105,7 +105,7 @@ For the in-process variant of the open + authenticated pair, set `FRISIAN_MCP_PA
 
 **What lives on `/mcp/`:**
 
-In frisian-mcp 1.0.11, the **public mount surface is shaped by three package
+On a single-mount gateway, the **public mount surface is shaped by three package
 primitives** — none of them per-path resource allowlists:
 
 - `FRISIAN_MCP_MAX_TIER = 'read'` caps every caller hitting the primary mount
@@ -118,13 +118,15 @@ primitives** — none of them per-path resource allowlists:
   documents in the Django group(s) you mark public, so launching a new
   guide is a group reassignment rather than a deployment.
 
-> **Limitation in 1.0.11.** There is no per-mount tool allowlist in the
-> package today — `FRISIAN_MCP_TOOL_ALLOWLIST` and `FRISIAN_MCP_TOOL_DENYLIST`
-> are applied once at startup and affect every mount equally.  If your
-> deployment needs "expose hand-picked read-only resource A on `/mcp/`, full
-> CRUD on `/mcp-protected/`", reach for the reverse-proxy variant in the
-> diagram above or `@mcp_ignore` the resources you don't want on either mount.
-> Per-mount resource scoping is a deferred enhancement.
+> **Per-mount tool scoping (since 1.1).** The per-route permission model
+> (`FRISIAN_MCP_ROUTES`) gives each mounted path its own `allow_list` /
+> `deny_list` and tier ceiling on a deny-all baseline, so "expose hand-picked
+> read-only resource A on `/mcp/`, full CRUD on `/mcp-protected/`" is now a
+> package-level configuration rather than a reverse-proxy or `@mcp_ignore`
+> workaround. The global `FRISIAN_MCP_TOOL_ALLOWLIST` / `FRISIAN_MCP_TOOL_DENYLIST`
+> still apply once at startup across every mount; use per-route lists when the
+> surface must differ by path. The reverse-proxy variant remains the right call
+> when you need physical route absence rather than view-level filtering.
 
 **What lives on `/mcp-endpoint-elevated-permissions/`:**
 

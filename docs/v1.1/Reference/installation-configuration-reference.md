@@ -176,7 +176,7 @@ FRISIAN_MCP_AUTODISCOVER = True
 **Type:** `dict[str, list[str]]`  
 **Default:** unset
 
-Mapping `{group_name: [resource_prefix, ...]}` that collapses a set of flat auto-discovered tools into a single group dispatcher tool. Without this setting, dispatcher installation early-returns (`src/frisian_mcp/apps.py:573-577`) and the agent sees one flat tool per ViewSet action — the dispatcher reduction is opt-in, not automatic.
+Mapping `{group_name: [resource_prefix, ...]}` that collapses a set of flat auto-discovered tools into a single group dispatcher tool. Without this setting, dispatcher installation early-returns (`src/frisian_mcp/apps.py`) and the agent sees one flat tool per ViewSet action — the dispatcher reduction is opt-in, not automatic.
 
 ```python
 FRISIAN_MCP_DISPATCH_GROUPS = {
@@ -185,15 +185,15 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 }
 ```
 
-**How prefix matching works.** Member-tool selection is `startswith` based (`apps.py:550`): a configured prefix `"purchase_order"` matches `purchase_order_list` AND `purchase_order_line_list` because both start with `purchase_order` followed by the tool-name separator. Use this when you want one group to bundle a related family of resources.
+**How prefix matching works.** Member-tool selection is `startswith` based (`apps.py`): a configured prefix `"purchase_order"` matches `purchase_order_list` AND `purchase_order_line_list` because both start with `purchase_order` followed by the tool-name separator. Use this when you want one group to bundle a related family of resources.
 
 **Prefixes must match the leading segment of registered tool names.** The exact form depends on your DRF router configuration:
 
 - **DRF default basename** (router doesn't specify `basename=`): DRF derives the basename from `Model._meta.object_name.lower()` — e.g. a `StockMovement` model produces basename `stockmovement` and tool names like `stockmovement_list`. Configure `"stockmovement"` (no underscore).
-- **Explicit router basename** (you registered with e.g. `router.register('stock-movement', ...)`): the package converts hyphens to underscores at discovery time (`backends/discovery.py:367`) so the tool prefix becomes `stock_movement`. Configure `"stock_movement"` (with underscore).
+- **Explicit router basename** (you registered with e.g. `router.register('stock-movement', ...)`): the package converts hyphens to underscores at discovery time (`backends/discovery.py`) so the tool prefix becomes `stock_movement`. Configure `"stock_movement"` (with underscore).
 - **Custom basename**: whatever you passed — e.g. `register(..., basename='widget')` produces `widget_list`. Configure `"widget"`.
 
-**Misconfigured groups warn at startup.** A group whose configured prefixes match zero tools logs a `WARNING` and prints a `[frisian-mcp] WARNING` line with "Did you mean:" suggestions derived from the actually-registered resource names (`apps.py:600-635`). The group is silently dropped — its flat tools remain visible in `tools/list`. If you see a `0 matching tools` warning, the most common cause is configuring camelcase-stripped prefixes (`stockmovement`) for a build that uses kebab-case router slugs (which become `stock_movement` after the hyphen→underscore conversion), or vice versa. Match the suggestion the warning prints rather than guessing.
+**Misconfigured groups warn at startup.** A group whose configured prefixes match zero tools logs a `WARNING` and prints a `[frisian-mcp] WARNING` line with "Did you mean:" suggestions derived from the actually-registered resource names (`apps.py`). The group is silently dropped — its flat tools remain visible in `tools/list`. If you see a `0 matching tools` warning, the most common cause is configuring camelcase-stripped prefixes (`stockmovement`) for a build that uses kebab-case router slugs (which become `stock_movement` after the hyphen→underscore conversion), or vice versa. Match the suggestion the warning prints rather than guessing.
 
 ```text
 [frisian-mcp] WARNING: dispatch group 'stock' has 0 matching tools — its flat tools will
@@ -263,9 +263,9 @@ FRISIAN_MCP_SERVER_NAME = 'my-app-mcp'
 ### FRISIAN_MCP_EXPOSE_ERRORS
 
 **Type:** `bool`  
-**Default:** `False`
+**Default:** `settings.DEBUG`
 
-When `False`, exceptions in tool handlers return a generic error message. When `True`, the full exception message is returned. Useful for development; leave `False` in production to avoid leaking internal detail.
+When unset it tracks `DEBUG`: full exception messages are returned when `DEBUG=True`, generic error messages when `DEBUG=False`. Set it explicitly to `False` to mask errors even in an environment where `DEBUG` might be on. Leave errors masked in production to avoid leaking internal detail.
 
 ```python
 FRISIAN_MCP_EXPOSE_ERRORS = True  # development only
@@ -392,7 +392,7 @@ frisian-mcp ships three Django management commands. Run with `python manage.py <
 
 | Command | Purpose | Guide |
 |---|---|---|
-| `mcp_doctor` | Audit the host's frisian-mcp integration end-to-end. Default pass runs eight checks (INSTALLED_APPS, URL mounting, auth wiring, security settings, cache backend, performance hints, OAuth registration posture, authorize URL reachability). `--security` adds six OAuth-specific security checks. Exits non-zero on errors. CI-pipeline usable. | [Guide → mcp_doctor](../Guide/mcp-doctor.md) |
+| `mcp_doctor` | Audit the host's frisian-mcp integration end-to-end. Default pass runs eleven checks (INSTALLED_APPS, URL mounting, auth wiring, security settings, cache backend, performance hints, OAuth registration posture, authorize URL reachability, OAuth tier permissions, legacy PKCE redirect-tier-map, per-route surface audit). `--security` adds eight OAuth-specific security checks. Exits non-zero on errors. CI-pipeline usable. | [Guide → mcp_doctor](../Guide/mcp-doctor.md) |
 | `mcp_config` | Generate a client config JSON snippet for connecting an MCP client to this gateway. `--client <name>` emits the format expected by a specific client; `--token <value>` embeds an auth header; `--url`/`--name` override the server URL and key. | (inline; see `mcp_config --help`) |
 | `mcp_hash_api_key` | Compute the HMAC-SHA256 digest of a raw API key for use in `FRISIAN_MCP_API_KEYS`. Keys are stored as digests, not raw values, so a leaked settings file does not directly expose usable credentials. | (inline; see `mcp_hash_api_key --help`) |
 
@@ -618,9 +618,9 @@ python manage.py migrate
 Mounts automatically:
 
 - `/.well-known/oauth-authorization-server` — RFC 8414 metadata
-- `/mcp/oauth/authorize/` — authorization endpoint (Authorization Code + PKCE)
-- `/mcp/oauth/token/` — token endpoint (accepts the `authorization_code` and `client_credentials` grants)
-- `/mcp/oauth/register/` — RFC 7591 dynamic client registration
+- `/oauth/authorize/` — authorization endpoint (Authorization Code + PKCE)
+- `/oauth/token/` — token endpoint (accepts the `authorization_code` and `client_credentials` grants)
+- `/oauth/register/` — RFC 7591 dynamic client registration
 
 `contrib.oauth` supports two grant types; a client uses whichever fits its shape:
 
@@ -752,7 +752,7 @@ Register the middleware in `MIDDLEWARE` ahead of any auth or CSRF middleware so 
 
 ### SSE keepalive requires an ASGI worker class
 
-frisian-mcp's MCP endpoints stream over SSE. The WSGI keepalive iterator (`src/frisian_mcp/views.py:1688`) calls `time.sleep(min(15.0, remaining))` to hold the connection open, which ties up one sync worker for the lifetime of each MCP client connection. With sync gunicorn workers (`-k sync`, the default), N workers caps you at N concurrent MCP clients — the (N+1)th connection waits, then the worker pool starves.
+frisian-mcp's MCP endpoints stream over SSE. The WSGI keepalive iterator (`src/frisian_mcp/views.py`) calls `time.sleep(min(15.0, remaining))` to hold the connection open, which ties up one sync worker for the lifetime of each MCP client connection. With sync gunicorn workers (`-k sync`, the default), N workers caps you at N concurrent MCP clients — the (N+1)th connection waits, then the worker pool starves.
 
 Use an ASGI worker class so the keepalive runs as `await asyncio.sleep(...)` against the event loop:
 

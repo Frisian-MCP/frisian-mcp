@@ -113,24 +113,33 @@ The 65-device numbers are from a validated production network automation integra
 
 ### The @mcp_heavy Solution
 
-The `@mcp_heavy` decorator enforces pagination-first behavior. When an agent calls a list endpoint decorated with `@mcp_heavy`, the response includes:
+`@mcp_heavy` enforces probe-first behavior. When a heavy tool — or an auto-discovered endpoint whose response exceeds the negotiation threshold — returns a large result, the agent first receives a small probe envelope instead of the full payload:
 
-- `count` — total number of records matching the query
-- `next` — URL or cursor to fetch the next page
-- `previous` — URL or cursor to fetch the previous page (where applicable)
-- `results` — first page of records (default 50)
+- `preview` — a truncated preview of the result so the agent can see its shape
+- `total_size` — full serialized response size in bytes
+- `available_modes` — the retrieval modes (`summary`, `paginated`, `filtered`, `full`) the agent may request
+- `continuation_token` — opaque token to fetch the cached result in a chosen mode
 
-The agent receives the metadata it needs to decide what to do — paginate, refine the filter, work with the summary, or accept the truncation. The context window is not pre-filled with records the agent may never need.
+The agent receives the metadata it needs to decide what to do — fetch the full result, pull one page, take a summary, or refine the filter. The context window is not pre-filled with records the agent may never need.
+
+```python
+# Auto-discovered ModelViewSets negotiate large responses via a byte threshold —
+# no per-endpoint decorator required:
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000  # bytes
+```
+
+For an explicit heavy tool with a curated schema, `@mcp_heavy` is a registration factory — it takes `name`, `description`, and `input_schema`, and wraps a `(arguments, request)` callable, not a bare `ModelViewSet` method:
 
 ```python
 from frisian_mcp.decorators import mcp_heavy
 
-class DeviceViewSet(viewsets.ModelViewSet):
-
-    @mcp_heavy
-    def list(self, request):
-        queryset = self.get_queryset()
-        ...
+@mcp_heavy(
+    name="devices.search",
+    description="Search devices; returns a probe envelope with size and negotiation modes.",
+    input_schema={"type": "object", "properties": {"site": {"type": "string"}}},
+)
+def search_devices(arguments, request):
+    ...
 ```
 
 The decorator does not prevent the agent from accessing all 500 records. It changes the access pattern from "load everything by default" to "load metadata, decide, then paginate as needed."
@@ -139,7 +148,7 @@ The decorator does not prevent the agent from accessing all 500 records. It chan
 
 DRF already supports default pagination via `PAGE_SIZE` in `REST_FRAMEWORK` settings. `@mcp_heavy` differs in two ways:
 
-**It enforces pagination metadata in the response.** A standard DRF paginated response includes `count` and `next`. A non-paginated DRF response is a bare list. `@mcp_heavy` ensures the agent receives the structured metadata regardless of the underlying ViewSet's pagination configuration.
+**It enforces a probe envelope in the response.** A standard DRF paginated response includes `count` and `next`; a non-paginated DRF response is a bare list. `@mcp_heavy` (and the auto-negotiation threshold) instead returns a structured probe envelope — `total_size`, `available_modes`, `continuation_token` — regardless of the underlying ViewSet's pagination configuration.
 
 **It marks the operation explicitly.** The decorator signals to the schema generation layer that this tool returns metadata, not a complete dataset. The agent's tool description can include this hint, helping the agent make better calls.
 
@@ -183,7 +192,6 @@ The `@mcp_light` feature applies a lean confirmation envelope to all write opera
 ```json
 {
   "accepted": 60,
-  "failed": 0,
   "status_code": 201,
   "data_size": 43190,
   "continuation_token": "<token>"

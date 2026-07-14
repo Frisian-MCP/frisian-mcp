@@ -88,11 +88,15 @@ CACHES = {
 }
 ```
 
-Open edX ships with Redis — it is already running in standard devstack and production deployments. Pointing the default cache at Redis resolves the issue.
+Open edX ships with Redis — it is already running in standard devstack and production deployments, so pointing the default cache at Redis is the expected fix.
+
+> **Diagnosis, not yet end-to-end verified.** Per the integration-status note at the top of this page, the full OAuth flow was not exercised end to end. That `DummyCache` discards writes is well-understood Django behavior, but the specific chain above — `DummyCache` → discarded authorization code → `400` at token exchange — is inferred from the devstack cache defaults rather than a reproduced-and-fixed case. Confirm your deployment's actual `CACHES["default"]` backend before assuming this is the cause.
 
 ---
 
 ### `401 Unauthorized` on static-token clients despite valid Bearer — authentication class ordering
+
+> **Applies to frisian-mcp ≥ 1.0.11; behavior verified on 1.1.1.** The challenge-shape behavior below depends on how discovery-first MCP clients interpret the `WWW-Authenticate` `realm` parameter, which is client- and version-specific. Confirm against your frisian-mcp and client versions rather than applying the ordering blindly; see the [install guide](../../../../../installs/Django/openedx/sumac/install.md) for the current authentication-chain configuration.
 
 **Cause:** OAuth-first chain ordering. When `OAuthTokenAuthentication` is listed before `FrisianMcpTokenAuthentication`, the 401 WWW-Authenticate challenge emitted on unauthenticated requests is `Bearer realm="...", resource_metadata="..."`. Discovery-first MCP clients (Claude Code, Codex, Gemini CLI) interpret the `realm` parameter as a directive to probe `.well-known/` and run the OAuth discovery cascade — which dead-ends when DCR is closed, even though the operator's `mcp.json` carries a valid static Bearer.
 
@@ -114,13 +118,13 @@ FRISIAN_MCP_AUTHENTICATION_CLASSES = [
 
 ---
 
-### Anthropic MCP client drops Bearer token intermittently
+### Bearer token intermittently missing on `tools/call` (observed with some hosted MCP clients)
 
 **Symptom:** MCP connection succeeds, dispatcher discovery calls work, but resource operations return `403 You do not have permission`.
 
-**Cause:** Intermittent bug in Anthropic's MCP client — the `Authorization` header is not forwarded on `tools/call` requests after initial session establishment. This is an Anthropic platform issue.
+**Cause (observed, not confirmed upstream):** On some hosted MCP web connectors the `Authorization` header has been seen to drop on `tools/call` requests after the initial session handshake, even though discovery calls still carry it. This has been observed intermittently with the Claude.ai web connector; it has not been reproduced deterministically or tied to a specific client version, so treat it as an environment-specific symptom rather than a settled client defect, and re-check against your client's current version.
 
-**Workaround:** Re-save the MCP connector configuration in the AI client to force a fresh connection. frisian-mcp's `WWW-Authenticate` response header includes `resource_metadata` pointing to the OAuth discovery endpoint, enabling the client to re-authenticate automatically.
+**Workaround:** Re-save the MCP connector configuration in the client to force a fresh connection. frisian-mcp's 401 `WWW-Authenticate` response header includes a `resource_metadata` link to the OAuth discovery endpoint, so a client that re-runs discovery can re-authenticate.
 
 ---
 
@@ -139,7 +143,7 @@ FRISIAN_MCP_AUTHENTICATION_CLASSES = [
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 8_000
 ```
 
-This applies to all tool responses. Large list responses are automatically cached and returned as a continuation token rather than inline JSON.
+**Scope and response shape.** This backstop is a byte-size threshold, so it applies to *any* tool response — read, write, or retrieve — whose serialized size exceeds the limit, not only large lists. When it triggers, frisian-mcp does not return the inline result: it caches the full result and returns the same negotiation **probe envelope** that `@mcp_heavy` produces, carrying `total_size`, `available_modes` (`summary`, `paginated`, `filtered`, `full`), and a `continuation_token`. The agent re-invokes the same tool with that token and a chosen mode to fetch the data; responses are not silently replaced with a bare token.
 
 ---
 

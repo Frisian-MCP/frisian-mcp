@@ -8,7 +8,7 @@ frisian-mcp is built on published, widely-adopted specifications. The tables bel
 
 | Spec | Title | Where Used |
 |------|-------|------------|
-| [MCP Specification](https://spec.modelcontextprotocol.io) | Model Context Protocol — Anthropic | Core protocol implemented by `McpView`. Defines tool discovery (`tools/list`), tool invocation (`tools/call`), and the `initialize` handshake. |
+| [MCP Specification](https://modelcontextprotocol.io/specification) | Model Context Protocol — Anthropic | Core protocol implemented by `McpView`. Defines tool discovery (`tools/list`), tool invocation (`tools/call`), and the `initialize` handshake. |
 | [JSON-RPC 2.0](https://www.jsonrpc.org/specification) | JSON-RPC 2.0 Specification | Transport format for all MCP traffic. Every MCP request and response is a JSON-RPC 2.0 message (`jsonrpc`, `id`, `method`, `result`, `error`). |
 | [SSE (Server-Sent Events)](https://html.spec.whatwg.org/multipage/server-sent-events.html) | W3C/WHATWG Living Standard | Optional streaming transport. When the client sends `Accept: text/event-stream`, `McpView` wraps JSON-RPC responses in an SSE stream with `Content-Type: text/event-stream`. |
 

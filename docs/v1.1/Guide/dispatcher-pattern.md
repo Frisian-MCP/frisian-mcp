@@ -111,10 +111,14 @@ For full control over the dispatcher's name, description, and action implementat
 ```python
 from frisian_mcp.decorators import mcp_dispatcher, mcp_action
 
-@mcp_dispatcher(name='network_infrastructure')
+@mcp_dispatcher(
+    name='network_infrastructure',
+    description='Dispatch network infrastructure operations across DCIM resources.',
+)
 class NetworkInfrastructureDispatcher:
 
     @mcp_action(
+        name='list_devices',
         description='List network devices filtered by site, role, or status. '
                     'Returns count and pagination metadata for large result sets.',
     )
@@ -124,6 +128,7 @@ class NetworkInfrastructureDispatcher:
         return Response(data)
 
     @mcp_action(
+        name='create_device',
         description='Create a new network device with full DCIM record.',
         write=True
     )

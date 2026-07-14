@@ -189,6 +189,35 @@ class TestAuditContextSeam:
         assert record.tool_action is None
         assert record.resource is None
 
+    def test_unknown_dispatcher_resource_is_not_logged_verbatim(
+        self, registry: ToolRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A dispatcher resource that names no real member is caller data, not a label.
+
+        Only resource/action that resolve to a real group member are logged; an
+        arbitrary (potentially PII) value on the unknown-pair deny path must not
+        reach the sink verbatim — unlike a real-but-denied resource, which does.
+        """
+        view = _mount(_cfg("default", GATEWAY, allow=("*",)), registry)
+        with caplog.at_level(logging.INFO, logger=AUDIT_LOGGER):
+            _call(view, GATEWAY, "catalog", {"resource": "ssn-123-45-6789", "action": "list"})
+        (record,) = _audit_records(caplog)
+        assert record.decision == "deny"
+        assert record.resource is None
+        assert record.tool_action is None
+        assert "ssn-123-45-6789" not in repr(vars(record))
+
+    def test_continuation_expired_emits_audit_record(
+        self, registry: ToolRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A pre-dispatch continuation short-circuit is audited (DOC-7 coverage gap)."""
+        view = _mount(_cfg("default", GATEWAY), registry)
+        with caplog.at_level(logging.INFO, logger=AUDIT_LOGGER):
+            _call(view, GATEWAY, "ping", {"continuation_token": "does-not-exist"})
+        (record,) = _audit_records(caplog)
+        assert record.decision == "deny"
+        assert record.reason == "continuation_expired"
+
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("admin"))
     def test_legacy_plain_view_records_request_path_and_no_route(
         self, caplog: pytest.LogCaptureFixture

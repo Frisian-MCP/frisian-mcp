@@ -50,7 +50,6 @@ The lean envelope is returned by default for all write operations. Its structure
 ```json
 {
   "accepted": 60,
-  "failed": 0,
   "status_code": 201,
   "data_size": 43190,
   "continuation_token": "<token>"
@@ -61,7 +60,6 @@ The lean envelope is returned by default for all write operations. Its structure
 
 ```json
 {
-  "id": "abc123",
   "deleted": true,
   "status_code": 204
 }
@@ -154,7 +152,7 @@ The lean envelope default is transparent for agents that only need write confirm
 
 An agent creating 60 devices in a network automation session:
 
-- Write call returns `{accepted: 60, failed: 0, status_code: 201, data_size: 43190, continuation_token: "..."}` — approximately 24 tokens
+- Write call returns `{accepted: 60, status_code: 201, data_size: 43190, continuation_token: "..."}` — approximately 24 tokens
 - Agent confirms success and moves to the next step (IP assignment, VLAN configuration)
 - If any device record needs inspection, the continuation token retrieves it without a second write
 
@@ -184,8 +182,8 @@ See [Read-Response Filtering](read-response-filtering.md) for the `@mcp_heavy` g
 | Scenario | Default behavior | Override |
 |---|---|---|
 | Single create/update | Lean envelope (`id`, `url`, `name`, `status_code`, `data_size`, `continuation_token`) | `verify=True` for full inline response |
-| Bulk create/update | Lean envelope (`accepted`, `failed`, `status_code`, `data_size`, `continuation_token`) | `verify=True` for full inline response |
-| Delete | Lean envelope (`id`, `deleted`, `status_code`) | No override needed; delete echoes are not large |
+| Bulk create/update | Lean envelope (`accepted`, `status_code`, `data_size`, `continuation_token`) | `verify=True` for full inline response |
+| Delete | Lean envelope (`deleted`, `status_code`) | No override needed; delete echoes are not large |
 | Read/list | Unaffected — `@mcp_light` does not apply | N/A |
 | Extra fields in envelope | Standard fields only | Add `mcp_light_key` to serializer Meta |
 | Full object after write | Retrieve via continuation token | `verify=True` for inline receipt |

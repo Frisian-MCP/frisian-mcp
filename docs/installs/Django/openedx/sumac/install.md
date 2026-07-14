@@ -238,9 +238,24 @@ FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 8_000  # bytes
 ### Using a frisian-mcp Static API Key
 
 ```python
+import hmac
+import hashlib
+from django.conf import settings
+
+
+def _hash(raw: str) -> str:
+    return hmac.new(
+        settings.FRISIAN_MCP_HMAC_KEY.encode(),
+        raw.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+# Keys MUST be the HMAC-SHA256 digest of the raw key, never the raw key itself.
+# Generate a digest instead with: python manage.py mcp_hash_api_key <raw-key>
 FRISIAN_MCP_API_KEYS = {
-    "my-agent-key": "read_write",
-    "readonly-agent": "read",
+    _hash("my-agent-key"):   "read_write",
+    _hash("readonly-agent"): "read",
 }
 ```
 

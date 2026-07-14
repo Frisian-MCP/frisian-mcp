@@ -35,7 +35,7 @@ pip install frisian-mcp
 For projects using `requirements.txt` or `pyproject.toml`:
 
 ```text
-frisian-mcp>=0.2.0
+frisian-mcp>=1.1
 ```
 
 ---
@@ -111,7 +111,7 @@ urlpatterns = [
 
 This mounts the gateway at `/mcp`. Clients connect to `https://your-domain.example/mcp`.
 
-> **Why `re_path`?** MCP clients like Claude.ai and Cursor strip trailing slashes from the server URL. Django's `APPEND_SLASH` mechanism issues a 308 redirect from `/mcp` → `/mcp/`, and MCP clients do not follow 308 redirects, causing the connection to fail silently. The `re_path` pattern with optional trailing slash (`/?`) handles both forms without a redirect.
+> **Why `re_path`?** MCP clients like Claude.ai and Cursor may strip the trailing slash from the server URL. Django's `APPEND_SLASH` would normally issue a 301 redirect from `/mcp` → `/mcp/`, which those clients don't follow. The `re_path` pattern with an optional trailing slash (`/?`) matches both forms directly, and the package also auto-installs `McpTrailingSlashMiddleware`, which suppresses the `APPEND_SLASH` redirect on the gateway path — so both `/mcp` and `/mcp/` reach the endpoint with no redirect either way.
 
 ---
 

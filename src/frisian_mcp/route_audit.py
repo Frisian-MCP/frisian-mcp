@@ -61,6 +61,7 @@ from django.core.checks import (  # pylint: disable=redefined-builtin
 from django.core.exceptions import ImproperlyConfigured
 
 if TYPE_CHECKING:  # pragma: no cover
+    from frisian_mcp.apps import FrisianMcpConfig
     from frisian_mcp.route_config import RouteConfig
 
 logger = logging.getLogger(__name__)
@@ -797,11 +798,10 @@ def force_tool_discovery() -> bool:
 
     from django.apps import apps as django_apps  # pylint: disable=import-outside-toplevel
 
-    from frisian_mcp.apps import (  # pylint: disable=import-outside-toplevel
-        FrisianMcpConfig,
-    )
-
-    app_config = cast(FrisianMcpConfig, django_apps.get_app_config("frisian_mcp"))
+    # ``FrisianMcpConfig`` is a *typing-only* dependency here — the cast is a
+    # string forward reference so this module never imports apps at runtime.
+    # apps imports route_audit, so a real import closes a cycle (pylint R0401).
+    app_config = cast("FrisianMcpConfig", django_apps.get_app_config("frisian_mcp"))
     if app_config._mcp_discovered:  # noqa: SLF001  # pylint: disable=protected-access
         return False
     app_config._run_deferred_discovery()  # noqa: SLF001  # pylint: disable=protected-access

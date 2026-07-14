@@ -27,7 +27,7 @@ Each result is prefixed with:
 
 ---
 
-## Standard audit (8 checks)
+## Standard audit (11 checks)
 
 Run on every invocation. No flags required.
 
@@ -71,11 +71,23 @@ Reports whether `FRISIAN_MCP_OAUTH_REGISTRATION_OPEN` is `True` (agents can self
 
 When `FRISIAN_MCP_OAUTH_AUTHORIZE_URL` is set, sends an HTTP `GET` to it and reports the response status. Catches URL typos and misconfigured routes before an agent hits them.
 
+### 9. OAuth tier permissions
+
+Audits `FRISIAN_MCP_OAUTH_TIER_PERMISSIONS`. When set it must be a `dict[str, list[str]]` keyed by tier (`read`, `read_write`, `admin`); an unknown tier key or a non-list value makes `has_perm` fall back to default-deny for that tier. Reports how many tiers are configured, or notes default-deny when the setting is unset.
+
+### 10. Legacy PKCE redirect tier map
+
+Warns when the removed `FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP` is still present. Under the hardened authorize path a request's `redirect_uri` can no longer influence the client's permission tier, so the setting is no longer read and should be deleted.
+
+### 11. Per-route surface audit
+
+When `FRISIAN_MCP_ROUTES` is configured, forces tool discovery and runs the same per-route surface audit as `manage.py check` — which structurally cannot see a populated tool registry — surfacing net-empty (`W008`), working-carve-out (`W009`), and entry-matched-nothing (`W110`–`W113`) findings. `--strict` promotes a LOUD finding to a non-zero exit so CI can gate here.
+
 ---
 
 ## Extended security audit (`--security` flag)
 
-Adds six additional checks aimed at OAuth-specific misconfigurations.
+Adds eight additional checks aimed at OAuth-specific misconfigurations.
 
 ### 1. OAuth service user attribution
 
@@ -93,11 +105,19 @@ Warns when `FRISIAN_MCP_REQUEST_BODY_MAX_SIZE` is not explicitly set. The defaul
 
 Warns when `FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER=True` outside of DEBUG. With it enabled, any caller can register a new OAuth client by presenting an unknown `client_id` at `/oauth/authorize/`. Acceptable for local dev or an explicitly open MCP platform; surface for review otherwise.
 
-### 5. `registration_endpoint` consistency
+### 5. Consent auto-approve posture
+
+When `FRISIAN_MCP_OAUTH_AUTO_APPROVE=True` outside DEBUG, warns that the repeat-grant fast path is active: the first-time consent gate still renders, but later authorize requests for the same (user, client, redirect_uri, scope) tuple skip the form. Also flags the `AUTO_APPROVE` + `PKCE_AUTO_REGISTER` combination, which is only safe behind a tight host allowlist.
+
+### 6. Consent records present
+
+When `AUTO_APPROVE=True` but no `OAuthAuthorizeConsent` rows exist, warns that every authorize call still renders the form — on an established deployment that usually signals consent-record drift.
+
+### 7. `registration_endpoint` consistency
 
 Reports whether `registration_endpoint` is advertised in `.well-known` metadata. Useful when diagnosing the cases where a discovery-first OAuth client can't find DCR and bails with *"Incompatible auth server: does not support dynamic client registration."*
 
-### 6. HMAC key rotation safety
+### 8. HMAC key rotation safety
 
 Warns when `FRISIAN_MCP_HMAC_KEY` either isn't set or equals `SECRET_KEY`. In both cases, rotating `SECRET_KEY` invalidates every issued frisian-mcp token. Recommends a separate randomly-generated HMAC key for independent rotation.
 

@@ -5,6 +5,28 @@
 
 ---
 
+## v1.1.1 — 2026-07
+
+### Added
+
+- **Per-route permission model** (`FRISIAN_MCP_ROUTES`). Mount the gateway at multiple paths, each with its own tier ceiling and `allow_list` / `deny_list` of tools, on a deny-all baseline. A startup surface audit (Django `check` plus `mcp_doctor --strict`) reports net-empty and dead-entry routes before deploy. See [ADR-010](../ADR/adr-010-per-route-permission-model.md).
+- **Permission-aware discovery** (`FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`). `tools/list` is filtered to each caller's own identity, resolved via Django's `user.has_perm()`, so discovery matches host authorization natively — honoring superuser status, `EXEMPT_VIEW_PERMISSIONS`, and custom auth backends. See [ADR-008](../ADR/adr-008-permission-aware-discovery.md).
+
+### Changed
+
+- Default permission-adapter capability resolution moved from `user.get_all_permissions()` to `user.has_perm()`.
+
+### Deprecated
+
+- `ExemptViewPermissionAdapter` is now a no-op — the default adapter honors view exemptions natively. Remove `FRISIAN_MCP_PERMISSION_ADAPTER`; nothing replaces it.
+
+### Removed
+
+- Retired the **E002** startup check (unresolved-OAuth-identity gate); unmapped OAuth clients now fall back to service-principal, tier-only discovery.
+- Retired the legacy `FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP` setting; under the hardened authorize path a request's `redirect_uri` cannot influence a client's permission tier.
+
+---
+
 ## v1.0 — 2026-06
 
 ### Restored: `Meta.mcp_light_key` consumption in the lean write envelope
@@ -350,7 +372,7 @@ Initial release. PyPI namespace registered. Core MCP gateway working.
 
 **Imminent**
 
-- PyPI public release (v1.0.0)
+- PyPI public release
 - AAIF submission — frisian-mcp will be submitted to the Linux Foundation's AI Application Interoperability Framework alongside the MCP ecosystem
 
 ---

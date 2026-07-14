@@ -675,9 +675,9 @@ class TestGroupDispatcherVisibility:
             req = _build_request(perms=set())
             body = self._post_tools_list(req)
             names = [t["name"] for t in body["result"]["tools"]]
-            assert group_name not in names, (
-                "Group should be hidden when user lacks capabilities for perm-aware children"
-            )
+            assert (
+                group_name not in names
+            ), "Group should be hidden when user lacks capabilities for perm-aware children"
 
             # User has the matching permission → group visible.
             req2 = _build_request(perms={"net.view_network"})

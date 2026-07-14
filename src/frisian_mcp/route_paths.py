@@ -203,6 +203,9 @@ def normalize_route_path(value: Any, *, route_name: str | None = None) -> str:
     return normalized
 
 
+_DEFAULT_HEALTHCHECK_PATHS: list[str] = ["backend/healthcheck"]
+
+
 def reserved_route_paths() -> tuple[str, ...]:
     """
     Return every reserved path in canonical form, including healthcheck paths.
@@ -216,10 +219,6 @@ def reserved_route_paths() -> tuple[str, ...]:
     :mod:`frisian_mcp.apps` defers its own imports.
     """
     from django.conf import settings  # pylint: disable=import-outside-toplevel
-
-    from frisian_mcp.apps import (  # pylint: disable=import-outside-toplevel
-        _DEFAULT_HEALTHCHECK_PATHS,
-    )
 
     raw_healthchecks: Iterable[Any] = getattr(
         settings, "FRISIAN_MCP_HEALTHCHECK_PATHS", _DEFAULT_HEALTHCHECK_PATHS

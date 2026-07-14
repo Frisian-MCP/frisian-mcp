@@ -29,7 +29,7 @@ Add to `settings.py`:
 FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True
 ```
 
-This enables the filter with the default `DjangoPermissionAdapter`, which delegates to Django's standard `user.get_all_permissions()`. For backends that use `EXEMPT_VIEW_PERMISSIONS` semantics, use `ExemptViewPermissionAdapter` instead (see Built-In Adapters below).
+This enables the filter with the default `DjangoPermissionAdapter`, which resolves each capability through Django's `user.has_perm()` — the same predicate the host authorizes with, so superuser status, `EXEMPT_VIEW_PERMISSIONS`, and custom auth backends are all honored natively. No adapter selection is needed for those cases.
 
 By default, the feature is **off**. Default-off means upgrading installs see zero behavior change unless they explicitly opt in.
 
@@ -44,7 +44,7 @@ On every `tools/list` request, frisian-mcp:
 3. Calls `adapter.get_capabilities(user)` — returns the set of `"app_label.action_model"` strings this user holds
 4. Filters the tool registry: a tool is included only if the user holds the required permission for its content type and action
 
-This adds one cached query per `tools/list` request. Subsequent capability checks are O(1) in-memory lookups. At 50 or 500 tools, the overhead is negligible.
+With the default `DjangoPermissionAdapter`, this adds one cached query per `tools/list` request and subsequent capability checks are O(1) in-memory lookups, so at 50 or 500 tools the overhead is negligible. A custom adapter's `get_capabilities()` is still called on every request — its cost depends on what it does, so cache any database or network work it performs; the negligible-overhead claim applies to the default adapter, not to arbitrary custom ones.
 
 ### CRUD action mapping
 
@@ -63,7 +63,7 @@ Non-CRUD actions require explicit annotation (see `backend_action` below).
 
 Group dispatchers are filtered: a dispatcher group tool is shown only if the user holds at least one permission covering a resource in that group.
 
-Plain class-based dispatchers (registered via `@mcp_dispatcher` without group configuration) are always visible — per-content-type filtering for class-based dispatchers is a V2 concern.
+Plain class-based dispatchers (registered via `@mcp_dispatcher` without group configuration) are always **visible** at runtime — per-content-type *visibility* filtering for class-based dispatchers is a V2 concern. This is separate from the E003 startup check below: a non-CRUD action still needs a `backend_action` annotation to pass E003 (which validates annotation completeness at startup), whether or not the dispatcher is visibility-filtered.
 
 Custom `@mcp_tool` registrations (without model metadata) are always visible.
 
@@ -77,21 +77,22 @@ Superusers bypass the filter and see all tools. This matches the behavior of mos
 
 ### `DjangoPermissionAdapter` (default)
 
-Works for any project using Django's standard auth backend. Delegates to `user.get_all_permissions()`.
+Works for any project using Django's standard auth backend. Resolves each capability through `user.has_perm()` — a strict superset of `user.get_all_permissions()` that also honors superuser status, `EXEMPT_VIEW_PERMISSIONS`, and custom auth backends, so what a caller can *see* in discovery matches what the host will actually *authorize* on invocation.
 
 No configuration needed when `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True` — this adapter is used automatically.
 
-### `ExemptViewPermissionAdapter`
+### `ExemptViewPermissionAdapter` (deprecated in 1.1.1 — do not use)
 
-For backends that mark certain models as globally readable via an `EXEMPT_VIEW_PERMISSIONS` setting. This adapter synthesizes `"app_label.view_<model>"` capabilities for those models so their corresponding tools appear in `tools/list` for all authenticated users, matching the implicit read-access semantics.
+This adapter existed to patch a gap in the old `get_all_permissions()`-based default: on a host with an `EXEMPT_VIEW_PERMISSIONS` setting, a view-exempt model's tool was hidden from discovery even though the caller could still invoke it. Since 1.1.1 the default `DjangoPermissionAdapter` resolves capabilities through `user.has_perm()`, which honors `EXEMPT_VIEW_PERMISSIONS` (and custom auth backends) natively, so this adapter is now a **deprecated no-op** — it subclasses `DjangoPermissionAdapter`, adds nothing, emits a `DeprecationWarning`, and will be removed in the next minor release.
+
+**Migration:** delete the setting; nothing replaces it. The default adapter is already correct on exemption-using hosts.
 
 ```python
-FRISIAN_MCP_PERMISSION_ADAPTER = (
-    "frisian_mcp.contrib.permissions.exempt_view_adapter.ExemptViewPermissionAdapter"
-)
+# Remove this — the default adapter handles view exemptions natively:
+# FRISIAN_MCP_PERMISSION_ADAPTER = (
+#     "frisian_mcp.contrib.permissions.exempt_view_adapter.ExemptViewPermissionAdapter"
+# )
 ```
-
-Supports both `"__all__"` (all installed models are view-exempt) and an explicit list of `"app_label.model_name"` strings.
 
 ---
 
@@ -100,7 +101,12 @@ Supports both `"__all__"` (all installed models are view-exempt) and an explicit
 To integrate with a non-standard permission backend, implement the `PermissionAdapter` protocol:
 
 ```python
+import logging
+
 from frisian_mcp.contrib.permissions.base import PermissionAdapter
+
+logger = logging.getLogger(__name__)
+
 
 class MyPermissionAdapter:
 
@@ -111,10 +117,13 @@ class MyPermissionAdapter:
         """
         try:
             return frozenset(str(p) for p in user.get_all_permissions())
-        except Exception as exc:  # narrow this to your backend's expected errors
+        except Exception:  # narrow this to your backend's expected errors
+            # Log a stable, non-sensitive identifier only — never the raw user
+            # object or exception text, which can leak usernames, emails, or
+            # backend/request data into logs.
             logger.warning(
-                "Permission adapter failed for %r; returning no capabilities (fail-closed): %s",
-                user, exc,
+                "Permission adapter failed for user id=%s; returning no capabilities (fail-closed)",
+                getattr(user, "pk", "?"),
             )
             return frozenset()
 
@@ -135,9 +144,9 @@ The adapter is loaded once at startup and called on every `tools/list` request.
 
 ## OAuth Configuration
 
-Permission-aware discovery requires the OAuth token to resolve to a real Django user. `OAuthServicePrincipal` — the default OAuth identity when no user mapping is configured — holds no Django permissions and would produce an empty `tools/list`.
+When an OAuth token maps to a real Django user, discovery is filtered by that user's permissions. When it does not — the default `OAuthServicePrincipal` identity, used when no user mapping is configured — the request is treated as a **service principal**: it bypasses capability filtering entirely and the permission **tier is the sole gate**. Such a client sees every tool at or below its tier, not a filtered per-identity surface. Map the client to a Django user (below) when you want its discovery scoped by that user's permissions.
 
-frisian-mcp raises a startup error (E002) if `contrib.oauth` is installed, `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY` is enabled, and no OAuth user resolution is configured.
+Mapping a client to a Django user is optional: an unmapped client falls back to the service-principal behavior above (tier-only gating), so leaving it unmapped is a supported configuration, not a startup error.
 
 ### Per-client user (recommended)
 
@@ -151,7 +160,7 @@ OAuthClient "device-agent"
   └─ user: device_service_account
 ```
 
-Each agent sees and executes as its own scoped user.
+Each agent's discovery is scoped to its configured user; execution is authorized as that user only when the execution path enforces the resolved Django user.
 
 ### Global fallback (`FRISIAN_MCP_OAUTH_SERVICE_USER`)
 
@@ -161,21 +170,15 @@ When all OAuth clients should use the same execution identity:
 FRISIAN_MCP_OAUTH_SERVICE_USER = "mcp_service_account"
 ```
 
-If neither per-client user nor the global fallback is set, startup check E002 fires.
+If neither per-client user nor the global fallback is set, unmapped clients fall back to service-principal (tier-only) discovery — no startup error is raised.
 
 ---
 
 ## Startup Checks
 
-### E002 — OAuth identity gap
-
-**Trigger:** `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True`, `frisian_mcp.contrib.oauth` is installed, and no OAuth user resolution is configured (no per-client users and no `FRISIAN_MCP_OAUTH_SERVICE_USER`).
-
-**Fix:** Set `FRISIAN_MCP_OAUTH_SERVICE_USER` in settings, or configure a user on each `OAuthClient` record in the admin.
-
 ### E003 — Unannotated non-CRUD action
 
-**Trigger:** `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True` and a `@mcp_dispatcher` has a non-CRUD action without a `backend_action` annotation.
+**Trigger:** `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True` and a `@mcp_dispatcher` has a non-CRUD action without a `backend_action` annotation. This is a **startup-validation** check on annotation completeness; it fires regardless of whether the dispatcher is visibility-filtered at runtime (class-based dispatchers are not filtered, but their non-CRUD actions still need the annotation so the permission mapping is unambiguous).
 
 **Fix:** Add `backend_action` to the `@mcp_action` decorator (see below).
 
@@ -188,14 +191,18 @@ Standard CRUD actions (`list`, `retrieve`, `create`, `update`, `partial_update`,
 ```python
 from frisian_mcp.decorators import mcp_dispatcher, mcp_action
 
-@mcp_dispatcher(name="network_device")
+@mcp_dispatcher(
+    name="network_device",
+    description="Dispatch network device operations.",
+)
 class NetworkDeviceDispatcher:
 
-    @mcp_action(description="List devices.")
+    @mcp_action(name="list", description="List devices.")
     def list(self, request, params):  # CRUD — no annotation needed
         ...
 
     @mcp_action(
+        name="diagnostics",
         description="Run a diagnostics check on a device.",
         backend_action="view",  # maps to app_label.view_<model>
     )

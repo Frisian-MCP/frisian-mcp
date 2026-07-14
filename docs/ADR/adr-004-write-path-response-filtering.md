@@ -41,14 +41,14 @@ All write tools return a lean confirmation envelope without agent intervention. 
 
 **Lean field extraction order:**
 
-The envelope always includes `status_code`, `data_size`, and `continuation_token`. The identifying fields are extracted in priority order from the serialized object: `id`/`pk` → `url` → `name`/`display` → any fields annotated with `@mcp_light_key`.
+The envelope always includes `status_code`, `data_size`, and `continuation_token`. The identifying fields are extracted in priority order from the serialized object: `id`/`pk` → `url` → `name`/`display` → any fields listed in the serializer's `Meta.mcp_light_key`.
 
-**`@mcp_light_key` annotation:**
+**`Meta.mcp_light_key` annotation:**
 
 Host app serializers can annotate specific fields to ensure they appear in every lean envelope for that serializer, even when those fields are not the conventional `id`/`url`/`name` fields:
 
 ```python
-from frisian_mcp.decorators import mcp_light_key
+from rest_framework import serializers
 
 class DeviceSerializer(serializers.ModelSerializer):
     site_slug = serializers.SlugRelatedField(

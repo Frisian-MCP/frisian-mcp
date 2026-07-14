@@ -11,6 +11,11 @@ from django.apps import AppConfig
 from django.conf import settings
 from django.http import HttpRequest
 
+# Defined in route_paths, not here: that module reserves the healthcheck path
+# against route shadowing and must not import back into apps (cyclic-import).
+# Re-exported so ``apps._DEFAULT_HEALTHCHECK_PATHS`` stays a valid name.
+from frisian_mcp.route_paths import _DEFAULT_HEALTHCHECK_PATHS
+
 if TYPE_CHECKING:
     from frisian_mcp.backends.base import BaseInvocationBackend, ToolDefinition
 
@@ -576,9 +581,6 @@ def _install_bare_register_url() -> bool:
     resolver.url_patterns.insert(0, pattern)
     clear_url_caches()
     return True
-
-
-_DEFAULT_HEALTHCHECK_PATHS: list[str] = ["backend/healthcheck"]
 
 
 def _install_healthcheck_urls() -> int:

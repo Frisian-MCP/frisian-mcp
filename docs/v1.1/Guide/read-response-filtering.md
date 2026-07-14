@@ -46,41 +46,43 @@ The response includes:
 
 ```json
 {
-  "count": 847,
-  "data_size": 3218600,
-  "next": "<continuation_token>",
-  "previous": null,
-  "results": [ ... first page of records ... ]
+  "preview": "{\"count\": 847, \"results\": [ ...first records, values truncated... ]}",
+  "total_size": 3218600,
+  "available_modes": ["summary", "paginated", "filtered", "full"],
+  "continuation_token": "<token>"
 }
 ```
 
-- `count` — total records matching the filter
-- `data_size` — estimated full response size in bytes
-- `next` — continuation token to fetch the next page
-- `results` — first page (default page size applies)
+- `preview` — a short, truncated preview of the result (first few list items or top-level keys, values clipped) so the agent can see the shape without the full payload
+- `total_size` — full serialized response size in bytes
+- `available_modes` — the retrieval modes the agent may request on the follow-up call
+- `continuation_token` — opaque token that fetches the cached full result in the chosen mode
 
-**Call 2+ — page fetches:**
+**Call 2 — fetch in a chosen mode:**
 
-If the agent decides to paginate, it calls the same tool with the continuation token:
+If the agent decides it needs the data, it re-invokes the same tool with the `continuation_token` and a `mode`:
 
 ```json
 {
   "resource": "device",
   "action": "list",
   "params": { "site": "hq-1" },
-  "next": "<continuation_token>"
+  "continuation_token": "<token>",
+  "mode": "paginated",
+  "page": 1,
+  "page_size": 20
 }
 ```
 
-Each page fetch returns the next set of results plus an updated continuation token for the following page. When `next` is null, all records have been retrieved.
+The `mode` selects how much of the cached result comes back: `summary` (top-level keys or the first few list items, values truncated), `paginated` (one page — pass `page` and `page_size`), `filtered` (only the keys named in `filter_keys`), or `full` (the complete original result). These five fields — `continuation_token`, `mode`, `page`, `page_size`, `filter_keys` — are merged into the tool's input schema automatically.
 
 **Agent decision point:**
 
 After the probe response, the agent has enough information to decide:
 
-- The total count is small → proceed with the first page, no further calls needed
-- The total count is large, but the agent only needs an aggregate → work with `count` alone, no page fetches
-- The total count is large and the agent needs all data → paginate deliberately, fetch as many pages as needed
+- `total_size` is small → fetch `full`, no negotiation needed
+- The agent only needs an aggregate the `preview` already shows → work from the preview alone, no fetch
+- `total_size` is large and the agent needs all data → fetch deliberately in `paginated` mode, page by page
 - The filter was too broad → refine the filter and call again with narrower parameters
 
 This decision-making happens within the agent's context. Without the probe response, the agent has no basis for these decisions — it either receives everything or nothing.
@@ -144,7 +146,7 @@ Auto-negotiation is a fallback, not a replacement for explicit annotation. An ex
 
 DRF's built-in `PAGE_SIZE` setting truncates result sets to a maximum page size. `@mcp_heavy` is complementary, not a replacement.
 
-DRF pagination limits database query cost and response transfer size — useful for all callers. `@mcp_heavy` ensures the structured metadata (`count`, `data_size`, `next`) is present in the MCP response regardless of the underlying ViewSet's pagination class configuration. Some ViewSets use custom pagination classes that do not include all these fields; `@mcp_heavy` guarantees the contract at the MCP layer.
+DRF pagination limits database query cost and response transfer size — useful for all callers. `@mcp_heavy` ensures the structured probe metadata (`total_size`, `available_modes`, `continuation_token`) is present in the MCP response regardless of the underlying ViewSet's pagination class configuration. Some ViewSets use custom pagination classes that do not include all these fields; `@mcp_heavy` guarantees the contract at the MCP layer.
 
 The recommended production configuration is both: DRF `PAGE_SIZE` for general query cost control, plus `@mcp_heavy` on any list endpoint that could return more than a few dozen records.
 
@@ -156,7 +158,7 @@ From the agent's perspective, `@mcp_heavy` is largely transparent. The agent cal
 
 **Without `@mcp_heavy`:** Agent receives a list of records. If the list is short, fine. If the list is long, the context window fills before the agent can reason about the results.
 
-**With `@mcp_heavy`:** Agent receives count, estimated size, and the first page. The agent now knows whether it received everything ("count: 12, results has 12 entries") or a partial view ("count: 847, results has 50 entries, next: ..."). The agent can make an informed decision about what to do next without exhausting its context window on data it may not need.
+**With `@mcp_heavy`:** Agent receives a probe envelope — a truncated `preview`, the full `total_size`, the `available_modes`, and a `continuation_token`. It can size up the result before pulling it: a small `total_size` means fetch `full` immediately; a large one means negotiate a `summary`, a single `paginated` page, or a `filtered` subset — an informed decision made without exhausting its context window on data it may not need.
 
 For automated pipelines that only need summary information (how many devices are offline? does this prefix exist?), the probe response often provides all needed information in a single call — no page fetches required.
 

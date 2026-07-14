@@ -47,6 +47,7 @@ from typing import Any
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
+from django.core.exceptions import ImproperlyConfigured
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -422,6 +423,54 @@ def _request_visible_entry(request: Any, tool_name: str) -> Any:
     return entry
 
 
+def _dispatcher_audit_labels(
+    request: Any, tool_name: str, arguments: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """
+    Return validated ``(resource, action)`` config-vocabulary labels for the audit.
+
+    Only labels that resolve to a real member of the addressed dispatcher are
+    returned; everything else is ``(None, None)``.  A **group** dispatcher's
+    ``resource``/``action`` are free-form caller strings — the schema has no
+    enum, so validity is enforced by a ``LookupError`` at dispatch, not by the
+    JSON schema.  On an unknown pair (the deny path) they are raw,
+    potentially-sensitive caller input and must not reach the audit sink, whose
+    contract is routing labels only — no PII, no secrets.
+
+    Validation is against the **unpruned** membership of the route view's backing
+    registry, not the route's pruned view: a resource denied on this route is
+    still legitimate config vocabulary (it is named in the route's ``deny_list``),
+    whereas arbitrary caller text is a member of no group at all.  A
+    ``@mcp_dispatcher``'s ``action`` is already enum-constrained by its schema, so
+    it is trusted when it names a known action; that dispatcher has no
+    ``resource`` addressing.
+    """
+    route_view = getattr(request, "_mcp_route_view", None)
+    # The view's backing registry holds the FULL (unpruned) group membership; the
+    # view's own entries are deny-carved, which would wrongly suppress a denied-
+    # but-real resource.  Fall back to the global registry on a plain mount.
+    registry = getattr(route_view, "_registry", None) or tool_registry
+    entry = registry.get_entry(tool_name)
+    if entry is None or not entry.is_dispatcher:
+        return None, None
+    resource = arguments.get("resource")
+    action = arguments.get("action")
+    if entry.group_tool_names is not None:
+        sep = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
+        if (
+            isinstance(resource, str)
+            and isinstance(action, str)
+            and f"{resource}{sep}{action}" in entry.group_tool_names
+        ):
+            return resource, action
+        return None, None
+    if entry.dispatcher_meta is not None:
+        known_actions = getattr(entry.dispatcher_meta, "actions", {})
+        if isinstance(action, str) and action in known_actions:
+            return None, action
+    return None, None
+
+
 def _log_audit_context(
     request: Any,
     tool_name: str,
@@ -443,17 +492,12 @@ def _log_audit_context(
     and user identity are deliberately excluded — no PII, no secrets.
     """
     route_view: RouteView | None = getattr(request, "_mcp_route_view", None)
-    # resource/action are config-vocabulary labels only on dispatcher calls; on
-    # a flat tool the same argument keys would hold caller data, so they are
-    # gated on the addressed entry actually being a dispatcher.  The entry is
-    # resolved from the route view first — a carved group's dispatcher is a
-    # route-local rebuild that the global registry does not hold.
-    entry = (
-        route_view.entries.get(tool_name)
-        if route_view is not None
-        else tool_registry.get_entry(tool_name)
-    )
-    is_dispatcher = bool(entry is not None and entry.is_dispatcher)
+    # resource/action are logged only when they are validated config-vocabulary
+    # labels of the addressed dispatcher (see _dispatcher_audit_labels).  On a
+    # flat tool, or on a dispatcher call whose resource/action do not name a real
+    # member, they are treated as caller data and excluded — no raw caller input
+    # reaches the sink even on the unknown-pair deny path.
+    resource_label, action_label = _dispatcher_audit_labels(request, tool_name, arguments)
     audit_logger.info(
         "mcp_audit_context",
         extra={
@@ -464,8 +508,8 @@ def _log_audit_context(
             "effective_ceiling": getattr(request, "_mcp_max_tier", None),
             "effective_tier": getattr(request, "_mcp_effective_tier", None),
             "tool": tool_name,
-            "resource": arguments.get("resource") if is_dispatcher else None,
-            "tool_action": arguments.get("action") if is_dispatcher else None,
+            "resource": resource_label,
+            "tool_action": action_label,
             "decision": decision,
             "reason": reason,
         },
@@ -1124,6 +1168,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # protocol error) so MCP clients render it as a normal tool denial and
     # the JSON-RPC session stays alive for the caller to inspect.
     if conn is None and has_inactive_match:
+        # DOC-7: this is a fail-closed permission decision — audit it before
+        # returning, since these pre-dispatch returns never reach the try/finally.
+        _log_audit_context(request, tool_name, arguments, decision="deny", reason="agent_inactive")
         return _jsonrpc_success(
             request_id,
             {
@@ -1145,6 +1192,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         )
     if conn is not None and conn.allowed_tools is not None:
         if tool_name not in frozenset(conn.allowed_tools):
+            # DOC-7: an agent-allowlist rejection is a permission denial — the
+            # most audit-relevant decision on this path; record it before return.
+            _log_audit_context(
+                request, tool_name, arguments, decision="deny", reason="agent_not_allowed"
+            )
             return _jsonrpc_success(
                 request_id,
                 {
@@ -1176,6 +1228,9 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # during cutover than serving cross-caller data.
         is_bound = isinstance(cached, dict) and "owner_key" in cached and "result" in cached
         if cached is None or not is_bound:
+            _log_audit_context(
+                request, tool_name, arguments, decision="deny", reason="continuation_expired"
+            )
             return _jsonrpc_success(
                 request_id,
                 {
@@ -1208,6 +1263,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 "heavy_continuation_owner_mismatch",
                 extra={"tool": tool_name},
             )
+            # DOC-7: SEC-3 owner mismatch is a security decision — audit it.
+            _log_audit_context(
+                request,
+                tool_name,
+                arguments,
+                decision="deny",
+                reason="continuation_owner_mismatch",
+            )
             return _jsonrpc_success(
                 request_id,
                 {
@@ -1230,6 +1293,10 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             )
         _mode: str = arguments.get("mode", "full")
         served = _serve_heavy_mode(cached["result"], _mode, arguments)
+        # DOC-7: serving a cached heavy result is an allowed, audit-worthy call.
+        _log_audit_context(
+            request, tool_name, arguments, decision="allow", reason="continuation_served"
+        )
         return _jsonrpc_success(
             request_id,
             {"content": [{"type": "text", "text": json.dumps(served)}], "isError": False},
@@ -1259,9 +1326,12 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         if "verify" in arguments:
             _dispatch_arguments = {k: v for k, v in arguments.items() if k != "verify"}
 
-    # DOC-7 audit-context seam: the permission decision defaults to allow and
-    # is downgraded by the deny branches below; the ``finally`` emits exactly
-    # one record per resolved call, whatever path the handler leaves through.
+    # DOC-7 audit-context seam for the DISPATCH path: the permission decision
+    # defaults to allow and is downgraded by the deny branches below; the
+    # ``finally`` emits exactly one record per call that reaches this try.  The
+    # pre-dispatch decisions above (agent inactive / not-allowed, continuation
+    # expired / owner-mismatch / served) return before this try and each emit
+    # their own record, so every resolved call is audited exactly once.
     _audit: dict[str, Any] = {"decision": "allow", "reason": None}
     try:
         result = build_middleware_chain(_tool_registry_dispatch, get_middleware_instances())(
@@ -1283,7 +1353,19 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # this branch wraps would otherwise undo itself one line later (WI-1).
         _rv: RouteView | None = getattr(request, "_mcp_route_view", None)
         _known_lister = _rv.list_tools if _rv is not None else tool_registry.list_tools
-        known_names = [t["name"] for t in _known_lister(max_tier=_get_token_permission(request))]
+        # Apply the SAME capability filter tools/list uses (WI-1): under
+        # FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY a near-miss suggestion must not
+        # name a tool the caller lacks Django permission to see — that would
+        # undo the "do not appear at any tier" guarantee one line after the
+        # absence error that wraps it.  The route/tier lens is already applied
+        # via the route view + max_tier; this adds the per-user capability lens.
+        _perm_filter = getattr(request, "_mcp_perm_entry_filter", None)
+        known_names = [
+            t["name"]
+            for t in _known_lister(
+                max_tier=_get_token_permission(request), entry_filter=_perm_filter
+            )
+        ]
         suggestions = difflib.get_close_matches(tool_name, known_names, n=3, cutoff=0.6)
         data = str(exc)
         if suggestions:
@@ -1783,7 +1865,20 @@ class McpView(APIView):
         if self._route_name is None:
             return None
         view = route_views.get(self._route_name)
-        if view is None and self._route_config is not None:
+        if view is None:
+            if self._route_config is None:
+                # A per-route mount with a name but no config can neither resolve
+                # nor rebuild its carved view.  Returning None here would fail
+                # OPEN: every caller treats None as "plain mount → use the
+                # unfiltered global registry", silently serving the full tool
+                # surface on what is meant to be a restricted route.  Fail loud
+                # instead — apps.py always sets _route_name and _route_config
+                # together, so reaching this is a construction bug, not config.
+                raise ImproperlyConfigured(
+                    f"Route {self._route_name!r} is mounted without a route config; "
+                    "cannot resolve its allow/deny view, and refusing to fall back "
+                    "to the unfiltered global registry."
+                )
             view = route_views.rebuild(self._route_config)
         return view
 

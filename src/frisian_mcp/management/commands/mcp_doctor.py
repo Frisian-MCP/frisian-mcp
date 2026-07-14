@@ -227,7 +227,9 @@ class Command(BaseCommand):
         tokens_installed = "frisian_mcp.contrib.tokens" in getattr(settings, "INSTALLED_APPS", [])
         oauth_installed = "frisian_mcp.contrib.oauth" in getattr(settings, "INSTALLED_APPS", [])
 
-        token_auth = "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"  # noqa: S105
+        token_auth = (
+            "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication"  # noqa: S105
+        )
         oauth_auth = "frisian_mcp.contrib.oauth.authentication.OAuthTokenAuthentication"
 
         if tokens_installed and token_auth not in auth_classes:

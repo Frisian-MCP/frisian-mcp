@@ -100,7 +100,7 @@ Run all hooks manually against the full codebase:
 pre-commit run --all-files
 ```
 
-The hooks run mypy and pylint on every staged Python file. A commit is rejected if either tool reports errors. Fix all errors before committing — do not use `--no-verify`.
+The hooks run black, isort, ruff, mypy, and pylint on every staged Python file. A commit is rejected if any tool reports errors. black, isort, and ruff also auto-fix in place — stage the changes and re-commit. Fix all remaining errors before committing — do not use `--no-verify`.
 
 ---
 
@@ -160,7 +160,7 @@ Enforced rules include:
 - No unused imports or variables
 - No shadowed builtins
 - Maximum function length: 50 lines (refactor into helpers beyond this)
-- Maximum file length: 400 lines
+- Maximum file length: 1200 lines (`max-module-lines` in `pyproject.toml`)
 - Docstrings required on all public classes and functions (one-line summaries are fine)
 - No broad `except Exception` without re-raising or logging
 
@@ -179,9 +179,13 @@ The `.pre-commit-config.yaml` at the repo root configures all hooks. The relevan
 
 1. **trailing-whitespace** — removes trailing whitespace
 2. **end-of-file-fixer** — ensures files end with a newline
-3. **check-yaml** — validates YAML syntax
-4. **mypy** — type checking via `mypy src/frisian_mcp/`
-5. **pylint** — code quality via `pylint src/frisian_mcp/`
+3. **check-yaml** / **check-toml** — validate YAML and TOML syntax
+4. **check-merge-conflict** / **debug-statements** — block conflict markers and stray debuggers
+5. **black** — formats code (auto-fixes in place)
+6. **isort** — orders imports (auto-fixes in place)
+7. **ruff** — lints with `--fix` (auto-fixes in place)
+8. **mypy** — type checking via `mypy src/frisian_mcp/`
+9. **pylint** — code quality via `pylint src/frisian_mcp/`
 
 All hooks must pass before the commit is accepted. If a hook auto-fixes a file (trailing whitespace, newlines), stage the fix and commit again:
 
