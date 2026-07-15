@@ -4,6 +4,7 @@ Django system check tests for frisian-mcp configuration safety.
 W001 — FRISIAN_MCP_PERMISSION_CLASSES empty in production.
 W002 — FRISIAN_MCP_API_KEYS contains unhashed (plaintext) keys.
 W003 — FRISIAN_MCP_SERVICE_ACCOUNT_USER set in production.
+W012 — FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False while contrib.oauth is installed.
 """
 
 # pylint: disable=redefined-outer-name
@@ -12,13 +13,15 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from django.test import override_settings
+from django.test import modify_settings, override_settings
 
 from frisian_mcp.checks import (
     W001_NO_PERMISSION_CLASSES,
     W002_PLAINTEXT_API_KEYS,
     W003_PRIVILEGED_SERVICE_ACCOUNT,
+    W012_OAUTH_DISCOVERY_HIDDEN,
     check_api_keys_are_hashed,
+    check_oauth_discovery_not_hidden,
     check_permission_classes_in_production,
     check_service_account_user,
 )
@@ -264,3 +267,55 @@ class TestServiceAccountUserCheck:
         """Empty string is treated as not configured."""
         settings.FRISIAN_MCP_SERVICE_ACCOUNT_USER = ""
         assert not check_service_account_user()
+
+
+# ---------------------------------------------------------------------------
+# W012 — OAuth discovery hidden while contrib.oauth is installed
+# ---------------------------------------------------------------------------
+
+
+class TestOAuthDiscoveryHidden:
+    """W012 fires when contrib.oauth is installed but PUBLIC_DISCOVERY=False."""
+
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+    def test_warning_fires_when_discovery_hidden(self) -> None:
+        """contrib.oauth installed (test settings) + False → one LOUD warning."""
+        warnings = check_oauth_discovery_not_hidden()
+        assert len(warnings) == 1
+        assert warnings[0].id == W012_OAUTH_DISCOVERY_HIDDEN
+
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False, DEBUG=True)
+    def test_warning_fires_in_debug_mode_too(self) -> None:
+        """No DEBUG gate — the handshake is equally broken in development."""
+        assert len(check_oauth_discovery_not_hidden()) == 1
+
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+    def test_message_names_the_setting_and_the_break(self) -> None:
+        """Operators must be able to find the setting and understand the failure."""
+        warnings = check_oauth_discovery_not_hidden()
+        assert "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY" in warnings[0].msg
+        assert "resource_metadata" in warnings[0].msg
+
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+    def test_hint_points_at_the_real_gates_and_the_silencer(self) -> None:
+        """The hint names the actual auth gates and the deliberate opt-out."""
+        warnings = check_oauth_discovery_not_hidden()
+        assert "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER" in warnings[0].hint
+        assert "SILENCED_SYSTEM_CHECKS" in warnings[0].hint
+
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=True)
+    def test_silent_when_discovery_public(self) -> None:
+        """Explicit True is the supported shape."""
+        assert not check_oauth_discovery_not_hidden()
+
+    def test_silent_when_setting_absent(self, settings: Any) -> None:
+        """The default (absent → True) never warns."""
+        if hasattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY"):
+            del settings.FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY
+        assert not check_oauth_discovery_not_hidden()
+
+    @modify_settings(INSTALLED_APPS={"remove": "frisian_mcp.contrib.oauth"})
+    @override_settings(FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False)
+    def test_silent_when_contrib_oauth_not_installed(self) -> None:
+        """Without the app there are no discovery endpoints to hide."""
+        assert not check_oauth_discovery_not_hidden()

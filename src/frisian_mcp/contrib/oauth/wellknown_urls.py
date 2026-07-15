@@ -28,9 +28,11 @@ urlpatterns = [
         OAuthProtectedResourceView.as_view(),
         name="oauth_protected_resource",
     ),
-    # RFC 8707 / RFC 8414 §3: clients may append the resource path to
-    # construct per-resource metadata URLs.  Return the same response
-    # regardless of the suffix for both endpoints.
+    # RFC 9728 §3: clients append the resource path to construct a per-resource
+    # metadata URL.  The protected-resource view resolves that suffix to the
+    # route it names and describes THAT route (V11-16); a suffix naming no
+    # protected route is a JSON 404.  The authorization-server document is
+    # genuinely server-wide, so it does ignore its suffix.
     path(
         "oauth-protected-resource/<path:resource>",
         OAuthProtectedResourceView.as_view(),

@@ -25,7 +25,7 @@ from __future__ import annotations
 import difflib
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from django.conf import settings
 from django.http import HttpRequest
@@ -318,7 +318,8 @@ def make_group_invoke(  # pylint: disable=too-many-locals
             raise ValueError(f"resource is required for non-help actions on group {group_name!r}")
 
         target_name = f"{resource}{sep}{action}"
-        if target_name not in tool_names:
+
+        def _raise_unknown_tool() -> NoReturn:
             available_resources = sorted(
                 resource_prefixes
                 if resource_prefixes is not None
@@ -328,11 +329,31 @@ def make_group_invoke(  # pylint: disable=too-many-locals
             hint = f" Did you mean resource={matches[0]!r}?" if matches else ""
             raise LookupError(f"Unknown tool {target_name!r} in group {group_name!r}.{hint}")
 
+        if target_name not in tool_names:
+            _raise_unknown_tool()
+
+        _target_entry = registry.get_entry(target_name)
+
+        # V11-20 (F3): the route tier cap defines what exists on this door; the
+        # permission-aware member filter below only refines what exists.  An
+        # above-ceiling action must therefore be absent HERE — before the
+        # filter can name it in a permission error, and before the inner
+        # registry.dispatch can raise a differently-shaped ToolNotFoundError —
+        # using the exact error a never-registered action gets, so the two are
+        # indistinguishable at invoke just as they are in discovery.  Uncapped
+        # legacy mounts keep registry.dispatch's tier-error behaviour.
+        if (
+            _target_entry is not None
+            and getattr(request, "_mcp_max_tier", None) is not None
+            and _TIER_RANK.get(_resolve_request_tier(request), 0)
+            < _TIER_RANK.get(_target_entry.permission_tier, 0)
+        ):
+            _raise_unknown_tool()
+
         # Strip frisian-mcp protocol params before the underlying tool sees params.
         # `verify` is a write-path flag; `lite` is a protocol-level flag on all calls.
         # DRF serializers may reject unknown fields.  views.py reads both from the
         # original top-level arguments before dispatch.
-        _target_entry = registry.get_entry(target_name)
         if _target_entry is not None:
             _strip = {"lite"}
             if _target_entry.is_write:

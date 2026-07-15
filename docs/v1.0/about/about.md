@@ -84,7 +84,7 @@ These aren't projections. We measured them.
 
 ## Status
 
-Version 1.1.1. Works with Django 5.x, DRF 3.x, Python 3.11+.
+Version 1.1.0. Works with Django 5.x, DRF 3.x, Python 3.11+.
 
 Tested against:
 

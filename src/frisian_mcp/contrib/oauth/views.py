@@ -48,6 +48,8 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
+from frisian_mcp.route_resources import default_protected_resource, resource_for_path
+
 from ._consent_gate import (
     has_prior_consent,
     log_auto_approved_on_prior_consent,
@@ -57,6 +59,7 @@ from ._consent_gate import (
     render_consent_form,
 )
 from ._pkce_default_permission import _pkce_default_permission
+from ._rate_limiting import _token_rate_limit_exceeded
 from ._redirect_uri_allowlist import (
     OAUTH_PKCE_AUTO_REGISTER_ALLOWLIST_EMPTY,
     OAUTH_PKCE_AUTO_REGISTER_HOST_REJECTED,
@@ -73,77 +76,55 @@ _AUTH_CODE_TTL = 300  # 5 minutes
 #: token-exchange loses the atomic-consume race for an authorization code.
 OAUTH_AUTHORIZATION_CODE_REPLAY_DETECTED: str = "oauth_authorization_code_replay_detected"
 
-_TOKEN_RL_PREFIX = "frisian_mcp:oauth_token_rl:"  # noqa: S105  # cache key prefix, not a password
-_RATE_LIMIT_PERIODS: dict[str, int] = {
-    "second": 1,
-    "minute": 60,
-    "hour": 3600,
-    "day": 86400,
-}
+#: Canonical log-event name emitted when a client_id with no ``OAuthClient``
+#: row is rejected because ``FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER`` is False.
+#: The caller only ever sees ``invalid_client``; this event carries the cause
+#: (V11-12 check 3).
+OAUTH_UNKNOWN_CLIENT_AUTO_REGISTER_DISABLED: str = "oauth_unknown_client_auto_register_disabled"
+
+#: Canonical log-event name emitted when the rejected client_id *does* have an
+#: ``OAuthClient`` row but the row is deactivated — a different remediation
+#: (re-activate in admin) than the unknown-client case (re-register).
+OAUTH_INACTIVE_CLIENT_REJECTED: str = "oauth_inactive_client_rejected"
 
 logger = logging.getLogger(__name__)
 
 
-def _get_client_ip(request: HttpRequest) -> str:
+def _log_unknown_client_rejected(client_id: str, endpoint: str) -> None:
     """
-    Return the best-guess client IP address.
+    Log the *cause* of an unknown-client rejection, not just the symptom.
 
-    Respects ``FRISIAN_MCP_TRUSTED_PROXY_COUNT``: when set, reads the
-    ``X-Forwarded-For`` header and returns the entry just before the
-    rightmost *N* proxy-added entries (which are attacker-injectable
-    upstream of the trust boundary).  Falls back to ``REMOTE_ADDR`` when
-    no proxy count is configured.
+    Every rejection branch deliberately answers the caller with a bare
+    ``invalid_client`` (see ``_validate_authorize_request`` — the response
+    must not leak which check rejected the request).  Server-side, that
+    leaves the operator with nothing: the most common real-world cause is an
+    ``OAuthClient`` table lost to a database wipe/restore while the client
+    keeps replaying its remembered client_id, and that is indistinguishable
+    from a typo'd credential unless the cause is logged (V11-12 check 3).
+
+    The existence probe runs only on this failure path, never on successful
+    exchanges.
     """
-    proxy_count: int = getattr(settings, "FRISIAN_MCP_TRUSTED_PROXY_COUNT", 0)
-    if proxy_count > 0:
-        xff = str(request.META.get("HTTP_X_FORWARDED_FOR", "")).strip()
-        if xff:
-            parts = [p.strip() for p in xff.split(",")]
-            # The rightmost proxy_count entries are set by trusted proxies;
-            # the entry just before them is the real originating client.
-            index = max(0, len(parts) - proxy_count)
-            return parts[index]
-    return str(request.META.get("REMOTE_ADDR", ""))
-
-
-def _token_rate_limit_exceeded(request: HttpRequest) -> bool:
-    """
-    Return ``True`` when the token endpoint rate limit is exceeded for this IP.
-
-    Reads ``FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT`` (format ``"N/period"``,
-    e.g. ``"10/minute"``).  Supported periods: ``second``, ``minute``,
-    ``hour``, ``day``.
-
-    Returns ``False`` (not exceeded) when the setting is absent, ``None``,
-    or malformed — fail-open to avoid breaking token issuance on cache
-    failure or misconfiguration.
-
-    **Deployment note:** enable this in production to mitigate brute-force
-    and credential-stuffing against client secrets.  A value of
-    ``"20/minute"`` is a reasonable starting point for most deployments;
-    tighten based on observed legitimate traffic.  Nginx / load-balancer
-    rate limiting is a complementary layer and does not replace this.
-    """
-    rate_limit: str | None = getattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT", None)
-    if not rate_limit:
-        return False
-    try:
-        count_str, period = rate_limit.split("/", 1)
-        max_count = int(count_str.strip())
-        period_seconds = _RATE_LIMIT_PERIODS[period.strip().lower()]
-    except (ValueError, KeyError):
-        return False  # Misconfigured — fail open
-
-    ip = _get_client_ip(request)
-    cache_key = f"{_TOKEN_RL_PREFIX}{ip}"
-    try:
-        # add() is a no-op when the key already exists — sets counter to 0
-        # with TTL only on the first request in the window.
-        django_cache.add(cache_key, 0, period_seconds)
-        count = django_cache.incr(cache_key)
-    except Exception:  # pylint: disable=broad-except  # cache backend unavailable
-        return False  # Fail open — do not block token issuance on cache errors
-    return count > max_count
+    if OAuthClient.objects.filter(client_id=client_id, is_active=False).exists():
+        logger.warning(
+            "%s: client_id=%s is registered but deactivated; the caller received "
+            "invalid_client. Re-activate the OAuthClient in the Django admin if this "
+            "client should be allowed back.",
+            OAUTH_INACTIVE_CLIENT_REJECTED,
+            client_id,
+            extra={"client_id": client_id, "endpoint": endpoint},
+        )
+    else:
+        logger.warning(
+            "%s: client_id=%s has no OAuthClient row and "
+            "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER is False, so it was not auto-created; "
+            "the caller received invalid_client. If this client worked before, its "
+            "registration row may have been lost (database wipe or restore) — "
+            "re-register the client or enable PKCE auto-registration.",
+            OAUTH_UNKNOWN_CLIENT_AUTO_REGISTER_DISABLED,
+            client_id,
+            extra={"client_id": client_id, "endpoint": endpoint},
+        )
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -480,6 +461,7 @@ class TokenView(View):
             # server creates a new OAuthClient on first use rather than rejecting the
             # exchange.
             if not pkce_auto:
+                _log_unknown_client_rejected(client_id, endpoint="token")
                 return JsonResponse(
                     {"error": "invalid_client", "error_description": "Unknown or inactive client."},
                     status=401,
@@ -491,6 +473,19 @@ class TokenView(View):
                         "error_description": "client_id exceeds maximum length of 255 characters.",
                     },
                     status=400,
+                )
+            # V11-23: get(is_active=True) also misses an existing-but-DEACTIVATED
+            # row.  Auto-register must not recreate it: client_id is unique, so
+            # create() would raise IntegrityError and surface as an unhandled 500
+            # instead of a clean rejection — and silently resurrecting a client an
+            # operator deactivated would defeat the deactivation.  Reactivation is
+            # a deliberate admin action; reject as invalid_client (the inactive
+            # cause is logged) rather than mint a duplicate.
+            if OAuthClient.objects.filter(client_id=client_id).exists():
+                _log_unknown_client_rejected(client_id, endpoint="token")
+                return JsonResponse(
+                    {"error": "invalid_client", "error_description": "Unknown or inactive client."},
+                    status=401,
                 )
             client = OAuthClient.objects.create(
                 client_id=client_id,
@@ -733,22 +728,24 @@ class OAuthProtectedResourceView(View):
     """
 
     def get(self, request: HttpRequest, **kwargs: object) -> JsonResponse:
-        """Return MCP OAuth Protected Resource Metadata."""
+        """Return RFC 9728 metadata; resolution lives in ``route_resources``."""
         if not getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
             return JsonResponse({"error": "not_found"}, status=404)
-        base = _get_base_url(request)
-        mcp_path: str = str(
-            getattr(settings, "FRISIAN_MCP_PROTECTED_PATH", None)
-            or getattr(settings, "FRISIAN_MCP_PATH", "/mcp/")
-        )
-        resource_url = f"{base}/{mcp_path.lstrip('/')}"
 
+        suffix = kwargs.get("resource")
+        resource = (
+            resource_for_path(str(suffix)) if suffix is not None else default_protected_resource()
+        )
+        if resource is None:
+            return JsonResponse({"error": "not_found"}, status=404)
+
+        base = _get_base_url(request)
         return JsonResponse(
             {
-                "resource": resource_url,
+                "resource": resource.resource_url(base),
                 "authorization_servers": [base],
                 "bearer_methods_supported": ["header"],
-                "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
+                "scopes_supported": list(resource.scopes),
             }
         )
 
@@ -1130,6 +1127,7 @@ class AuthorizeView(View):
             # (not ``invalid_redirect_uri``) so the response does not leak
             # which of the unknown-client checks rejected the request.
             if not getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER", False):
+                _log_unknown_client_rejected(client_id, endpoint="authorize")
                 return _AuthorizeValidation("invalid_client", False)
             allowlist: list[str] = list(
                 getattr(settings, "FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST", []) or []

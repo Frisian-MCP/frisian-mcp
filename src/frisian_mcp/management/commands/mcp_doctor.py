@@ -12,6 +12,7 @@ from django.core.management.base import BaseCommand
 _OK = "✓"
 _WARN = "⚠"
 _ERR = "✗"
+_NOTE = "ℹ"
 
 
 class Command(BaseCommand):
@@ -58,18 +59,25 @@ class Command(BaseCommand):
         """Run all checks and print a summary."""
         errors: list[str] = []
         warnings: list[str] = []
+        strict = bool(options.get("strict"))
 
         self._check_installed_apps(errors)
         self._check_url_mounting(warnings)
         self._check_auth_wiring(warnings)
         self._check_security_settings(warnings)
         self._check_cache_backend(warnings)
-        self._check_performance_hints(warnings)
+        # Discovery must run before any check that reads the tool registry.  A
+        # management command serves no HTTP request, so the `request_started`
+        # hook that normally populates the registry never fires and every
+        # registry-reading check would otherwise see zero tools — on legacy
+        # mounts as much as on per-route ones.
+        discovery_error = self._force_discovery()
+        self._check_performance_hints(warnings, discovery_error=discovery_error)
         self._check_oauth_registration(warnings)
         self._check_oauth_authorize_url(warnings)
         self._check_oauth_tier_permissions(warnings)
         self._check_oauth_pkce_redirect_tier_map(warnings)
-        self._check_route_surface(warnings, errors, strict=bool(options.get("strict")))
+        self._check_route_surface(warnings, errors, strict=strict, discovery_error=discovery_error)
 
         if options.get("security"):
             self.stdout.write("")
@@ -105,17 +113,50 @@ class Command(BaseCommand):
     # Individual checks
     # ------------------------------------------------------------------
 
-    def _check_route_surface(self, warnings: list[str], errors: list[str], *, strict: bool) -> None:
+    def _force_discovery(self) -> Exception | None:
+        """
+        Populate the tool registry, returning the failure instead of raising.
+
+        A management command serves no HTTP request, so ``_run_deferred_discovery``
+        — wired to ``request_started`` per the PKG-21 deferral — never fires and
+        the registry stays empty.  Every check that reads the registry therefore
+        has to run *after* this, or it silently measures zero tools.  That is true
+        on a legacy single-mount gateway exactly as much as on a per-route one, so
+        this runs unconditionally rather than from inside the route-surface check.
+
+        The exception is returned rather than raised: a host whose discovery blows
+        up still deserves the rest of its diagnosis, and each caller decides what
+        the failure means for *its* check (a skipped performance hint is a warning;
+        an unevaluated ``--strict`` security gate is an error).
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from frisian_mcp import route_audit
+
+        try:
+            route_audit.force_tool_discovery()
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            return exc
+        return None
+
+    def _check_route_surface(
+        self,
+        warnings: list[str],
+        errors: list[str],
+        *,
+        strict: bool,
+        discovery_error: Exception | None = None,
+    ) -> None:
         """
         Surface the per-route findings that ``manage.py check`` structurally cannot.
 
         The net-empty (W008 LOUD), working-carve-out (W009 SOFT), and
         entry-matched-nothing (W110–W113) triggers need a populated tool
         registry, which is empty when Django checks run.  This command is an
-        explicit, side-effect-accepting audit, so it forces discovery and runs
-        the *same* surface-audit pass — imported, never re-implemented — then
-        renders the findings.  With ``--strict`` a LOUD finding becomes an error
-        (non-zero exit) so CI can gate here instead of on ``check``.
+        explicit, side-effect-accepting audit: :meth:`_force_discovery` has
+        already populated the registry, and this runs the *same* surface-audit
+        pass — imported, never re-implemented — then renders the findings.  With
+        ``--strict`` a LOUD finding becomes an error (non-zero exit) so CI can
+        gate here instead of on ``check``.
         """
         # pylint: disable-next=import-outside-toplevel
         from frisian_mcp import route_audit
@@ -128,20 +169,14 @@ class Command(BaseCommand):
             )
             return
 
+        if discovery_error is not None:
+            self._audit_could_not_run(warnings, errors, strict=strict, exc=discovery_error)
+            return
+
         try:
-            route_audit.force_tool_discovery()
             findings = route_audit.audit_route_surface()
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            # The doctor must finish its other checks even if discovery blows up
-            # on a broken host; record the failure rather than abort.  Under
-            # --strict this is an *error*, not a warning: the whole point of
-            # strict mode is to gate CI here, so an audit that could not run must
-            # not let a strict run exit zero as if the surface were clean.
-            message = f"per-route surface audit could not run: {exc}"
-            if strict:
-                self._fail(errors, message)
-            else:
-                self._warn_msg(warnings, message)
+            self._audit_could_not_run(warnings, errors, strict=strict, exc=exc)
             return
 
         if not findings:
@@ -160,6 +195,30 @@ class Command(BaseCommand):
                 self._fail(errors, message)
             else:
                 self._warn_msg(warnings, message)
+
+    def _audit_could_not_run(
+        self,
+        warnings: list[str],
+        errors: list[str],
+        *,
+        strict: bool,
+        exc: Exception,
+    ) -> None:
+        """
+        Record a route-surface audit that never evaluated.
+
+        Under ``--strict`` this is an **error**, not a warning.  Strict mode exists
+        so CI can gate on the route surface; an audit that could not run has
+        proved nothing, and letting it exit zero would report a passing gate to a
+        pipeline that never checked anything.  A gate that cannot evaluate must
+        not pass.  Without ``--strict`` the command is a diagnostic rather than a
+        gate, so it stays a warning and the remaining checks still run.
+        """
+        message = f"per-route surface audit could not run: {exc}"
+        if strict:
+            self._fail(errors, message)
+        else:
+            self._warn_msg(warnings, message)
 
     def _check_installed_apps(self, errors: list[str]) -> None:
         """Verify frisian_mcp and any installed contrib apps are consistent."""
@@ -182,7 +241,7 @@ class Command(BaseCommand):
             if present:
                 self._ok(f"frisian_mcp.{app} in INSTALLED_APPS")
             else:
-                self._warn(
+                self._note(
                     f"frisian_mcp.{app} not installed — optional; add if you need its features"
                 )
 
@@ -192,8 +251,26 @@ class Command(BaseCommand):
                 "contrib.agents requires contrib.tokens in INSTALLED_APPS (AgentConnection FK)",
             )
 
-    def _check_url_mounting(self, warnings: list[str]) -> None:
-        """Check that the MCP gateway is reachable in the URL configuration."""
+    def _check_gateway_mounted(self, warnings: list[str]) -> None:
+        """
+        Confirm the MCP gateway surface is mounted, reading routes like V11-16.
+
+        With ``FRISIAN_MCP_ROUTES`` set, the routes *are* the gateway (PR-7 JC1):
+        each is mounted as its own exact-match ``McpView`` and the legacy
+        ``frisian_mcp:gateway`` reverse-URL name is deliberately never
+        registered.  Probing for that name and, on the expected miss, advising
+        ``include('frisian_mcp.urls')`` is a double defect: a false positive on
+        every route deployment, and remediation that would mount the full
+        unfiltered registry beside the deny-carved routes — the exact fail-open
+        JC1 exists to prevent.  So in ROUTES mode this reports the route mounts
+        as the gateway and never emits the legacy warning.  The legacy reverse
+        probe runs only on a genuinely route-less host.
+        """
+        routes = getattr(settings, "FRISIAN_MCP_ROUTES", None)
+        if routes:
+            self._report_route_mounts(routes)
+            return
+
         try:
             from django.urls import reverse  # pylint: disable=import-outside-toplevel
 
@@ -205,6 +282,44 @@ class Command(BaseCommand):
                 "Could not resolve frisian_mcp:gateway — add"
                 " path('mcp/', include('frisian_mcp.urls')) to your ROOT_URLCONF",
             )
+
+    def _report_route_mounts(self, routes: Any) -> None:
+        """Report the configured route mounts as the gateway surface.
+
+        Parses via the same :func:`parse_route_configs` V11-16 reads through, so
+        the doctor and the OAuth metadata agree on what the routes are.  A
+        malformed mapping is not this check's to grade — the startup config audit
+        (and the route-surface check) own that — so a parse failure degrades to a
+        plain acknowledgement rather than a second, differently-worded error.
+        """
+        from frisian_mcp.route_config import (  # pylint: disable=import-outside-toplevel
+            parse_route_configs,
+        )
+        from frisian_mcp.route_paths import (  # pylint: disable=import-outside-toplevel
+            normalize_route_path,
+        )
+
+        try:
+            configs = parse_route_configs(routes)
+            paths = sorted(
+                normalize_route_path(cfg.path, route_name=cfg.name) for cfg in configs.values()
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            self._ok(
+                "FRISIAN_MCP_ROUTES is configured — per-route mounts are the gateway "
+                "(see the per-route surface audit below for its validation)"
+            )
+            return
+
+        rendered = ", ".join(paths)
+        self._ok(
+            f"MCP gateway mounted per-route at {len(paths)} path(s): {rendered} "
+            "(FRISIAN_MCP_ROUTES; the legacy frisian_mcp:gateway mount is intentionally absent)"
+        )
+
+    def _check_url_mounting(self, warnings: list[str]) -> None:
+        """Check that the MCP gateway is reachable in the URL configuration."""
+        self._check_gateway_mounted(warnings)
 
         try:
             from django.urls import reverse  # pylint: disable=import-outside-toplevel
@@ -312,12 +427,34 @@ class Command(BaseCommand):
         elif proxy_count > 0:
             self._ok(f"FRISIAN_MCP_TRUSTED_PROXY_COUNT={proxy_count}")
 
-    def _check_performance_hints(self, warnings: list[str]) -> None:
-        """Check performance-related settings against the registered tool count."""
+    def _check_performance_hints(
+        self,
+        warnings: list[str],
+        *,
+        discovery_error: Exception | None = None,
+    ) -> None:
+        """
+        Check performance-related settings against the registered tool count.
+
+        Depends on a populated registry, so :meth:`_force_discovery` must have run
+        first.  When discovery failed the tool count is unknowable, and reporting
+        the resulting zero as if it were a real measurement would silently retire
+        the page-size and cache warnings this check exists to raise — so say so
+        instead of guessing.
+        """
         from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
             _TIER_RANK,
             tool_registry,
         )
+
+        if discovery_error is not None:
+            self._warn_msg(
+                warnings,
+                "tool discovery failed, so the registry is empty and the tool-count "
+                "performance hints (FRISIAN_MCP_TOOLS_PAGE_SIZE, "
+                f"FRISIAN_MCP_TOOLS_LIST_CACHE_TTL) could not be evaluated: {discovery_error}",
+            )
+            return
 
         try:
             all_tools = tool_registry.list_tools(max_tier=None)
@@ -758,6 +895,17 @@ class Command(BaseCommand):
 
     def _warn(self, message: str) -> None:
         self.stdout.write(f"  {self.style.WARNING(_WARN)} {message}")
+
+    def _note(self, message: str) -> None:
+        """Render an informational note.
+
+        A note is *not* a warning: it uses a distinct glyph and is never added to
+        the review tally, so the count in the summary equals the number of ``⚠``
+        lines actually printed.  Use it for "optional, not a problem" observations
+        that would otherwise inflate — and desensitise readers to — the warning
+        count.
+        """
+        self.stdout.write(f"  {self.style.HTTP_INFO(_NOTE)} {message}")
 
     def _warn_msg(self, warnings: list[str], message: str) -> None:
         warnings.append(message)

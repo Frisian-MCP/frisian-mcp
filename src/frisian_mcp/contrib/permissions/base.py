@@ -55,7 +55,7 @@ class PermissionAdapter(Protocol):
         Discovery only ever asks this object one question —
         ``"app_label.verb_model" in capabilities`` — so any ``Container[str]``
         is a valid return: a plain ``frozenset`` of permission strings (what
-        adapters returned before v1.1.1, still fully supported), or a lazy
+        adapters returned before v1.1.0, still fully supported), or a lazy
         resolver such as :class:`HasPermCapabilities` that answers membership on
         demand.  It is never iterated, sized, or serialised.
         """

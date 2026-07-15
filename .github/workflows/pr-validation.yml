@@ -157,6 +157,33 @@ jobs:
       - name: Pytest
         run: uv run pytest tests/ -q
 
+  mcp-doctor:
+    name: mcp_doctor (strict integration gate)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_SETTINGS_MODULE: frisian_mcp._ci_doctor_settings
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      # Runs the doctor end-to-end against a representative valid per-route
+      # config. Unit tests pin the exit-code contract; this proves the wired
+      # command actually honours it. --strict fails on any error-level or LOUD
+      # finding, and on an audit that cannot run at all (V11-18's "a gate that
+      # cannot evaluate must not pass"). SOFT findings (e.g. W009) do not fail it.
+      - name: mcp_doctor --strict
+        run: uv run django-admin mcp_doctor --strict
+
   build:
     name: Build wheel
     needs: changes

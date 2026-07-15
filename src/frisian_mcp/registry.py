@@ -634,9 +634,7 @@ class ToolRegistry:
         # rejects unauthorised sub-actions.
         if not entry.is_dispatcher:
             caller_tier = _resolve_request_tier(request)
-            caller_rank = _TIER_RANK.get(caller_tier, 0)
-            tool_rank = _TIER_RANK.get(entry.permission_tier, 0)
-            if caller_rank < tool_rank:
+            if _TIER_RANK.get(caller_tier, 0) < _TIER_RANK.get(entry.permission_tier, 0):
                 if getattr(request, "_mcp_max_tier", None) is not None:
                     # On a max-tier-capped endpoint the tool must appear
                     # nonexistent — returning a tier error leaks that the tool
@@ -688,9 +686,30 @@ class ToolRegistry:
                     f"Send the fields directly as: {_expected}."
                 )
 
+        _validation_schema = entry.input_schema
+        if entry.is_dispatcher and getattr(request, "_mcp_max_tier", None) is not None:
+            # V11-20 (F3): the registration-time action enum is the FULL action
+            # set, and jsonschema's enum-violation message enumerates every
+            # allowed value — handing a tier-capped caller the write/admin
+            # action names that tools/list and help deliberately hide.  Drop
+            # the enum from validation on capped routes; the dispatcher invoke
+            # rejects unknown actions itself with a hint drawn from the
+            # caller-visible set, so a never-existed action and an
+            # above-ceiling action produce the same absence error.  Uncapped
+            # legacy mounts keep the enum (and its self-correction value).
+            _props = _validation_schema.get("properties", {})
+            if "enum" in _props.get("action", {}):
+                _validation_schema = {
+                    **_validation_schema,
+                    "properties": {
+                        **_props,
+                        "action": {k: v for k, v in _props["action"].items() if k != "enum"},
+                    },
+                }
+
         if not is_dispatcher_help and not _is_list_body:
             try:
-                jsonschema.validate(instance=arguments, schema=entry.input_schema)
+                jsonschema.validate(instance=arguments, schema=_validation_schema)
             except jsonschema.exceptions.ValidationError as exc:
                 raise ToolInputError(exc.message) from exc
 

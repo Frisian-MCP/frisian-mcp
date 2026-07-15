@@ -437,21 +437,32 @@ class TestSynthesizedActionCap:
         """Invocation matches discovery: a hidden `bulk_create` also fails to invoke.
 
         No action visible on discovery that fails at invoke, and none invocable
-        that discovery hid — the two directions must agree.  The capped-out
-        target resolves to absence (a JSON-RPC not-found), the same shape a
-        never-registered tool returns.
+        that discovery hid — the two directions must agree.  The correct twin
+        for an above-ceiling action probed THROUGH THE GROUP is a never-existed
+        action probed the same way (V11-20/F3): both must return the group's
+        own unknown-tool absence, byte-for-byte on the shared template.  (The
+        previous expectation here — the inner dispatch's "No tool registered"
+        JSON-RPC error — was itself distinguishable from the never-existed
+        shape, i.e. the F3 oracle.)
         """
         view = _mount(_cfg("default", GATEWAY), tiered_registry)
-        response = _post_jsonrpc(
-            view,
-            GATEWAY,
-            "tools/call",
-            {"name": "catalog", "arguments": {"resource": "item", "action": "bulk_create"}},
-            user=_StubUser(),
-        )
-        error = _rpc_error(response)
-        assert "item_bulk_create" in str(error["data"])
-        assert "No tool registered" in str(error["data"])
+
+        def _probe(action: str) -> str:
+            response = _post_jsonrpc(
+                view,
+                GATEWAY,
+                "tools/call",
+                {"name": "catalog", "arguments": {"resource": "item", "action": action}},
+                user=_StubUser(),
+            )
+            result = _rpc_result(response)
+            assert result.get("isError") is True, result
+            return str(json.loads(result["content"][0]["text"])["error"])
+
+        above = _probe("bulk_create")
+        missing = _probe("zzznope")
+        assert "Unknown tool 'item_bulk_create' in group 'catalog'" in above
+        assert above.replace("item_bulk_create", "TOOL") == missing.replace("item_zzznope", "TOOL")
 
 
 @pytest.mark.usefixtures("clean_route_views")

@@ -542,3 +542,130 @@ class TestDispatcherPermissionClasses:
         request = rf.get("/")
         result = isolated_registry.dispatch(request, "tasks", {"action": "list"})
         assert result == {"tasks": []}
+
+
+# ---------------------------------------------------------------------------
+# V11-20 (F3) — invoke-side absence on a tier-capped route
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def tiered_registry() -> ToolRegistry:
+    """Registry with a dispatcher holding one read action and one write action."""
+    reg = ToolRegistry()
+    with patch("frisian_mcp.decorators.tool_registry", reg):
+
+        @mcp_dispatcher("jobs", description="Manage jobs for testing.")
+        class JobsDispatcher:
+            """Test dispatcher with mixed-tier actions."""
+
+            @mcp_action("list", description="List jobs.", params={})
+            def list(
+                self, request: Any, params: dict[str, Any]
+            ) -> dict[str, Any]:  # pylint: disable=unused-argument
+                """List all jobs."""
+                return {"jobs": []}
+
+            @mcp_action("submit", description="Submit a job.", params={}, write=True)
+            def submit(
+                self, request: Any, params: dict[str, Any]
+            ) -> dict[str, Any]:  # pylint: disable=unused-argument
+                """Submit a job."""
+                return {"submitted": True}
+
+    _ = JobsDispatcher  # suppress unused-variable
+    return reg
+
+
+class TestDispatcherCappedAbsence:
+    """On a capped route an above-ceiling action is ABSENT at invoke (V11-20/F3).
+
+    Same ruling as the group dispatcher: the route tier cap defines which
+    actions exist; naming an above-ceiling action in a tier error would
+    confirm it exists after discovery hid it.
+    """
+
+    @staticmethod
+    def _capped_read_request(rf: RequestFactory) -> Any:
+        req = rf.post("/mcp/", content_type="application/json")
+        req.auth = None  # anonymous → read tier
+        req._mcp_max_tier = "read"
+        return req
+
+    def test_above_ceiling_action_is_absent_not_permission_error(
+        self, tiered_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """A capped read caller invoking the write action gets the unknown-action absence."""
+        with pytest.raises(LookupError) as excinfo:
+            tiered_registry.dispatch(
+                self._capped_read_request(rf), "jobs", {"action": "submit", "params": {}}
+            )
+        assert not isinstance(excinfo.value, PermissionError)
+        assert str(excinfo.value) == "Unknown action 'submit'."
+
+    def test_absence_hint_never_names_hidden_actions(
+        self, tiered_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """Did-you-mean candidates come from the caller-VISIBLE set on a capped route.
+
+        'submitx' is one edit from the hidden 'submit'; suggesting it inside
+        the absence error would undo the absence one clause later.
+        """
+        with pytest.raises(LookupError) as excinfo:
+            tiered_registry.dispatch(
+                self._capped_read_request(rf), "jobs", {"action": "submitx", "params": {}}
+            )
+        assert "Did you mean" not in str(excinfo.value)
+
+    def test_never_existed_and_above_ceiling_share_one_template(
+        self, tiered_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """Byte-parity: absent-because-capped and absent-because-nonexistent look identical."""
+        with pytest.raises(LookupError) as above:
+            tiered_registry.dispatch(
+                self._capped_read_request(rf), "jobs", {"action": "submit", "params": {}}
+            )
+        with pytest.raises(LookupError) as missing:
+            tiered_registry.dispatch(
+                self._capped_read_request(rf), "jobs", {"action": "zzznope", "params": {}}
+            )
+        assert str(above.value).replace("'submit'", "'X'") == str(missing.value).replace(
+            "'zzznope'", "'X'"
+        )
+
+    def test_capped_route_does_not_leak_enum_via_schema_error(
+        self, tiered_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """A bogus action on a capped route must not enumerate the full action set.
+
+        Without the capped enum-drop in registry.dispatch, jsonschema's
+        enum-violation message lists every registered action — including the
+        write/admin names tools/list and help hide from this caller.
+        """
+        with pytest.raises(LookupError) as excinfo:
+            tiered_registry.dispatch(
+                self._capped_read_request(rf), "jobs", {"action": "zzznope", "params": {}}
+            )
+        assert "submit" not in str(excinfo.value)
+
+    def test_uncapped_mount_keeps_tier_permission_error(
+        self, tiered_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """Legacy uncapped mounts keep the explicit, self-describing tier error."""
+        request = rf.post("/mcp/", content_type="application/json")
+        request.auth = None
+        with pytest.raises(PermissionError) as excinfo:
+            tiered_registry.dispatch(request, "jobs", {"action": "submit", "params": {}})
+        assert "requires 'read_write' permission" in str(excinfo.value)
+
+    def test_uncapped_mount_keeps_full_map_hint(
+        self, tiered_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """Legacy uncapped mounts keep the full-map did-you-mean self-correction."""
+        request = rf.post("/mcp/", content_type="application/json")
+        request.auth = None
+        with pytest.raises(ToolInputError):
+            # Uncapped validation still enforces the registration-time enum,
+            # so the bogus action is a schema error before invoke — unchanged
+            # legacy shape.
+            tiered_registry.dispatch(request, "jobs", {"action": "zzznope", "params": {}})

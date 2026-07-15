@@ -1,6 +1,6 @@
 # ADR-008: Permission-Aware Tool Discovery
 
-**Status:** Accepted (shipped in 1.1.1; see Amendment below)
+**Status:** Accepted (shipped in 1.1.0; see Amendment below)
 **Date:** 2026-06-05
 **Category:** adr
 **Supersedes:** —
@@ -8,9 +8,9 @@
 
 ---
 
-## Amendment (1.1.1)
+## Amendment (1.1.0)
 
-This ADR was accepted and shipped in frisian-mcp 1.1.1. Two elements of the original design evolved during implementation:
+This ADR was accepted and shipped in frisian-mcp 1.1.0. Two elements of the original design evolved during implementation:
 
 - **Capability resolution uses `user.has_perm()`, not `user.get_all_permissions()`.** `has_perm` is a strict superset that also honors superuser status, view exemptions (`EXEMPT_VIEW_PERMISSIONS`), and custom auth backends natively — the same predicate the host authorizes with. Consequently the `ExemptViewPermissionAdapter` referenced in §4 and the Nautobot validation table is now a **deprecated no-op**: exemptions are honored without it. Remove `FRISIAN_MCP_PERMISSION_ADAPTER`; nothing replaces it.
 - **The fail-loud OAuth prerequisite (§7) was relaxed to fail-soft.** An OAuth identity that does not resolve to a real Django user is now treated as a **service principal** that bypasses capability filtering, with the permission **tier as the sole gate** — it sees tier-appropriate tools, not an empty list. The `has_perm` short-circuit made the original "empty permission set shows nothing" failure mode moot, so the startup check that enforced §7 (E002) was **retired**. Clients that need per-identity scoping still map to a Django user as in §7; leaving a client unmapped is now a supported configuration, not a startup error.
@@ -75,7 +75,7 @@ Discovery filters at **content-type + action granularity only** (V1 scope). Obje
 
 ### 7. The OAuth identity MUST resolve to a real backend user (hard prerequisite)
 
-> **Superseded in 1.1.1 — see Amendment above.** This fail-loud prerequisite was relaxed: an unresolved OAuth identity is now a service principal gated by tier only, and the E002 startup check was retired. The section below is the original decision, retained for the record.
+> **Superseded in 1.1.0 — see Amendment above.** This fail-loud prerequisite was relaxed: an unresolved OAuth identity is now a service principal gated by tier only, and the E002 startup check was retired. The section below is the original decision, retained for the record.
 
 This is the critical configuration gate.
 

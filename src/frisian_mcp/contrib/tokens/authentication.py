@@ -116,8 +116,12 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
             except ImportError:
                 return 'Bearer realm="frisian-mcp"'
 
+            from frisian_mcp.route_resources import (  # pylint: disable=import-outside-toplevel
+                challenge_metadata_url,
+            )
+
             base = _get_base_url(request)
-            resource_metadata = f"{base}/.well-known/oauth-protected-resource"
+            resource_metadata = challenge_metadata_url(base, getattr(request, "path", ""))
             return f'Bearer realm="frisian-mcp", ' f'resource_metadata="{resource_metadata}"'
 
         return 'Bearer realm="frisian-mcp"'
@@ -208,7 +212,11 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
                 )
             except ImportError:
                 return 'Bearer realm="frisian-mcp"'
+            from frisian_mcp.route_resources import (  # pylint: disable=import-outside-toplevel
+                challenge_metadata_url,
+            )
+
             base = _get_base_url(request)
-            resource_metadata = f"{base}/.well-known/oauth-protected-resource"
+            resource_metadata = challenge_metadata_url(base, getattr(request, "path", ""))
             return f'Bearer realm="frisian-mcp", resource_metadata="{resource_metadata}"'
         return 'Bearer realm="frisian-mcp"'

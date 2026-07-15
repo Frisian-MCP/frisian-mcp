@@ -20,7 +20,9 @@ from frisian_mcp.contrib.oauth._redirect_uri_allowlist import (
 from frisian_mcp.contrib.oauth.authentication import OAuthServicePrincipal, OAuthTokenAuthentication
 from frisian_mcp.contrib.oauth.models import OAuthAccessToken, OAuthAuthorizeConsent, OAuthClient
 from frisian_mcp.contrib.oauth.views import (
+    OAUTH_INACTIVE_CLIENT_REJECTED,
     OAUTH_PKCE_REDIRECT_URI_IGNORED_AS_TIER_SIGNAL,
+    OAUTH_UNKNOWN_CLIENT_AUTO_REGISTER_DISABLED,
     OAuthAuthorizationServerView,
     OAuthProtectedResourceView,
     RegistrationView,
@@ -2031,6 +2033,44 @@ class TestTokenViewAuthorizationCodeGrant:
         assert data["token_type"] == "Bearer"
         assert "access_token" in data
 
+    def test_deactivated_client_under_auto_register_returns_401_not_500(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        V11-23: a deactivated client under PKCE auto-register gets 401, not 500.
+
+        ``get(is_active=True)`` misses the deactivated row, so the flow fell into
+        the auto-register branch and called ``create()`` with an already-taken
+        (unique) ``client_id`` — IntegrityError — surfacing as an unhandled 500.
+        Auto-register may only mint a brand-new client_id; a deactivated one
+        stays rejected (reactivation is an admin action).
+        """
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        client = OAuthClient.objects.create(name="pkce-deactivated")
+        client.is_active = False
+        client.save(update_fields=["is_active"])
+        client_id = client.client_id
+
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(client_id, "https://example.com/cb", code_verifier)
+
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": code_verifier,
+            },
+        )
+        response = _token_view(request)
+
+        assert response.status_code == 401
+        assert json.loads(response.content)["error"] == "invalid_client"
+        # The deactivated row must NOT have been duplicated (the IntegrityError cause).
+        assert OAuthClient.objects.filter(client_id=client_id).count() == 1
+
     def test_wrong_code_verifier_returns_400(self, rf: RequestFactory) -> None:
         """Wrong code_verifier returns 400 invalid_grant."""
         client = OAuthClient.objects.create(name="pkce-wrong")
@@ -2989,3 +3029,136 @@ class TestPkceDefaultPermissionValidation:
         for tier in ("read", "read_write", "admin"):
             settings.FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = tier
             assert _pkce_default_permission() == tier
+
+
+# ---------------------------------------------------------------------------
+# V11-12 check 3 — unknown-client rejections log the cause, not just the symptom
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestUnknownClientCauseLogging:
+    """Unknown-client rejections must log the cause, not just ``invalid_client``.
+
+    The caller's answer is deliberately unrevealing, so the CAUSE lands in the
+    server log.  The motivating artifact: an ``OAuthClient`` table lost to a
+    database wipe while the client keeps replaying its remembered client_id
+    (V11-12 check 3).
+    """
+
+    from frisian_mcp.contrib.oauth.views import AuthorizeView  # noqa: PLC0415
+
+    _view = staticmethod(AuthorizeView.as_view())
+
+    _VALID_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    _VALID_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+
+    @staticmethod
+    def _authorize_params(client_id: str) -> dict[str, str]:
+        return {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": "https://example.com/cb",
+            "code_challenge": TestUnknownClientCauseLogging._VALID_CHALLENGE,
+            "code_challenge_method": "S256",
+        }
+
+    def test_authorize_unknown_client_logs_cause(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """Authorize path: no OAuthClient row + auto-register off → cause event."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        request = rf.get("/oauth/authorize/", self._authorize_params("wiped-client-id"))
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+        cause_records = [
+            r
+            for r in caplog.records
+            if r.message.startswith(OAUTH_UNKNOWN_CLIENT_AUTO_REGISTER_DISABLED)
+        ]
+        assert len(cause_records) == 1
+        # The DB-wipe remediation is the whole point of the event.
+        assert "wipe" in cause_records[0].message
+        assert getattr(cause_records[0], "endpoint", None) == "authorize"
+
+    def test_authorize_inactive_client_logs_distinct_cause(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """A deactivated registration is a different cause with a different remediation."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        client = OAuthClient.objects.create(
+            name="deactivated-client", redirect_uris=["https://example.com/cb"]
+        )
+        client.is_active = False
+        client.save(update_fields=["is_active"])
+        request = rf.get("/oauth/authorize/", self._authorize_params(client.client_id))
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 400
+        assert json.loads(response.content)["error"] == "invalid_client"
+        messages = [r.message for r in caplog.records]
+        assert any(m.startswith(OAUTH_INACTIVE_CLIENT_REJECTED) for m in messages)
+        assert not any(m.startswith(OAUTH_UNKNOWN_CLIENT_AUTO_REGISTER_DISABLED) for m in messages)
+
+    def test_token_exchange_unknown_client_logs_cause(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """Token path: code exchange for a vanished client → cause event, endpoint=token."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        from django.core.cache import cache  # pylint: disable=import-outside-toplevel
+
+        from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+            _AUTH_CODE_CACHE_PREFIX,
+            _AUTH_CODE_TTL,
+        )
+
+        code = "cause-log-code"
+        cache.set(
+            f"{_AUTH_CODE_CACHE_PREFIX}{code}",
+            {
+                "client_id": "wiped-client-id",
+                "redirect_uri": "https://example.com/cb",
+                "code_challenge": self._VALID_CHALLENGE,
+            },
+            _AUTH_CODE_TTL,
+        )
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": "wiped-client-id",
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": self._VALID_VERIFIER,
+            },
+        )
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth.views"):
+            response = _token_view(request)
+        assert response.status_code == 401
+        assert json.loads(response.content)["error"] == "invalid_client"
+        cause_records = [
+            r
+            for r in caplog.records
+            if r.message.startswith(OAUTH_UNKNOWN_CLIENT_AUTO_REGISTER_DISABLED)
+        ]
+        assert len(cause_records) == 1
+        assert getattr(cause_records[0], "endpoint", None) == "token"
+
+    def test_known_active_client_emits_no_cause_events(
+        self, rf: RequestFactory, settings: Any, caplog: Any
+    ) -> None:
+        """The happy path stays silent — the events fire only on the failure branch."""
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
+        settings.FRISIAN_MCP_OAUTH_AUTO_APPROVE = False
+        client = OAuthClient.objects.create(
+            name="healthy-client", redirect_uris=["https://example.com/cb"]
+        )
+        request = rf.get("/oauth/authorize/", self._authorize_params(client.client_id))
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth.views"):
+            response = self._view(request)
+        assert response.status_code == 200
+        messages = [r.message for r in caplog.records]
+        assert not any(m.startswith(OAUTH_UNKNOWN_CLIENT_AUTO_REGISTER_DISABLED) for m in messages)
+        assert not any(m.startswith(OAUTH_INACTIVE_CLIENT_REJECTED) for m in messages)

@@ -81,9 +81,9 @@ Works for any project using Django's standard auth backend. Resolves each capabi
 
 No configuration needed when `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True` — this adapter is used automatically.
 
-### `ExemptViewPermissionAdapter` (deprecated in 1.1.1 — do not use)
+### `ExemptViewPermissionAdapter` (deprecated in 1.1.0 — do not use)
 
-This adapter existed to patch a gap in the old `get_all_permissions()`-based default: on a host with an `EXEMPT_VIEW_PERMISSIONS` setting, a view-exempt model's tool was hidden from discovery even though the caller could still invoke it. Since 1.1.1 the default `DjangoPermissionAdapter` resolves capabilities through `user.has_perm()`, which honors `EXEMPT_VIEW_PERMISSIONS` (and custom auth backends) natively, so this adapter is now a **deprecated no-op** — it subclasses `DjangoPermissionAdapter`, adds nothing, emits a `DeprecationWarning`, and will be removed in the next minor release.
+This adapter existed to patch a gap in the old `get_all_permissions()`-based default: on a host with an `EXEMPT_VIEW_PERMISSIONS` setting, a view-exempt model's tool was hidden from discovery even though the caller could still invoke it. Since 1.1.0 the default `DjangoPermissionAdapter` resolves capabilities through `user.has_perm()`, which honors `EXEMPT_VIEW_PERMISSIONS` (and custom auth backends) natively, so this adapter is now a **deprecated no-op** — it subclasses `DjangoPermissionAdapter`, adds nothing, emits a `DeprecationWarning`, and will be removed in the next minor release.
 
 **Migration:** delete the setting; nothing replaces it. The default adapter is already correct on exemption-using hosts.
 

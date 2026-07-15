@@ -350,7 +350,7 @@ FRISIAN_MCP_PERMISSION_ADAPTER = (
 )
 ```
 
-> **`ExemptViewPermissionAdapter` is deprecated as of 1.1.1** and is now a no-op alias of `DjangoPermissionAdapter` — it emits a `DeprecationWarning` on instantiation. Permission-aware discovery derives capabilities from `has_perm()` directly, which honors a host's view exemptions natively, so a separate exemption adapter is no longer needed. Leave `FRISIAN_MCP_PERMISSION_ADAPTER` unset unless you have a genuinely custom adapter; the alias will be removed in a future minor.
+> **`ExemptViewPermissionAdapter` is deprecated as of 1.1.0** and is now a no-op alias of `DjangoPermissionAdapter` — it emits a `DeprecationWarning` on instantiation. Permission-aware discovery derives capabilities from `has_perm()` directly, which honors a host's view exemptions natively, so a separate exemption adapter is no longer needed. Leave `FRISIAN_MCP_PERMISSION_ADAPTER` unset unless you have a genuinely custom adapter; the alias will be removed in a future minor.
 
 ---
 

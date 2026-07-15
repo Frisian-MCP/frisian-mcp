@@ -9,7 +9,7 @@ while the caller could still invoke it by name and receive every row.  This
 adapter patched that gap by synthesizing the missing ``view_*`` capabilities —
 but only for that one host mechanism, and only for that one setting.
 
-Since v1.1.1 the default
+Since v1.1.0 the default
 :class:`~frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter` resolves
 capabilities through ``user.has_perm()``, the same predicate the host itself
 authorizes with.  View exemptions — and custom auth backends, and any future
@@ -28,7 +28,7 @@ Delete the setting.  Nothing replaces it::
     # after — omit it entirely; the default adapter is now correct on
     #         exemption-using hosts.
 
-.. deprecated:: 1.1.1
+.. deprecated:: 1.1.0
    Subclasses :class:`DjangoPermissionAdapter` and adds nothing.  It will be
    removed in the next minor release.
 """
