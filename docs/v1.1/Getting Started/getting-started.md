@@ -50,6 +50,8 @@ Connect your MCP client to `https://your-domain.com/mcp/`. That's the full insta
 
 > **Use the trailing-slash form — connect clients to `…/mcp/`.** Both `…/mcp` and `…/mcp/` reach the endpoint directly with no redirect: the package auto-installs `McpTrailingSlashMiddleware`, which suppresses Django's `APPEND_SLASH` 301 redirect on the gateway path (some MCP clients, such as Claude.ai and Cursor, do not follow that redirect). The trailing-slash form is the recommended canonical path for client config.
 
+<!-- -->
+
 > **Verify the install before connecting any client.** Run `python manage.py mcp_doctor` after the first deploy and after every config change. It walks eleven checks (INSTALLED_APPS, URL mounting, auth wiring, security settings, cache backend, performance hints, OAuth posture, authorize URL reachability, OAuth tier permissions, legacy PKCE redirect-tier-map, per-route surface audit) and exits non-zero on errors — ideal as a CI gate. `--security` adds an extended OAuth audit. See [Guide → mcp_doctor](../Guide/mcp-doctor.md).
 
 ---
