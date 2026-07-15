@@ -832,6 +832,23 @@ class TestRateLimiterFailOpenIsLoud:
             r.message.startswith(OAUTH_TOKEN_RATE_LIMIT_CACHE_UNAVAILABLE) for r in caplog.records
         )
 
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="0/minute")
+    def test_zero_count_fails_open_not_closed(self, rf: RequestFactory, caplog: Any) -> None:
+        """`0/minute` must NOT block the first request — it takes the loud path (V11-28)."""
+        from frisian_mcp.contrib.oauth._rate_limiting import (
+            OAUTH_TOKEN_RATE_LIMIT_MISCONFIGURED,
+            _token_rate_limit_exceeded,
+        )
+
+        request = rf.post("/oauth/token/")
+        request.META["REMOTE_ADDR"] = "10.0.0.12"
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth._rate_limiting"):
+            blocked = _token_rate_limit_exceeded(request)
+        assert blocked is False  # fail-OPEN, not the count>0 fail-closed DoS
+        assert any(
+            r.message.startswith(OAUTH_TOKEN_RATE_LIMIT_MISCONFIGURED) for r in caplog.records
+        )
+
     @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="20/minutes")
     def test_fail_open_warns_once_per_process(self, rf: RequestFactory, caplog: Any) -> None:
         """A sustained misconfig warns once, not once per token request."""

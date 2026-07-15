@@ -98,7 +98,7 @@ graph TD
 
     PMCP --> WRITE["Write Path<br/>Customer-scoped tool surface<br/>OAuth / token gated<br/>Write access, privilege-scoped<br/>Rate limited independently"]
 
-    PMCP_RAND --> ADMIN["Elevated / Admin Path<br/>Full CRUD access<br/>OAuth / token gated<br/>Randomized string = secret<br/>Vault + rotation policy<br/>HIPAA / PCI / SOC workloads"]
+    PMCP_RAND --> ADMIN["Elevated / Admin Path<br/>Full CRUD access<br/>OAuth / token gated<br/>Randomized string = defense-in-depth obscurity (not a credential)<br/>Vault + rotation policy<br/>HIPAA / PCI / SOC workloads"]
 ```
 
 For the in-process variant of the open + authenticated pair, set `FRISIAN_MCP_PATH = 'mcp/public'` and `FRISIAN_MCP_PROTECTED_PATH = 'mcp/admin'` (or your chosen names). The protected path's auto-registered view enforces `IsAuthenticated` and uncaps the tier ceiling for authenticated callers; pair with `FRISIAN_MCP_MAX_TIER = 'read'` on the primary path to keep that surface anonymous-read-only regardless of any token presented. The reverse-proxy variant in the diagram remains the right call when you need physical route absence rather than view-level enforcement (e.g. HIPAA/PCI workloads where you want the elevated path's existence off the discoverable surface entirely — the randomized string is a defense-in-depth obscurity layer, not a credential, and the mount behind it still authenticates).

@@ -77,6 +77,13 @@ def parse_rate_limit(raw: object) -> tuple[int, int] | None:
     the ``frisian_mcp.W013`` system check both call this, so boot-time
     validation and request-time behavior cannot drift (the V11-19 lesson —
     two readers, one parser).
+
+    A non-positive count (``0/minute``, ``-5/minute``) is rejected as
+    malformed rather than accepted: the runtime gate is ``count > max_count``,
+    so ``max_count <= 0`` would block the very first request and silently DoS
+    all token issuance — the fail-CLOSED direction, contradicting the
+    documented fail-open posture.  Routing it through ``None`` makes it fail
+    open AND surfaces it via ``frisian_mcp.W013`` instead of a silent outage.
     """
     if not raw or not isinstance(raw, str):
         return None
@@ -85,6 +92,8 @@ def parse_rate_limit(raw: object) -> tuple[int, int] | None:
         max_count = int(count_str.strip())
         period_seconds = _RATE_LIMIT_PERIODS[period.strip().lower()]
     except (ValueError, KeyError):
+        return None
+    if max_count <= 0:
         return None
     return (max_count, period_seconds)
 

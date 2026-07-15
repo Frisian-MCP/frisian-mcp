@@ -370,3 +370,23 @@ class TestMalformedRateLimit:
         assert parse_rate_limit("20/minute") == (20, 60)
         assert parse_rate_limit("20/minutes") is None
         assert not check_oauth_token_rate_limit_format()
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="0/minute")
+    def test_zero_count_warns_not_silent_dos(self) -> None:
+        """`0/minute` would block every request (fail-closed) — W013 must fire (V11-28)."""
+        warnings = check_oauth_token_rate_limit_format()
+        assert len(warnings) == 1
+        assert warnings[0].id == W013_MALFORMED_RATE_LIMIT
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="-5/minute")
+    def test_negative_count_warns(self) -> None:
+        """A negative count is malformed, not a valid throttle."""
+        assert len(check_oauth_token_rate_limit_format()) == 1
+
+    def test_parser_rejects_non_positive_counts(self) -> None:
+        """parse_rate_limit rejects 0 and negatives so the runtime fails open, not closed."""
+        from frisian_mcp.contrib.oauth._rate_limiting import parse_rate_limit
+
+        assert parse_rate_limit("0/minute") is None
+        assert parse_rate_limit("-1/hour") is None
+        assert parse_rate_limit("1/minute") == (1, 60)
