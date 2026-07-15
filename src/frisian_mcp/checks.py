@@ -57,6 +57,15 @@ Registered checks
     ``FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER`` and
     ``FRISIAN_MCP_OAUTH_REGISTRATION_OPEN``.
 
+``frisian_mcp.W013``
+    Warns (LOUD) when ``FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT`` is set but not
+    parseable as ``"N/period"``.  The runtime limiter fails open on a
+    malformed value, so an operator who *configured* brute-force throttling
+    is running without it — the "disabled looks like enabled" shape.  Boot
+    validation and request-time parsing share one parser
+    (:func:`frisian_mcp.contrib.oauth._rate_limiting.parse_rate_limit`) so
+    they cannot drift.
+
 Per-route configuration checks (``E004``, ``E005``, ``E1xx``, ``E2xx``,
 ``W004``–``W007``) live in :mod:`frisian_mcp.route_audit` and are registered
 from there.  They are config-only: the tool registry is empty while system
@@ -92,6 +101,7 @@ W003_PRIVILEGED_SERVICE_ACCOUNT = "frisian_mcp.W003"
 E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
 E003_UNANNOTATED_CUSTOM_ACTION = "frisian_mcp.E003"
 W012_OAUTH_DISCOVERY_HIDDEN = "frisian_mcp.W012"
+W013_MALFORMED_RATE_LIMIT = "frisian_mcp.W013"
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -367,5 +377,48 @@ def check_oauth_discovery_not_hidden(  # pylint: disable=unused-argument
                 "check with SILENCED_SYSTEM_CHECKS=['frisian_mcp.W012']."
             ),
             id=W012_OAUTH_DISCOVERY_HIDDEN,
+        )
+    ]
+
+
+@register(Tags.security)
+def check_oauth_token_rate_limit_format(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Warning]:
+    """
+    Warn (LOUD) when the configured token rate limit is unparseable.
+
+    The runtime limiter deliberately fails open on a malformed
+    ``FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT`` (a cache/config problem must not
+    become a token-issuance outage), which means a typo like ``"20/minutes"``
+    silently disables the brute-force throttle the operator believes is on.
+    Validation shares :func:`~frisian_mcp.contrib.oauth._rate_limiting.parse_rate_limit`
+    with the runtime so the boot check and request-time behavior cannot
+    disagree about what parses (V11-26 #5).
+    """
+    if not django_apps.is_installed("frisian_mcp.contrib.oauth"):
+        return []
+    raw = getattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT", None)
+    if not raw:
+        return []
+
+    from frisian_mcp.contrib.oauth._rate_limiting import (  # pylint: disable=import-outside-toplevel
+        parse_rate_limit,
+    )
+
+    if parse_rate_limit(raw) is not None:
+        return []
+
+    return [
+        Warning(
+            f"FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT={raw!r} is not parseable as 'N/period'. "
+            "The token-endpoint rate limiter fails open on a malformed value, so "
+            "brute-force throttling you configured is NOT active.",
+            hint=(
+                "Use the format 'N/period' with period one of: second, minute, hour, "
+                "day — e.g. FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT='20/minute'."
+            ),
+            id=W013_MALFORMED_RATE_LIMIT,
         )
     ]

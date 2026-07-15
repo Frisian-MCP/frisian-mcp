@@ -350,20 +350,13 @@ For internal agents or scripts where adding a DB row is overkill, configure
 HMAC-hashed static keys in `nautobot_config.py`:
 
 ```python
-import hmac
-import hashlib
-from django.conf import settings
-
-def _hash(raw: str) -> str:
-    return hmac.new(
-        settings.FRISIAN_MCP_HMAC_KEY.encode(),
-        raw.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-
+# FRISIAN_MCP_API_KEYS is keyed by the HMAC-SHA256 DIGEST of each raw key,
+# not the raw key itself — so a leaked nautobot_config.py exposes no usable
+# credential. Generate a digest for each key:
+#     nautobot-server mcp_hash_api_key <raw-key>
 FRISIAN_MCP_API_KEYS = {
-    _hash("my-agent-key"):    "read_write",
-    _hash("readonly-agent"):  "read",
+    "<64-hex HMAC-SHA256 digest of your read-write key>": "read_write",
+    "<64-hex HMAC-SHA256 digest of your read-only key>":  "read",
 }
 ```
 

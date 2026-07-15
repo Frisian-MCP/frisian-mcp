@@ -96,7 +96,7 @@ Open edX ships with Redis — it is already running in standard devstack and pro
 
 ### `401 Unauthorized` on static-token clients despite valid Bearer — authentication class ordering
 
-> **Applies to frisian-mcp ≥ 1.0.11; behavior verified on 1.1.0.** The challenge-shape behavior below depends on how discovery-first MCP clients interpret the `WWW-Authenticate` `realm` parameter, which is client- and version-specific. Confirm against your frisian-mcp and client versions rather than applying the ordering blindly; see the [install guide](../../../../../installs/Django/openedx/sumac/install.md) for the current authentication-chain configuration.
+> **Applies to frisian-mcp ≥ 1.0.11; behavior verified on 1.0.12.** The challenge-shape behavior below depends on how discovery-first MCP clients interpret the `WWW-Authenticate` `realm` parameter, which is client- and version-specific. Confirm against your frisian-mcp and client versions rather than applying the ordering blindly; see the [install guide](../../../../../installs/Django/openedx/sumac/install.md) for the current authentication-chain configuration.
 
 **Cause:** OAuth-first chain ordering. When `OAuthTokenAuthentication` is listed before `FrisianMcpTokenAuthentication`, the 401 WWW-Authenticate challenge emitted on unauthenticated requests is `Bearer realm="...", resource_metadata="..."`. Discovery-first MCP clients (Claude Code, Codex, Gemini CLI) interpret the `realm` parameter as a directive to probe `.well-known/` and run the OAuth discovery cascade — which dead-ends when DCR is closed, even though the operator's `mcp.json` carries a valid static Bearer.
 

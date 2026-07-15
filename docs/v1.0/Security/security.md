@@ -101,7 +101,7 @@ graph TD
     PMCP_RAND --> ADMIN["Elevated / Admin Path<br/>Full CRUD access<br/>OAuth / token gated<br/>Randomized string = secret<br/>Vault + rotation policy<br/>HIPAA / PCI / SOC workloads"]
 ```
 
-For the in-process variant of the open + authenticated pair, set `FRISIAN_MCP_PATH = 'mcp/public'` and `FRISIAN_MCP_PROTECTED_PATH = 'mcp/admin'` (or your chosen names). The protected path's auto-registered view enforces `IsAuthenticated` and uncaps the tier ceiling for authenticated callers; pair with `FRISIAN_MCP_MAX_TIER = 'read'` on the primary path to keep that surface anonymous-read-only regardless of any token presented. The reverse-proxy variant in the diagram remains the right call when you need physical route absence rather than view-level enforcement (e.g. HIPAA/PCI workloads where the elevated path's randomized string is itself a secret).
+For the in-process variant of the open + authenticated pair, set `FRISIAN_MCP_PATH = 'mcp/public'` and `FRISIAN_MCP_PROTECTED_PATH = 'mcp/admin'` (or your chosen names). The protected path's auto-registered view enforces `IsAuthenticated` and uncaps the tier ceiling for authenticated callers; pair with `FRISIAN_MCP_MAX_TIER = 'read'` on the primary path to keep that surface anonymous-read-only regardless of any token presented. The reverse-proxy variant in the diagram remains the right call when you need physical route absence rather than view-level enforcement (e.g. HIPAA/PCI workloads where you want the elevated path's existence off the discoverable surface entirely — the randomized string is a defense-in-depth obscurity layer, not a credential, and the mount behind it still authenticates).
 
 **What lives on `/mcp/`:**
 
@@ -118,15 +118,13 @@ primitives** — none of them per-path resource allowlists:
   documents in the Django group(s) you mark public, so launching a new
   guide is a group reassignment rather than a deployment.
 
-> **Per-mount tool scoping (since 1.1).** The per-route permission model
-> (`FRISIAN_MCP_ROUTES`) gives each mounted path its own `allow_list` /
-> `deny_list` and tier ceiling on a deny-all baseline, so "expose hand-picked
-> read-only resource A on `/mcp/`, full CRUD on `/mcp-protected/`" is now a
-> package-level configuration rather than a reverse-proxy or `@mcp_ignore`
-> workaround. The global `FRISIAN_MCP_TOOL_ALLOWLIST` / `FRISIAN_MCP_TOOL_DENYLIST`
-> still apply once at startup across every mount; use per-route lists when the
-> surface must differ by path. The reverse-proxy variant remains the right call
-> when you need physical route absence rather than view-level filtering.
+> **Limitation.** There is no per-mount tool allowlist in the package today —
+> `FRISIAN_MCP_TOOL_ALLOWLIST` and `FRISIAN_MCP_TOOL_DENYLIST` are applied once
+> at startup and affect every mount equally. If your deployment needs "expose
+> hand-picked read-only resource A on `/mcp/`, full CRUD on `/mcp-protected/`",
+> reach for the reverse-proxy variant in the diagram above or `@mcp_ignore` the
+> resources you don't want on either mount. Per-mount resource scoping is a
+> deferred enhancement.
 
 **What lives on `/mcp-endpoint-elevated-permissions/`:**
 
@@ -141,10 +139,14 @@ or settings-backed API key).
 
 The reverse-proxy-only variant.  Use a randomized path string that the
 proxy routes to a third frisian-mcp mount (or a different process entirely),
-where the randomized string itself is the access secret.  Appropriate when
-you need *physical route absence* on the open mount — HIPAA / PCI / SOC
-workloads where merely knowing the URL grants entry, and view-level
-`IsAuthenticated` enforcement is not enough.  Per-agent tool scoping on this
+where the randomized string is an obscurity layer that keeps the privileged
+mount off the discoverable surface — **not** a credential. The mount behind it
+still enforces token authentication; treat the path as defense-in-depth (store
+it like other sensitive config, with rotation) and never rely on it *instead* of
+authn. Appropriate when you need *physical route absence* on the open mount —
+HIPAA / PCI / SOC workloads where you do not want the privileged endpoint
+discoverable at all, and view-level `IsAuthenticated` on a shared mount is not
+enough.  Per-agent tool scoping on this
 mount is configured at the authentication layer (token tier + the same
 package primitives above), not via a per-path allowlist.
 

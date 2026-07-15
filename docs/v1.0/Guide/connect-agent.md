@@ -173,8 +173,7 @@ The server routes this to the DRF ViewSet and returns the result.
 **`tools/list` returns an empty array** — The server is reachable but the caller sees no tools. Work through the common causes with `python manage.py mcp_doctor`:
 
 - **No ViewSets were discovered.** Confirm `frisian_mcp` and your API app are in `INSTALLED_APPS`, `FRISIAN_MCP_AUTODISCOVER = True`, and your DRF router has ViewSets registered. Discovery is deferred to the first request rather than run at process start, so a restart is not required — but the router must be populated before that first request.
-- **The caller's tier hides everything.** With permission-aware discovery (or a per-route tier ceiling), a credential that maps to a tier below every available tool sees an empty list rather than a 403 — a read-tier token on a surface that only exposes write tools returns `[]`.
-- **The route exposes nothing.** On a per-route deployment (`FRISIAN_MCP_ROUTES`), a route whose `allow_list` is empty serves zero tools by design; check the route's allow/deny lists and the startup audit.
+- **The caller's tier hides everything.** A credential that maps to a tier below every available tool sees an empty list rather than a 403 — a read-tier token on a surface that only exposes write tools returns `[]`.
 
 **Connection refused / timeout** — Check that your firewall allows outbound HTTPS to `mcp.frisian-mcp.com` on port 443. For self-hosted instances, verify the Django process is running and the reverse proxy is forwarding requests to the correct port.
 

@@ -163,8 +163,13 @@ def _configured_routes() -> dict[str, RouteConfig] | None:
 
     A malformed mapping is *not* this module's problem to report — the startup
     audit owns that — but it must not be allowed to turn a metadata request into
-    a 500.  We fall back to legacy behaviour, which the audit will already have
-    flagged FATAL at boot.
+    a 500, and it must fail **closed**.  A malformed value returns an empty
+    mapping so the caller advertises *nothing* rather than re-advertising the
+    legacy protected resource that per-route mounting deliberately skipped (the
+    open/nonexistent-resource defect V11-16 fixed).  Absent *or* empty ROUTES
+    still returns ``None`` → legacy behaviour, preserving the byte-identical
+    single-door contract (criterion 3); the audit flags the malformed value
+    FATAL at boot.
     """
     raw = getattr(settings, "FRISIAN_MCP_ROUTES", None)
     if not raw:
@@ -172,7 +177,7 @@ def _configured_routes() -> dict[str, RouteConfig] | None:
     try:
         return parse_route_configs(raw)
     except Exception:  # pylint: disable=broad-exception-caught
-        return None
+        return {}
 
 
 def protected_resources() -> tuple[ProtectedResource, ...]:

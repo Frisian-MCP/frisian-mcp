@@ -252,17 +252,26 @@ def route_is_anonymous_reachable(route: RouteConfig) -> bool:
     """
     Return ``True`` when an anonymous caller can reach *route*'s POST tool surface.
 
-    POST is not a safe method, so ``IsAuthenticatedOrReadOnly`` and opaque classes
-    do **not** count as reachable here — only an empty class list or an
-    unmodified ``AllowAny`` grant.  Feeds the anonymous-admin FATAL and the
-    ``auto_register``-on-anonymous LOUD (L3).  This is deliberately narrower than
-    :func:`route_is_anonymous_sse_reachable`; conflating them ships a false
-    positive on L3 — the exact flag this project exists to make trustworthy.
+    DRF **ANDs** permission classes — every class must pass — so the route is
+    anonymously reachable only when the class list is empty or **every** class
+    is an unmodified ``AllowAny`` grant (``all()``, not ``any()``: a mixed list
+    like ``[AllowAny, IsAuthenticated]`` is gated by the ``IsAuthenticated``
+    leg, and reporting it open would both fire E004 on a safe config and strip
+    a genuinely protected route from the RFC 9728 metadata).  POST is not a
+    safe method, so ``IsAuthenticatedOrReadOnly`` and opaque classes do **not**
+    count as reachable here.  An opaque custom class is treated as protected —
+    statically unprovable either way; W011 is the compensating LOUD on
+    privileged routes, so a ``[CustomOpenPerm]`` route that is *actually* open
+    is a documented residual, not a silent one.  Feeds the anonymous-admin
+    FATAL and the ``auto_register``-on-anonymous LOUD (L3).  This is
+    deliberately narrower than :func:`route_is_anonymous_sse_reachable`;
+    conflating them ships a false positive on L3 — the exact flag this project
+    exists to make trustworthy.
     """
     classes = route_effective_permission_classes(route)
     if not classes:
         return True
-    return any(_is_anonymous_granting(c) for c in classes)
+    return all(_is_anonymous_granting(c) for c in classes)
 
 
 def route_is_anonymous_sse_reachable(route: RouteConfig) -> bool:
@@ -271,14 +280,18 @@ def route_is_anonymous_sse_reachable(route: RouteConfig) -> bool:
 
     GET is a safe method, so ``IsAuthenticatedOrReadOnly`` (the
     ``_PARTIAL_ANONYMOUS`` bucket) counts here even though it denies anonymous
-    POST.  Feeds the ``_PARTIAL_ANONYMOUS`` LOUD, whose message must name the SSE
-    mechanism — the risk is a worker-pinning keepalive, not tool disclosure, so
-    the severity is never conditioned on ``highest_tier``.
+    POST.  Same AND semantics as :func:`route_is_anonymous_reachable`: every
+    class in the list must admit the anonymous GET, so a mixed
+    ``[IsAuthenticatedOrReadOnly, IsAuthenticated]`` list is NOT SSE-reachable
+    — the ``IsAuthenticated`` leg denies the anonymous GET too.  Feeds the
+    ``_PARTIAL_ANONYMOUS`` LOUD, whose message must name the SSE mechanism —
+    the risk is a worker-pinning keepalive, not tool disclosure, so the
+    severity is never conditioned on ``highest_tier``.
     """
     classes = route_effective_permission_classes(route)
     if not classes:
         return True
-    return any(
+    return all(
         _is_anonymous_granting(c) or (isinstance(c, type) and issubclass(c, _PARTIAL_ANONYMOUS))
         for c in classes
     )
@@ -494,7 +507,15 @@ class RouteView:  # pylint: disable=too-many-instance-attributes
         return cls(
             route_name=config.name,
             path=config.path,
-            ceiling=config.highest_tier,
+            # Store the RESOLVED ceiling, not the raw config value: an omitted
+            # highest_tier on a configured route resolves to the tier-key secure
+            # default, never None (ADR-010 §8).  Enforcement re-resolves via
+            # resolve_route_ceiling in _RouteMcpView._effective_max_tier, so a
+            # raw None here is not a live bypass — but any future reader of
+            # RouteView.ceiling would get uncapped None.  Resolving here makes
+            # RouteView.ceiling the single source of truth and keeps it in step
+            # with route_resources, which resolves independently.
+            ceiling=resolve_route_ceiling(config),
             entries=entries,
             advertised_counts=advertised_counts,
             hint_key_allow=hint_key_allow,

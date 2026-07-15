@@ -295,49 +295,12 @@ FRISIAN_MCP_OAUTH_ISSUER = 'https://your-domain.com'
 
 ---
 
-### FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY
-
-**Type:** `bool`  
-**Default:** `False`
-
-When `True`, `tools/list` is filtered per-request so each caller sees only the tools their identity is permitted to use, decided by `user.has_perm()` for each tool's underlying capability. (As of 1.1.x this replaced the earlier `get_all_permissions()` enumeration: `has_perm()` additionally honors superuser status and a host's view exemptions, and it matches the predicate the host's own queryset scoping uses, so a visible tool is also an invocable one.) Tools outside the caller's permission set are omitted entirely — they do not appear at any tier. On a per-route deployment (`FRISIAN_MCP_ROUTES`), this per-request filter composes with the route's structural allow/deny and tier ceiling.
-
-Default off. Enabling this setting introduces no migrations and does not change behavior for unauthenticated or tier-only callers unless the authentication backend is configured to resolve identities to real Django users.
-
-```python
-FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True
-```
-
-> **Security note:** This setting controls tool *visibility*, not *execution* enforcement. REST calls execute as the resolved `request.user`, which is governed by `FRISIAN_MCP_SERVICE_ACCOUNT_USER` (anonymous callers) or the OAuth user resolution settings (OAuth callers). See the [Security Guidance](../Guide/permission-aware-discovery-security.md) for deployment requirements.
-
-See [Permission-Aware Discovery](../Guide/permission-aware-discovery.md) for the full guide.
-
----
-
-### FRISIAN_MCP_PERMISSION_ADAPTER
-
-**Type:** `str` (dotted import path)  
-**Default:** `"frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter"`
-
-Dotted import path to the permission adapter class used when `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY` is `True`. The adapter must implement the `PermissionAdapter` protocol: `get_capabilities(user) -> frozenset[str]` and `is_unrestricted(user) -> bool`.
-
-```python
-# Default: standard Django ModelBackend
-FRISIAN_MCP_PERMISSION_ADAPTER = (
-    "frisian_mcp.contrib.permissions.base.DjangoPermissionAdapter"
-)
-```
-
-> **`ExemptViewPermissionAdapter` is deprecated as of 1.1.0** and is now a no-op alias of `DjangoPermissionAdapter` — it emits a `DeprecationWarning` on instantiation. Permission-aware discovery derives capabilities from `has_perm()` directly, which honors a host's view exemptions natively, so a separate exemption adapter is no longer needed. Leave `FRISIAN_MCP_PERMISSION_ADAPTER` unset unless you have a genuinely custom adapter; the alias will be removed in a future minor.
-
----
-
 ### FRISIAN_MCP_OAUTH_SERVICE_USER
 
 **Type:** `str` (Django username)  
 **Default:** `None`
 
-The username of the Django user that OAuth-authenticated requests resolve to for permission checking and execution. Required when `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY` is `True` and `frisian_mcp.contrib.oauth` is installed, unless all `OAuthClient` records have a per-client user configured in the admin.
+The username of the Django user that OAuth-authenticated requests resolve to for permission checking and execution. Set this when `frisian_mcp.contrib.oauth` is installed and you want OAuth callers to execute as a specific Django user, unless all `OAuthClient` records have a per-client user configured in the admin.
 
 When set, OAuth callers execute as this user — both discovery filtering and REST invocations use this user's permissions.
 
@@ -360,7 +323,7 @@ The username of the Django user that **anonymous** (unauthenticated) MCP request
 FRISIAN_MCP_SERVICE_ACCOUNT_USER = "mcp_readonly_service"
 ```
 
-> **Warning:** Setting this to an admin or superuser account grants every anonymous caller full admin execution rights at the REST layer, regardless of `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY` or tier settings. Restrict this to isolated or air-gapped networks. For shared or production instances, use a minimum-privilege non-admin account. See [Permission-Aware Discovery — Security Guidance](../Guide/permission-aware-discovery-security.md).
+> **Warning:** Setting this to an admin or superuser account grants every anonymous caller full admin execution rights at the REST layer, regardless of tier settings. Restrict this to isolated or air-gapped networks. For shared or production instances, use a minimum-privilege non-admin account.
 
 ---
 
@@ -370,7 +333,7 @@ frisian-mcp ships three Django management commands. Run with `python manage.py <
 
 | Command | Purpose | Guide |
 |---|---|---|
-| `mcp_doctor` | Audit the host's frisian-mcp integration end-to-end. Default pass runs eleven checks (INSTALLED_APPS, URL mounting, auth wiring, security settings, cache backend, performance hints, OAuth registration posture, authorize URL reachability, OAuth tier permissions, legacy PKCE redirect-tier-map, per-route surface audit). `--security` adds eight OAuth-specific security checks. Exits non-zero on errors. CI-pipeline usable. | [Guide → mcp_doctor](../Guide/mcp-doctor.md) |
+| `mcp_doctor` | Audit the host's frisian-mcp integration end-to-end. Default pass runs eight checks (INSTALLED_APPS, URL mounting, auth wiring, security settings, cache backend, performance hints, OAuth registration posture, authorize URL reachability). `--security` adds six OAuth-specific security checks. Exits non-zero on errors. CI-pipeline usable. | [Guide → mcp_doctor](../Guide/mcp-doctor.md) |
 | `mcp_config` | Generate a client config JSON snippet for connecting an MCP client to this gateway. `--client <name>` emits the format expected by a specific client; `--token <value>` embeds an auth header; `--url`/`--name` override the server URL and key. | (inline; see `mcp_config --help`) |
 | `mcp_hash_api_key` | Compute the HMAC-SHA256 digest of a raw API key for use in `FRISIAN_MCP_API_KEYS`. Keys are stored as digests, not raw values, so a leaked settings file does not directly expose usable credentials. | (inline; see `mcp_hash_api_key --help`) |
 

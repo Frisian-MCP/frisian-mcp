@@ -471,6 +471,32 @@ def _dispatcher_audit_labels(
     return None, None
 
 
+#: Length cap for the one audit field that can carry raw caller input.
+_AUDIT_LABEL_CAP = 128
+
+
+def _sanitize_audit_label(value: Any) -> str | None:
+    """
+    Return *value* made safe for the audit sink: printable, bounded, ``str``.
+
+    ``tool`` is the one payload field that can carry raw caller input — on the
+    unknown-tool deny path the probed name IS the forensic record, so it must
+    be kept (a fixed ``'unknown'`` placeholder would erase exactly the probe an
+    audit trail exists to show).  Keeping it verbatim, however, hands callers a
+    log-injection primitive: CR/LF and other control characters can forge
+    record boundaries in line-oriented sinks, and unbounded length is a
+    storage/DoS vector.  Sanitize-and-keep: strip non-printables, cap length
+    with an explicit truncation marker.  Registered tool names are short
+    printable identifiers, so this is a no-op for every legitimate call.
+    """
+    if value is None:
+        return None
+    cleaned = "".join(ch for ch in str(value) if ch.isprintable())
+    if len(cleaned) > _AUDIT_LABEL_CAP:
+        cleaned = cleaned[:_AUDIT_LABEL_CAP] + "…[truncated]"
+    return cleaned
+
+
 def _log_audit_context(
     request: Any,
     tool_name: str,
@@ -489,7 +515,9 @@ def _log_audit_context(
     The payload carries **routing labels only**: route/tier vocabulary, the
     canonical mount path, the addressed tool and (for dispatchers) its
     ``resource``/``action`` labels.  Caller argument *values*, token material,
-    and user identity are deliberately excluded — no PII, no secrets.
+    and user identity are deliberately excluded — no PII, no secrets.  The
+    addressed tool name passes through :func:`_sanitize_audit_label` because on
+    the unknown-tool path it is caller text.
     """
     route_view: RouteView | None = getattr(request, "_mcp_route_view", None)
     # resource/action are logged only when they are validated config-vocabulary
@@ -507,7 +535,7 @@ def _log_audit_context(
             ),
             "effective_ceiling": getattr(request, "_mcp_max_tier", None),
             "effective_tier": getattr(request, "_mcp_effective_tier", None),
-            "tool": tool_name,
+            "tool": _sanitize_audit_label(tool_name),
             "resource": resource_label,
             "tool_action": action_label,
             "decision": decision,

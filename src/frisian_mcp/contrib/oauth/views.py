@@ -43,6 +43,7 @@ from urllib.parse import urlencode, urlparse
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
+from django.db import IntegrityError, transaction
 from django.http import HttpRequest, HttpResponseRedirect, JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -474,26 +475,34 @@ class TokenView(View):
                     },
                     status=400,
                 )
-            # V11-23: get(is_active=True) also misses an existing-but-DEACTIVATED
-            # row.  Auto-register must not recreate it: client_id is unique, so
-            # create() would raise IntegrityError and surface as an unhandled 500
-            # instead of a clean rejection — and silently resurrecting a client an
-            # operator deactivated would defeat the deactivation.  Reactivation is
-            # a deliberate admin action; reject as invalid_client (the inactive
-            # cause is logged) rather than mint a duplicate.
+            # Auto-register may only mint a brand-new client_id, never a
+            # duplicate.  Both duplicate paths reject as invalid_client (not a
+            # raw unique-constraint 500): an existing DEACTIVATED row (V11-23;
+            # resurrecting it defeats a deliberate admin deactivation), and a
+            # TOCTOU race where two concurrent exchanges for the same NEW id both
+            # pass exists() then both create() (V11-25 #6).  The savepoint below
+            # contains the race's IntegrityError from any outer transaction.
             if OAuthClient.objects.filter(client_id=client_id).exists():
                 _log_unknown_client_rejected(client_id, endpoint="token")
                 return JsonResponse(
                     {"error": "invalid_client", "error_description": "Unknown or inactive client."},
                     status=401,
                 )
-            client = OAuthClient.objects.create(
-                client_id=client_id,
-                name=f"pkce-{client_id[:24]}",
-                permission=_pkce_default_permission(),
-                redirect_uris=[redirect_uri],
-                grant_types=["authorization_code"],
-            )
+            try:
+                with transaction.atomic():
+                    client = OAuthClient.objects.create(
+                        client_id=client_id,
+                        name=f"pkce-{client_id[:24]}",
+                        permission=_pkce_default_permission(),
+                        redirect_uris=[redirect_uri],
+                        grant_types=["authorization_code"],
+                    )
+            except IntegrityError:
+                _log_unknown_client_rejected(client_id, endpoint="token")
+                return JsonResponse(
+                    {"error": "invalid_client", "error_description": "Unknown or inactive client."},
+                    status=401,
+                )
             logger.info("oauth_pkce_client_auto_registered", extra={"client_id": client_id})
         else:
             # RFC 7591 §2: enforce per-client grant_types for pre-registered clients.

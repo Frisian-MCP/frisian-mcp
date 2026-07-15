@@ -20,8 +20,10 @@ from frisian_mcp.checks import (
     W002_PLAINTEXT_API_KEYS,
     W003_PRIVILEGED_SERVICE_ACCOUNT,
     W012_OAUTH_DISCOVERY_HIDDEN,
+    W013_MALFORMED_RATE_LIMIT,
     check_api_keys_are_hashed,
     check_oauth_discovery_not_hidden,
+    check_oauth_token_rate_limit_format,
     check_permission_classes_in_production,
     check_service_account_user,
 )
@@ -319,3 +321,52 @@ class TestOAuthDiscoveryHidden:
     def test_silent_when_contrib_oauth_not_installed(self) -> None:
         """Without the app there are no discovery endpoints to hide."""
         assert not check_oauth_discovery_not_hidden()
+
+
+# ---------------------------------------------------------------------------
+# W013 — malformed token rate-limit string (fails open silently)
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedRateLimit:
+    """W013 fires when FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT is set but unparseable."""
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="20/minutes")
+    def test_warning_fires_on_bad_period(self) -> None:
+        """A plausible typo ('minutes' not 'minute') is the silent-disable case."""
+        warnings = check_oauth_token_rate_limit_format()
+        assert len(warnings) == 1
+        assert warnings[0].id == W013_MALFORMED_RATE_LIMIT
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="not-a-limit")
+    def test_warning_message_names_the_setting_and_fail_open(self) -> None:
+        """The operator must learn the throttle they configured is inactive."""
+        warnings = check_oauth_token_rate_limit_format()
+        assert "FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT" in warnings[0].msg
+        assert "fails open" in warnings[0].msg
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="20/minute")
+    def test_silent_on_valid_value(self) -> None:
+        """A well-formed value never warns."""
+        assert not check_oauth_token_rate_limit_format()
+
+    def test_silent_when_unset(self, settings: Any) -> None:
+        """No configured limit → nothing to validate."""
+        if hasattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT"):
+            del settings.FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT
+        assert not check_oauth_token_rate_limit_format()
+
+    @modify_settings(INSTALLED_APPS={"remove": "frisian_mcp.contrib.oauth"})
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="garbage")
+    def test_silent_when_contrib_oauth_not_installed(self) -> None:
+        """The limiter lives in contrib.oauth — no app, no check."""
+        assert not check_oauth_token_rate_limit_format()
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="20/minute")
+    def test_shares_parser_with_runtime(self) -> None:
+        """The check and the runtime limiter must agree on what parses (one parser)."""
+        from frisian_mcp.contrib.oauth._rate_limiting import parse_rate_limit
+
+        assert parse_rate_limit("20/minute") == (20, 60)
+        assert parse_rate_limit("20/minutes") is None
+        assert not check_oauth_token_rate_limit_format()

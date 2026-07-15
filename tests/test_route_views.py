@@ -383,6 +383,27 @@ class TestRegistry:
         assert rvr.get("default").entries["catalog"].group_tool_names == frozenset({"order_list"})
         assert rvr.get("admin").ceiling == "admin"
 
+    @override_settings(
+        FRISIAN_MCP_TOOL_NAME_SEPARATOR=SEP,
+        FRISIAN_MCP_ROUTES={
+            "elevated": {"path": "mcp/elevated", "allow_list": ["*"]},
+            "admin": {"path": "mcp/admin", "allow_list": ["*"]},
+        },
+    )
+    def test_omitted_highest_tier_materializes_resolved_ceiling_not_none(
+        self, registry: ToolRegistry
+    ) -> None:
+        """RouteView.ceiling stores the RESOLVED secure default, never raw None (V11-25 #9).
+
+        An omitted ``highest_tier`` on a configured route resolves to the tier
+        key's secure default; storing raw ``None`` would be a latent uncapped
+        trap for any future reader of ``RouteView.ceiling``.
+        """
+        rvr = RouteViewRegistry()
+        rvr.rebuild_all(registry)
+        assert rvr.get("elevated").ceiling == "read_write"
+        assert rvr.get("admin").ceiling == "admin"
+
 
 # ---------------------------------------------------------------------------
 # Permission resolver + bucket predicate
@@ -474,6 +495,64 @@ class TestAnonymousReachable:
     def test_authenticated_sse_not_reachable(self) -> None:
         """IsAuthenticated denies anonymous GET too."""
         assert route_is_anonymous_sse_reachable(_cfg("admin")) is False
+
+    # -- V11-26 #8: DRF ANDs permission classes — mixed lists ---------------
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_CLASSES=[
+            "rest_framework.permissions.AllowAny",
+            "rest_framework.permissions.IsAuthenticated",
+        ]
+    )
+    def test_mixed_allowany_isauthenticated_post_not_reachable(self) -> None:
+        """[AllowAny, IsAuthenticated] is GATED — DRF requires every class to pass.
+
+        The old any() misread this as open, which both fired E004 on a safe
+        config and stripped a genuinely protected route from the RFC 9728
+        metadata (V11-16's 'never advertise the open door' predicate).
+        """
+        assert route_is_anonymous_reachable(_cfg("default")) is False
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_CLASSES=[
+            "rest_framework.permissions.AllowAny",
+            "rest_framework.permissions.IsAuthenticated",
+        ]
+    )
+    def test_mixed_allowany_isauthenticated_sse_not_reachable(self) -> None:
+        """The IsAuthenticated leg denies the anonymous GET as well."""
+        assert route_is_anonymous_sse_reachable(_cfg("default")) is False
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_CLASSES=[
+            "rest_framework.permissions.AllowAny",
+            "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+        ]
+    )
+    def test_mixed_allowany_partial_splits_post_from_sse(self) -> None:
+        """[AllowAny, IsAuthenticatedOrReadOnly]: anonymous GET passes both, POST does not."""
+        assert route_is_anonymous_reachable(_cfg("default")) is False
+        assert route_is_anonymous_sse_reachable(_cfg("default")) is True
+
+    @override_settings(
+        FRISIAN_MCP_PERMISSION_CLASSES=[
+            "rest_framework.permissions.AllowAny",
+            "rest_framework.permissions.AllowAny",
+        ]
+    )
+    def test_all_anonymous_granting_classes_reachable(self) -> None:
+        """A list of nothing but unmodified AllowAny grants is genuinely open."""
+        assert route_is_anonymous_reachable(_cfg("default")) is True
+        assert route_is_anonymous_sse_reachable(_cfg("default")) is True
+
+    @override_settings(FRISIAN_MCP_PERMISSION_CLASSES=[_NarrowedPerm])
+    def test_opaque_override_treated_as_protected(self) -> None:
+        """A subclass that overrides the gate is opaque → treated as protected.
+
+        Statically unprovable either way; W011 is the compensating LOUD on
+        privileged routes (documented residual, not a silent one).
+        """
+        assert route_is_anonymous_reachable(_cfg("default")) is False
 
 
 class TestBucketPredicate:

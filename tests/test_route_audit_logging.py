@@ -207,6 +207,41 @@ class TestAuditContextSeam:
         assert record.tool_action is None
         assert "ssn-123-45-6789" not in repr(vars(record))
 
+    @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read"))
+    def test_unknown_tool_name_is_sanitized_but_kept(
+        self, registry: ToolRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The probed tool name is kept for forensics but stripped of injection chars.
+
+        V11-26 #10: on the unknown-tool path `tool_name` is caller input. CR's
+        remedy (log a fixed 'unknown') would erase the probe an audit trail
+        exists to record; sanitize-and-keep instead — control chars gone, the
+        probed name preserved.
+        """
+        view = _mount(_cfg("default", GATEWAY), registry)
+        with caplog.at_level(logging.INFO, logger=AUDIT_LOGGER):
+            _call(view, GATEWAY, "secret_list\r\nFORGED entry")
+        (record,) = _audit_records(caplog)
+        assert record.decision == "deny"
+        assert record.reason == "absent"
+        # Probe preserved (not dropped to a fixed label) ...
+        assert record.tool is not None and "secret_list" in record.tool
+        # ... but the CR/LF injection primitive is stripped.
+        assert "\r" not in record.tool and "\n" not in record.tool
+
+    @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read"))
+    def test_overlong_tool_name_is_truncated(
+        self, registry: ToolRegistry, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An unbounded caller name is capped so it can't be a log-storage vector."""
+        view = _mount(_cfg("default", GATEWAY), registry)
+        with caplog.at_level(logging.INFO, logger=AUDIT_LOGGER):
+            _call(view, GATEWAY, "z" * 5000)
+        (record,) = _audit_records(caplog)
+        assert record.tool is not None
+        assert len(record.tool) < 200
+        assert record.tool.endswith("…[truncated]")
+
     def test_continuation_expired_emits_audit_record(
         self, registry: ToolRegistry, caplog: pytest.LogCaptureFixture
     ) -> None:

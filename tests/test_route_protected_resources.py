@@ -296,3 +296,23 @@ class TestResourceLookup:
         settings.FRISIAN_MCP_ROUTES = THREE_DOORS
         assert resource_for_path("/") is None
         assert resource_for_path("") is None
+
+
+@pytest.mark.django_db
+class TestFailClosedOnMalformedRoutes:
+    """V11-25 #7 — a malformed ROUTES must not re-advertise the legacy resource."""
+
+    def test_malformed_routes_advertise_nothing_not_legacy(self, settings: Any) -> None:
+        """A ROUTES that fails to parse advertises nothing, not the legacy door.
+
+        Absent / empty / malformed used to conflate into the legacy fallback,
+        re-advertising a protected resource that per-route mounting deliberately
+        skipped (the open/nonexistent-resource defect V11-16 fixed).
+        """
+        settings.FRISIAN_MCP_ROUTES = {"bad": "not-a-mapping"}
+        assert protected_resources() == ()
+
+    def test_absent_routes_still_falls_back_to_legacy(self, settings: Any) -> None:
+        """Absence of the setting (None) preserves legacy behaviour."""
+        settings.FRISIAN_MCP_ROUTES = None
+        assert len(protected_resources()) == 1

@@ -972,6 +972,12 @@ class FrisianMcpConfig(AppConfig):
 
         if not getattr(settings, "FRISIAN_MCP_AUTODISCOVER", True):
             logger.debug("frisian_mcp auto-discovery disabled — skipping")
+            # V11-25 #4: auto-discovery is off, but a host may still register
+            # tools manually via @mcp_tool.  Materialise the per-route views and
+            # run the surface audit now (over whatever is registered) rather than
+            # skipping them entirely — the deferred-discovery signal that would
+            # otherwise run the finalizer is never registered on this path.
+            self._finalize_route_surfaces()
             return
 
         # PKG-21: defer the URL-tree scan and tool registration to the first
@@ -1126,23 +1132,34 @@ class FrisianMcpConfig(AppConfig):
                 flush=True,
             )
 
-        # PR-6: materialise the per-route tool views now that the registry is
-        # fully populated (auto-discovered + decorator + group-dispatcher tools).
-        # This is the single rebuild trigger under standard Django — process
-        # start / app reload.  A host with genuine runtime plugin registration
-        # calls route_views.rebuild_all() from its own discovery backend; the
-        # package never polls or watches.  When FRISIAN_MCP_ROUTES is unset this
-        # mounts only the backwards-compatible legacy view.
+        # PR-6 / PR-9a: materialise the per-route views and run the surface audit
+        # now that the registry is fully populated.  Shared with the
+        # AUTODISCOVER=False path (V11-25 #4) so a host that registers tools
+        # manually is not silently left without route materialisation or the
+        # surface audit.
+        self._finalize_route_surfaces()
+
+    def _finalize_route_surfaces(self) -> None:
+        """
+        Materialise per-route views and run the surface audit over the registry.
+
+        Runs once per process from the two discovery finish-lines:
+
+        * the end of :meth:`_run_deferred_discovery` (``AUTODISCOVER=True``), and
+        * the ``AUTODISCOVER=False`` early return in :meth:`ready` (V11-25 #4),
+          where a host registers tools manually via ``@mcp_tool`` and would
+          otherwise never get route materialisation or the surface audit.
+
+        Route materialisation is the single rebuild trigger under standard Django
+        (process start / app reload); a host with genuine runtime plugin
+        registration calls ``route_views.rebuild_all()`` from its own backend.
+        When ``FRISIAN_MCP_ROUTES`` is unset only the legacy view is mounted.  The
+        surface audit needs the populated registry that does not exist at
+        Django-check time — the config-only half already fired at boot.
+        """
+        from frisian_mcp import route_audit  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.registry import tool_registry  # pylint: disable=import-outside-toplevel
         from frisian_mcp.route_views import route_views  # pylint: disable=import-outside-toplevel
 
         route_views.rebuild_all(tool_registry)
-
-        # PR-9a: the surface-dependent half of the route audit (net-empty
-        # exposure, working carve-outs, per-entry grammar findings).  Runs here,
-        # once, because these triggers need the populated registry that does not
-        # exist at Django-check time — the config-only half already fired from
-        # route_audit.check_route_config at boot.  Guarded by _mcp_discovered
-        # above, so this is a one-shot per process, never a per-request cost.
-        from frisian_mcp import route_audit  # pylint: disable=import-outside-toplevel
-
         route_audit.audit_route_surface()

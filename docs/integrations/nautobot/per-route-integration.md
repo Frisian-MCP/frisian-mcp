@@ -242,6 +242,8 @@ On a per-route deployment the gateway check reports each mounted route rather th
 
 The **per-route surface audit** (also run by `manage.py check`, and promoted to an error under `mcp_doctor --strict`) reports the findings a plain Django check structurally can't — most usefully `W009` (a *working carve-out*: the deny list removed tools and the route still exposes others), which you should expect on both scoped routes here because `_SCOPED_DENY` is doing its job. A `W008` (a route that resolves to *zero* tools) means an allow/deny list canceled itself out and that route serves nothing — fix it before deploying. See the [mcp_doctor guide](../../v1.1/Guide/mcp-doctor.md) and [Per-Route Permissions → startup audit](../../v1.1/Guide/per-route-permissions.md#startup-audit) for the full finding matrix.
 
+`mcp_doctor --strict` has clean exit-code semantics: SOFT findings like `W009` do **not** fail it — only an error-level check, a LOUD finding, or an audit that could not run exits non-zero. That makes it safe to wire as a CI gate on your own Nautobot config; the package uses exactly this check as a required gate in its own pipeline.
+
 ---
 
 ## Connect an agent to a route

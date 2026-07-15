@@ -706,6 +706,152 @@ class TestTokenViewRateLimit:
 
 
 # ---------------------------------------------------------------------------
+# V11-26 #5 — rate-limiter IP derivation + loud fail-open
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimiterClientIp:
+    """XFF is honored only within TRUSTED_PROXY_COUNT; bucket keys are sanitized."""
+
+    @staticmethod
+    def _req(rf: RequestFactory, *, remote: str = "203.0.113.9", xff: str | None = None) -> Any:
+        request = rf.post("/oauth/token/")
+        request.META["REMOTE_ADDR"] = remote
+        if xff is not None:
+            request.META["HTTP_X_FORWARDED_FOR"] = xff
+        return request
+
+    def test_ignores_xff_without_trusted_proxy_count(self, rf: RequestFactory) -> None:
+        """With no proxy count, a spoofed XFF is ignored — REMOTE_ADDR wins."""
+        from frisian_mcp.contrib.oauth._rate_limiting import _get_client_ip
+
+        req = self._req(rf, remote="203.0.113.9", xff="1.2.3.4, 5.6.7.8")
+        assert _get_client_ip(req) == "203.0.113.9"
+
+    @override_settings(FRISIAN_MCP_TRUSTED_PROXY_COUNT=1)
+    def test_honors_xff_at_trust_boundary(self, rf: RequestFactory) -> None:
+        """One trusted proxy appends the real client as the rightmost XFF entry.
+
+        The attacker (the client) can only PREPEND; the trusted proxy's
+        appended entry is the last one, so proxy_count=1 selects it and the
+        spoofed prefix is ignored.
+        """
+        from frisian_mcp.contrib.oauth._rate_limiting import _get_client_ip
+
+        req = self._req(rf, xff="9.9.9.9-spoofed, 203.0.113.7")
+        assert _get_client_ip(req) == "203.0.113.7"
+
+    @override_settings(FRISIAN_MCP_TRUSTED_PROXY_COUNT=1)
+    def test_spoofed_xff_cannot_mint_fresh_bucket_per_request(self, rf: RequestFactory) -> None:
+        """Varying the attacker-controlled prefix does not move the selected slot.
+
+        The selected entry is always the trusted-proxy-appended suffix, so an
+        attacker cannot rotate buckets to evade the limiter by editing the part
+        of XFF they control.
+        """
+        from frisian_mcp.contrib.oauth._rate_limiting import _bucket_ip
+
+        a = _bucket_ip(self._req(rf, xff="spoof-1, 203.0.113.7"))
+        b = _bucket_ip(self._req(rf, xff="wildly, different, junk, 203.0.113.7"))
+        assert a == b == "203.0.113.7"
+
+    @override_settings(FRISIAN_MCP_TRUSTED_PROXY_COUNT=9)
+    def test_control_chars_stripped_when_misconfig_exposes_attacker_slot(
+        self, rf: RequestFactory
+    ) -> None:
+        """If TRUSTED_PROXY_COUNT overstates reality, the selected slot can be attacker text.
+
+        No index arithmetic can recover a wrong proxy count, so _bucket_ip is
+        the backstop: it strips the CR/LF a poisoned slot would carry, keeping
+        the cache key memcached-safe and un-forgeable.
+        """
+        from frisian_mcp.contrib.oauth._rate_limiting import _bucket_ip
+
+        # proxy_count(9) > entries → index clamps to 0 → the leftmost
+        # (attacker-controlled) entry is selected.
+        bucket = _bucket_ip(self._req(rf, xff="ev\r\nil, 10.0.0.1"))
+        assert "\r" not in bucket and "\n" not in bucket
+        assert bucket == "evil"
+
+    def test_empty_ip_collapses_to_shared_invalid_bucket(self, rf: RequestFactory) -> None:
+        """An empty derived IP self-throttles into one bucket, not per-request buckets."""
+        from frisian_mcp.contrib.oauth._rate_limiting import _bucket_ip
+
+        request = rf.post("/oauth/token/")
+        request.META["REMOTE_ADDR"] = ""
+        assert _bucket_ip(request) == "invalid"
+
+
+class TestRateLimiterFailOpenIsLoud:
+    """Both fail-open causes emit a WARNING — an inert limiter is never silent."""
+
+    def setup_method(self) -> None:
+        """Reset the once-per-process fail-open guard and the cache."""
+        from django.core.cache import cache  # pylint: disable=import-outside-toplevel
+
+        from frisian_mcp.contrib.oauth import _rate_limiting
+
+        _rate_limiting._LOGGED_FAIL_OPEN_EVENTS.clear()  # pylint: disable=protected-access
+        cache.clear()
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="20/minutes")
+    def test_malformed_setting_warns_and_fails_open(self, rf: RequestFactory, caplog: Any) -> None:
+        """A typo'd period logs the misconfigured event and does not block."""
+        from frisian_mcp.contrib.oauth._rate_limiting import (
+            OAUTH_TOKEN_RATE_LIMIT_MISCONFIGURED,
+            _token_rate_limit_exceeded,
+        )
+
+        request = rf.post("/oauth/token/")
+        request.META["REMOTE_ADDR"] = "10.0.0.9"
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth._rate_limiting"):
+            blocked = _token_rate_limit_exceeded(request)
+        assert blocked is False
+        assert any(
+            r.message.startswith(OAUTH_TOKEN_RATE_LIMIT_MISCONFIGURED) for r in caplog.records
+        )
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="1/minute")
+    def test_cache_outage_warns_and_fails_open(self, rf: RequestFactory, caplog: Any) -> None:
+        """When the cache backend raises, issuance continues but the outage is logged."""
+        from frisian_mcp.contrib.oauth._rate_limiting import (
+            OAUTH_TOKEN_RATE_LIMIT_CACHE_UNAVAILABLE,
+            _token_rate_limit_exceeded,
+        )
+
+        request = rf.post("/oauth/token/")
+        request.META["REMOTE_ADDR"] = "10.0.0.10"
+        with patch(
+            "frisian_mcp.contrib.oauth._rate_limiting.django_cache.add",
+            side_effect=RuntimeError("cache down"),
+        ):
+            with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth._rate_limiting"):
+                blocked = _token_rate_limit_exceeded(request)
+        assert blocked is False
+        assert any(
+            r.message.startswith(OAUTH_TOKEN_RATE_LIMIT_CACHE_UNAVAILABLE) for r in caplog.records
+        )
+
+    @override_settings(FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT="20/minutes")
+    def test_fail_open_warns_once_per_process(self, rf: RequestFactory, caplog: Any) -> None:
+        """A sustained misconfig warns once, not once per token request."""
+        from frisian_mcp.contrib.oauth._rate_limiting import (
+            OAUTH_TOKEN_RATE_LIMIT_MISCONFIGURED,
+            _token_rate_limit_exceeded,
+        )
+
+        request = rf.post("/oauth/token/")
+        request.META["REMOTE_ADDR"] = "10.0.0.11"
+        with caplog.at_level("WARNING", logger="frisian_mcp.contrib.oauth._rate_limiting"):
+            for _ in range(5):
+                _token_rate_limit_exceeded(request)
+        hits = [
+            r for r in caplog.records if r.message.startswith(OAUTH_TOKEN_RATE_LIMIT_MISCONFIGURED)
+        ]
+        assert len(hits) == 1
+
+
+# ---------------------------------------------------------------------------
 # Registration endpoint
 # ---------------------------------------------------------------------------
 
@@ -2070,6 +2216,46 @@ class TestTokenViewAuthorizationCodeGrant:
         assert json.loads(response.content)["error"] == "invalid_client"
         # The deactivated row must NOT have been duplicated (the IntegrityError cause).
         assert OAuthClient.objects.filter(client_id=client_id).count() == 1
+
+    def test_auto_register_create_race_returns_invalid_client_not_500(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        V11-25 #6: a TOCTOU create collision on a brand-new client_id → 401, not 500.
+
+        Two concurrent exchanges for the same NEW client_id both pass the
+        existence check (both see it absent), both ``create()`` — one wins, the
+        loser hits the unique constraint.  The loser must return a clean
+        invalid_client, not an unhandled 500, even though its auth code was
+        already consumed.  Simulated by forcing ``create()`` to raise the
+        IntegrityError the DB would raise for the losing insert.
+        """
+        from django.db import IntegrityError
+
+        settings.FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
+        client_id = "pkce-brand-new-racing-client"
+        code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        code = self._setup_code_in_cache(client_id, "https://example.com/cb", code_verifier)
+
+        request = rf.post(
+            "/oauth/token/",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "redirect_uri": "https://example.com/cb",
+                "code": code,
+                "code_verifier": code_verifier,
+            },
+        )
+        with patch.object(
+            OAuthClient.objects,
+            "create",
+            side_effect=IntegrityError("UNIQUE constraint failed: oauthclient.client_id"),
+        ):
+            response = _token_view(request)
+
+        assert response.status_code == 401
+        assert json.loads(response.content)["error"] == "invalid_client"
 
     def test_wrong_code_verifier_returns_400(self, rf: RequestFactory) -> None:
         """Wrong code_verifier returns 400 invalid_grant."""
