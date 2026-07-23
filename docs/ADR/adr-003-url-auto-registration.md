@@ -87,7 +87,7 @@ Auto-registration provides defaults. Operators retain control:
 
 - `FRISIAN_MCP_PATH` controls the MCP endpoint mount path
 - `FRISIAN_MCP_OAUTH_ISSUER` controls the issuer base URL used for all generated OAuth metadata URLs
-- `FRISIAN_MCP_AUTOREGISTER_URLS = False` disables auto-registration entirely for operators who want manual control
+- Operators who want manual control can include `frisian_mcp.urls` in their own `ROOT_URLCONF`; auto-registration detects the explicit include (by `app_name`) and backs off, so there is no double mount
 
 The escape hatch matters. Projects with unusual URL configuration requirements, or operators who prefer explicit `urls.py` inclusion for visibility, can opt out. The default behavior is automatic; the opt-out is one setting.
 

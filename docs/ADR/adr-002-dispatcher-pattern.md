@@ -57,9 +57,9 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 
 Each group becomes one tool. Resources not included in any group remain as flat tools (no breaking change for partial adoption).
 
-**`FRISIAN_MCP_AUTODISPATCH = True`** — automatic resource-level grouping. One dispatcher per resource. No manual configuration required.
+**`@mcp_dispatcher`** — a hand-written dispatcher registered in host code, for full control over a tool's name, description, and action set.
 
-Both settings are composable. A project can use auto-dispatch for most resources and define explicit groups for cross-resource concerns.
+The two compose: declare `FRISIAN_MCP_DISPATCH_GROUPS` for most resources and hand-write a `@mcp_dispatcher` for cross-resource concerns.
 
 ## Token Math
 
@@ -68,8 +68,8 @@ The numbers from the network automation platform integration:
 | Approach | Tools exposed | Schema tokens |
 |---|---|---|
 | Flat (raw API) | 1,967 | ~490,000 |
-| `FRISIAN_MCP_AUTODISPATCH` | ~200 | ~60,000 |
-| `FRISIAN_MCP_DISPATCH_GROUPS` | 13 | ~2,000–4,000 |
+| `FRISIAN_MCP_DISPATCH_GROUPS` — one group per resource | ~200 | ~60,000 |
+| `FRISIAN_MCP_DISPATCH_GROUPS` — grouped by domain | 13 | ~2,000–4,000 |
 
 A 99%+ reduction at the schema level. The agent's full reasoning budget is preserved for actual work.
 
@@ -87,7 +87,7 @@ Several alternatives were considered:
 
 **Lazy tool registration** — only register tools when first called. Breaks the MCP contract: `tools/list` is supposed to be authoritative. Agents that have not yet called a tool would have no way to discover it exists.
 
-**External SEP proposals (SEP-2084 Primitive Grouping, SEP-1300 Tool Filtering)** — SEP-2084 was rejected by the MCP core maintainers after four months of working group participation. The proposal to add Groups as a formal server capability could not reach consensus, with server-side use cases and client-side use cases pulling in incompatible directions. SEP-1300 (Tool Filtering) remains in discussion but has no reference implementation. The dispatcher pattern does not depend on either proposal — it is implementable in the existing MCP specification without any spec changes, and production deployments are running it today.
+**External SEP proposals (SEP-2084 Primitive Grouping, SEP-1300 Tool Filtering)** — SEP-2084 proposes adding Groups as a formal server capability to organize tools; as of this writing it remains under active working-group discussion rather than adopted into the spec. SEP-1300 (Tool Filtering) is likewise in discussion and has no reference implementation. The dispatcher pattern does not depend on either proposal — it is implementable in the existing MCP specification without any spec changes, and production deployments are running it today.
 
 The dispatcher pattern is the cleanest solution that works within the current MCP specification, requires no client-side changes, and produces measurable token savings on real systems.
 
@@ -101,7 +101,7 @@ The dispatcher pattern is the cleanest solution that works within the current MC
 
 **Negative.** An additional tool call is required when the agent first encounters a resource within a group — the `action=help` call to discover the parameter schema. This is a one-time cost per resource, and the schema is then in agent context for the rest of the session. Steady-state agents that already know the resource vocabulary skip the help call entirely.
 
-**Negative.** Operators with very flat data models gain less from the pattern. A Django app with 30 unrelated resources does not have natural groupings. For these projects, `FRISIAN_MCP_AUTODISPATCH = True` provides automatic resource-level grouping without requiring operator decisions, but the savings are smaller than for projects with clear domain hierarchies.
+**Negative.** Operators with very flat data models gain less from the pattern. A Django app with 30 unrelated resources does not have natural groupings. For these projects the savings are smaller than for projects with clear domain hierarchies — `FRISIAN_MCP_DISPATCH_GROUPS` still helps, but the compression is limited by the lack of natural groupings.
 
 **Negative.** Tool descriptions for dispatchers are necessarily generic ("Operations on the dcim domain"). Specific tool descriptions for individual operations live in the help response rather than in `tools/list`. Agents that select tools purely from `tools/list` descriptions may need to invoke `action=help` before they can choose the right operation.
 

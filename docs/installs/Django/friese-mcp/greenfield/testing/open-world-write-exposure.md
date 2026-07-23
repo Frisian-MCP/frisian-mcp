@@ -16,7 +16,7 @@ The threat model is an agent — compromised, misconfigured, or adversarial — 
 
 Path separation defeats this at the routing level: write routes are not mounted on the read path. There is nothing to invoke.
 
-See [Security Architecture](../../../../../Security/security.md) for the full design rationale.
+See [Security Architecture](../../../../../v1.1/Security/security.md) for the full design rationale.
 
 ---
 
@@ -107,6 +107,6 @@ If you are not using path separation and instead rely on `permission_classes` al
 
 ## Related Docs
 
-- [Security Architecture](../../../../../Security/security.md)
+- [Security Architecture](../../../../../v1.1/Security/security.md)
 - [Access Control](access-control.md)
 - [Permission Visibility](permission-visibility.md)

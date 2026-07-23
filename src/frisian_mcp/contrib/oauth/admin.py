@@ -8,6 +8,8 @@ from django.db.models import QuerySet
 from django.http import HttpRequest
 from django.utils.html import format_html
 
+from frisian_mcp.route_resources import default_protected_resource
+
 from .models import OAuthAccessToken, OAuthAuthorizeConsent, OAuthClient
 
 
@@ -119,14 +121,24 @@ class OAuthClientAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
     @admin.display(description="MCP server URL")
     def connector_mcp_url(self, obj: OAuthClient) -> str:  # pylint: disable=unused-argument
-        """Return the MCP gateway URL formatted as an HTML code element."""
+        """
+        Return the MCP gateway URL formatted as an HTML code element.
+
+        Shares :mod:`frisian_mcp.route_resources` with the client-facing metadata
+        view: this display and that document are two renderings of one fact, and
+        open-coding the derivation twice is exactly how they drifted (V11-16).
+        An operator copying this URL into a connector gets the same door the
+        server advertises over OAuth.
+        """
         issuer: str = getattr(settings, "FRISIAN_MCP_OAUTH_ISSUER", "").rstrip("/")
-        mcp_path: str = str(
-            getattr(settings, "FRISIAN_MCP_PROTECTED_PATH", None)
-            or getattr(settings, "FRISIAN_MCP_PATH", "/mcp/")
-        )
-        url = f"{issuer}/{mcp_path.lstrip('/')}"
-        return format_html("<code>{}</code>", url)
+        resource = default_protected_resource()
+        if resource is None:
+            return format_html(
+                "<em>{}</em>",
+                "No authenticated route is configured — this server exposes no "
+                "OAuth-protected resource.",
+            )
+        return format_html("<code>{}</code>", resource.resource_url(issuer))
 
 
 @admin.register(OAuthAuthorizeConsent)

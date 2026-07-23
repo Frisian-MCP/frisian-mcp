@@ -136,7 +136,23 @@ def _resolve_request_tier(request: Any) -> str:
     Defined at module level so :class:`ToolRegistry` can enforce tier at
     dispatch time without importing :mod:`frisian_mcp.views` (avoiding a
     circular import).
+
+    ``request._mcp_effective_tier`` short-circuits everything: it is the
+    ``min(token_tier, route_ceiling, FRISIAN_MCP_MAX_TIER)`` result computed
+    once in :meth:`~frisian_mcp.views.McpView.post` (ADR-010 §8).  Every later
+    read in the same request — discovery, dispatch-time enforcement, error
+    messages — returns that one value; nothing recomputes it.
     """
+    stamped: str | None = getattr(request, "_mcp_effective_tier", None)
+    if stamped is not None:
+        # ``_mcp_effective_tier`` already incorporates the endpoint cap by
+        # construction (it is ``min(token_tier, route_ceiling, MAX_TIER)``), so
+        # re-applying the cap is normally a no-op.  Do it anyway as a
+        # defense-in-depth invariant: if the stamp is ever stale or a bug stamps
+        # it above ``_mcp_max_tier``, the endpoint cap still holds and dispatch
+        # cannot be tricked into serving write/admin tools past the ceiling.
+        return _apply_max_tier_cap(str(stamped), request)
+
     hook = _resolve_tier_hook()
     if hook is not None:
         try:
@@ -409,6 +425,18 @@ class ToolRegistry:
         with self._lock:
             return list(self._tools.keys())
 
+    def entries_snapshot(self) -> dict[str, _ToolEntry]:
+        """
+        Return a name→entry snapshot of the registry taken under the lock.
+
+        The mapping is a fresh dict, but the ``_ToolEntry`` values are the live
+        registry objects — :class:`~frisian_mcp.route_views.RouteView` shares
+        surviving flat entries by reference rather than copying them.  Consumers
+        must treat the entries as read-only.
+        """
+        with self._lock:
+            return dict(self._tools)
+
     def set_hidden(self, name: str, hidden: bool = True) -> bool:
         """
         Toggle the *hidden* flag on a registered tool.
@@ -462,7 +490,11 @@ class ToolRegistry:
                 write/delete actions the requesting user lacks permission for.
 
         """
-        max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
+        # ``max_tier is None`` means "no cap" (rank 2, show all).  A non-None but
+        # UNRECOGNISED tier string fails CLOSED (rank 0 = read) so a garbled cap
+        # can never widen visibility to admin-tier tools.  Kept identical to
+        # frisian_mcp.route_views._list_entries — the two must not diverge.
+        max_rank = 2 if max_tier is None else _TIER_RANK.get(max_tier, 0)
 
         # Lazy-import to avoid a circular dependency with backends.dispatcher,
         # which itself imports from this module.
@@ -602,9 +634,7 @@ class ToolRegistry:
         # rejects unauthorised sub-actions.
         if not entry.is_dispatcher:
             caller_tier = _resolve_request_tier(request)
-            caller_rank = _TIER_RANK.get(caller_tier, 0)
-            tool_rank = _TIER_RANK.get(entry.permission_tier, 0)
-            if caller_rank < tool_rank:
+            if _TIER_RANK.get(caller_tier, 0) < _TIER_RANK.get(entry.permission_tier, 0):
                 if getattr(request, "_mcp_max_tier", None) is not None:
                     # On a max-tier-capped endpoint the tool must appear
                     # nonexistent — returning a tier error leaks that the tool
@@ -656,9 +686,30 @@ class ToolRegistry:
                     f"Send the fields directly as: {_expected}."
                 )
 
+        _validation_schema = entry.input_schema
+        if entry.is_dispatcher and getattr(request, "_mcp_max_tier", None) is not None:
+            # V11-20 (F3): the registration-time action enum is the FULL action
+            # set, and jsonschema's enum-violation message enumerates every
+            # allowed value — handing a tier-capped caller the write/admin
+            # action names that tools/list and help deliberately hide.  Drop
+            # the enum from validation on capped routes; the dispatcher invoke
+            # rejects unknown actions itself with a hint drawn from the
+            # caller-visible set, so a never-existed action and an
+            # above-ceiling action produce the same absence error.  Uncapped
+            # legacy mounts keep the enum (and its self-correction value).
+            _props = _validation_schema.get("properties", {})
+            if "enum" in _props.get("action", {}):
+                _validation_schema = {
+                    **_validation_schema,
+                    "properties": {
+                        **_props,
+                        "action": {k: v for k, v in _props["action"].items() if k != "enum"},
+                    },
+                }
+
         if not is_dispatcher_help and not _is_list_body:
             try:
-                jsonschema.validate(instance=arguments, schema=entry.input_schema)
+                jsonschema.validate(instance=arguments, schema=_validation_schema)
             except jsonschema.exceptions.ValidationError as exc:
                 raise ToolInputError(exc.message) from exc
 

@@ -2,7 +2,7 @@
 
 **Audience:** Django developers adding MCP gateway support to a new or existing project  
 **Platform:** Django 4.2+ · Django REST Framework 3.14+ · Python 3.11+  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 
@@ -35,7 +35,7 @@ pip install frisian-mcp
 For projects using `requirements.txt` or `pyproject.toml`:
 
 ```text
-frisian-mcp>=0.2.0
+frisian-mcp>=1.1
 ```
 
 ---
@@ -111,7 +111,7 @@ urlpatterns = [
 
 This mounts the gateway at `/mcp`. Clients connect to `https://your-domain.example/mcp`.
 
-> **Why `re_path`?** MCP clients like Claude.ai and Cursor strip trailing slashes from the server URL. Django's `APPEND_SLASH` mechanism issues a 308 redirect from `/mcp` → `/mcp/`, and MCP clients do not follow 308 redirects, causing the connection to fail silently. The `re_path` pattern with optional trailing slash (`/?`) handles both forms without a redirect.
+> **Why `re_path`?** MCP clients like Claude.ai and Cursor may strip the trailing slash from the server URL. Django's `APPEND_SLASH` would normally issue a 301 redirect from `/mcp` → `/mcp/`, which those clients don't follow. The `re_path` pattern with an optional trailing slash (`/?`) matches both forms directly, and the package also auto-installs `McpTrailingSlashMiddleware`, which suppresses the `APPEND_SLASH` redirect on the gateway path — so both `/mcp` and `/mcp/` reach the endpoint with no redirect either way.
 
 ---
 
@@ -133,10 +133,10 @@ No settings are required to get auto-discovery running. The defaults are:
 
 | Setting | Default | Effect |
 |---------|---------|--------|
-| `frisian_MCP_ENABLED` | `True` | Enable/disable the gateway |
-| `frisian_MCP_AUTODISCOVER` | `True` | Auto-register ViewSet actions on startup |
-| `frisian_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests |
-| `frisian_MCP_SERVER_NAME` | `"frisian-mcp"` | Server name in the `initialize` handshake |
+| `FRISIAN_MCP_ENABLED` | `True` | Enable/disable the gateway |
+| `FRISIAN_MCP_AUTODISCOVER` | `True` | Auto-register ViewSet actions on startup |
+| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests |
+| `FRISIAN_MCP_SERVER_NAME` | `"frisian-mcp"` | Server name in the `initialize` handshake |
 
 A common minimum configuration:
 
@@ -145,10 +145,10 @@ A common minimum configuration:
 
 # Expose read-tier tools to unauthenticated callers.
 # Set to None or "none" to require authentication for all tools.
-frisian_MCP_UNAUTHENTICATED_TIER = "read"
+FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 
 # Optional: name your server
-frisian_MCP_SERVER_NAME = "my-app-mcp"
+FRISIAN_MCP_SERVER_NAME = "my-app-mcp"
 ```
 
 For a full settings reference, see `features/configuration.md`.
@@ -187,7 +187,7 @@ A successful response looks like:
 If `tools` is an empty array, auto-discovery found no ViewSet actions. Check that:
 
 - Your ViewSets are registered in the URL resolver (not just defined)
-- `frisian_MCP_AUTODISCOVER` is not set to `False`
+- `FRISIAN_MCP_AUTODISCOVER` is not set to `False`
 - No `@mcp_ignore` decorator was applied to all ViewSets
 
 ---
@@ -219,7 +219,7 @@ claude mcp add my-app \
   http://localhost:8000/mcp
 ```
 
-See [connect-agent](../../../../Guide/connect-agent.md) for Claude.ai, ChatGPT, and Grok OAuth connection steps.
+See [connect-agent](../../../../v1.1/Guide/connect-agent.md) for Claude.ai, ChatGPT, and Grok OAuth connection steps.
 
 ---
 
@@ -249,7 +249,7 @@ For large APIs (hundreds of ViewSet actions), use dispatchers to keep `tools/lis
 
 Cross-references to the design rationale behind these features:
 
-- [dispatcher-pattern](../../../../Guide/dispatcher-pattern.md)
-- [the-token-problem](../../../../Guide/the-token-problem.md)
-- [read-response-filtering](../../../../Guide/read-response-filtering.md)
-- [write-path-response-filtering](../../../../Guide/write-path-response-filtering.md)
+- [dispatcher-pattern](../../../../v1.1/Guide/dispatcher-pattern.md)
+- [the-token-problem](../../../../v1.1/Guide/the-token-problem.md)
+- [read-response-filtering](../../../../v1.1/Guide/read-response-filtering.md)
+- [write-path-response-filtering](../../../../v1.1/Guide/write-path-response-filtering.md)

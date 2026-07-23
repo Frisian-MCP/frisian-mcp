@@ -354,6 +354,13 @@ class OAuthTokenAuthentication(BaseAuthentication):
         if not getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
             return 'Bearer realm="frisian-mcp"'
 
+        from frisian_mcp.route_resources import (  # pylint: disable=import-outside-toplevel
+            challenge_metadata_url,
+        )
+
         base = _get_base_url(request)
-        resource_metadata = f"{base}/.well-known/oauth-protected-resource"
+        # Point at the metadata for the route this 401 came from, not a fixed
+        # server-wide URL — otherwise a client challenged on /admin is handed
+        # some other route's resource identity (V11-16).
+        resource_metadata = challenge_metadata_url(base, getattr(request, "path", ""))
         return f'Bearer realm="frisian-mcp", resource_metadata="{resource_metadata}"'

@@ -27,34 +27,38 @@ The probe-then-fetch pattern is the right solution. It gives the agent the infor
 
 ## Decision
 
-frisian-mcp implements read-path response filtering as an opt-in decorator, `@mcp_heavy`, applied to ViewSet list actions.
+frisian-mcp implements read-path response filtering two ways: an explicit `@mcp_heavy` tool registration for hand-authored heavy tools, and the `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` byte-size backstop that applies the same probe behavior to auto-discovered ViewSet actions.
 
 **Decorator usage:**
 
 ```python
 from frisian_mcp.decorators import mcp_heavy
 
-class DeviceViewSet(viewsets.ModelViewSet):
-
-    @mcp_heavy
-    def list(self, request):
-        queryset = self.get_queryset()
-        ...
+# @mcp_heavy is a registration factory (name/description/input_schema) wrapping a
+# (arguments, request) callable — not a bare wrapper on a ModelViewSet method.
+@mcp_heavy(
+    name="devices.search",
+    description="Search devices; returns a probe envelope with size and negotiation modes.",
+    input_schema={"type": "object", "properties": {"site": {"type": "string"}}},
+)
+def search_devices(arguments, request):
+    ...
 ```
+
+Auto-discovered `ModelViewSet` actions are covered without a decorator by setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` (see below).
 
 **Two-call pattern:**
 
-When an agent calls a list action decorated with `@mcp_heavy`, the first call functions as a probe. The response includes:
+When a heavy tool (or an auto-discovered action over the negotiation threshold) returns a large result, the first call functions as a probe. The response is a probe envelope:
 
-- `count` — total number of records matching the applied filters
-- `data_size` — estimated response size in bytes for the full result set
-- `next` — pagination cursor for the first page of results
-- `previous` — pagination cursor for a prior page (where applicable)
-- `results` — first page of records (default page size applies)
+- `preview` — a truncated preview of the result so the agent can see its shape
+- `total_size` — full serialized response size in bytes
+- `available_modes` — the retrieval modes (`summary`, `paginated`, `filtered`, `full`) the agent may request
+- `continuation_token` — opaque token that fetches the cached result in a chosen mode
 
-The agent receives the metadata it needs to make a decision. If the total count is small, the agent can proceed with the first page. If the count is large, the agent can apply additional filters or paginate deliberately. The context window is not pre-filled with records the agent may never use.
+The agent receives the metadata it needs to make a decision. If `total_size` is small, it fetches the full result; if large, it applies additional filters or fetches deliberately in `paginated` mode. The context window is not pre-filled with records the agent may never use.
 
-Subsequent pages are fetched by calling the same tool with the `next` cursor, continuing as needed.
+Subsequent data is fetched by re-invoking the same tool with the `continuation_token` and a `mode`, continuing as needed.
 
 **Automatic threshold negotiation:**
 
@@ -70,7 +74,7 @@ The discovery backend marks `@mcp_heavy` tools in their generated schema so agen
 
 **Cache layer:**
 
-Probe results are cached server-side keyed by `_HEAVY_CACHE_PREFIX` + a token derived from the query parameters. The continuation token returned in the probe response encodes this cache key. When the agent follows the `next` cursor, frisian-mcp resolves the cached query context and returns the next page without re-executing the probe. This same cache layer is reused by the write-path continuation token mechanism introduced in ADR-004.
+Probe results are cached server-side keyed by `_HEAVY_CACHE_PREFIX` + a token derived from the query parameters. The continuation token returned in the probe response encodes this cache key. When the agent re-invokes the tool with the `continuation_token` and a `mode`, frisian-mcp resolves the cached query context and returns the requested slice without re-executing the probe. This same cache layer is reused by the write-path continuation token mechanism introduced in ADR-004.
 
 ## Why Not DRF Default Pagination Alone
 

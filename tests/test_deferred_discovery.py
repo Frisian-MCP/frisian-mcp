@@ -382,6 +382,39 @@ class TestAutodiscoverDisabled:
 
         assert not calls
 
+    @override_settings(FRISIAN_MCP_ENABLED=True, FRISIAN_MCP_AUTODISCOVER=False)
+    def test_route_surfaces_still_finalized_when_autodiscover_disabled(
+        self,
+        fresh_app_config: FrisianMcpConfig,
+        isolated_registry: ToolRegistry,
+    ) -> None:
+        """V11-25 #4: AUTODISCOVER=False still materializes routes and runs the audit.
+
+        Auto-discovery is off, but a host may still register tools manually via
+        ``@mcp_tool``.  Those tools must get route materialization and the
+        surface audit — the deferred-discovery signal that would otherwise run
+        the finalizer is never connected on this path, so ``ready()`` must run it
+        directly before its early return.
+        """
+        from frisian_mcp.route_views import route_views
+
+        isolated_registry.register(
+            name="manual_probe",
+            fn=lambda arguments, request: {"ok": True},
+            description="manually registered",
+            input_schema={"type": "object", "properties": {}},
+            permission_tier="read",
+        )
+
+        with (
+            patch.object(route_views, "rebuild_all") as rebuild_all,
+            patch("frisian_mcp.route_audit.audit_route_surface") as audit_surface,
+        ):
+            fresh_app_config.ready()
+
+        assert rebuild_all.called, "routes were not materialized under AUTODISCOVER=False"
+        assert audit_surface.called, "the surface audit did not run under AUTODISCOVER=False"
+
 
 # ---------------------------------------------------------------------------
 # rf fixture local to this module so it doesn't depend on other test files

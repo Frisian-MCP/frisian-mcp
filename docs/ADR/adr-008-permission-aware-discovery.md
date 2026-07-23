@@ -1,10 +1,19 @@
 # ADR-008: Permission-Aware Tool Discovery
 
-**Status:** Proposed
+**Status:** Accepted (shipped in 1.1.0; see Amendment below)
 **Date:** 2026-06-05
 **Category:** adr
 **Supersedes:** —
 **Related:** ADR-001 (Pluggable Backends), ADR-002 (Dispatcher Pattern), ADR-003 (URL Auto-Registration), ADR-006 (Repeated-Path Token Reduction)
+
+---
+
+## Amendment (1.1.0)
+
+This ADR was accepted and shipped in frisian-mcp 1.1.0. Two elements of the original design evolved during implementation:
+
+- **Capability resolution uses `user.has_perm()`, not `user.get_all_permissions()`.** `has_perm` is a strict superset that also honors superuser status, view exemptions (`EXEMPT_VIEW_PERMISSIONS`), and custom auth backends natively — the same predicate the host authorizes with. Consequently the `ExemptViewPermissionAdapter` referenced in §4 and the Nautobot validation table is now a **deprecated no-op**: exemptions are honored without it. Remove `FRISIAN_MCP_PERMISSION_ADAPTER`; nothing replaces it.
+- **The fail-loud OAuth prerequisite (§7) was relaxed to fail-soft.** An OAuth identity that does not resolve to a real Django user is now treated as a **service principal** that bypasses capability filtering, with the permission **tier as the sole gate** — it sees tier-appropriate tools, not an empty list. The `has_perm` short-circuit made the original "empty permission set shows nothing" failure mode moot, so the startup check that enforced §7 (E002) was **retired**. Clients that need per-identity scoping still map to a Django user as in §7; leaving a client unmapped is now a supported configuration, not a startup error.
 
 ---
 
@@ -36,7 +45,7 @@ This is the load-bearing design choice. It is what makes the feature a *projecti
 
 ### 3. Capability is resolved via Django's standard permission interface
 
-Discovery filtering keys off `user.get_all_permissions()` — Django's standard auth-backend method. Any backend that implements it (Nautobot's `ObjectPermissionBackend`, Django's default `ModelBackend`, or a custom backend) is supported with no backend-specific code in the discovery path.
+Discovery filtering keys off `user.has_perm()` — Django's standard authorization predicate (the original design used `get_all_permissions()`; see Amendment). Any backend that implements it (Nautobot's `ObjectPermissionBackend`, Django's default `ModelBackend`, or a custom backend) is supported with no backend-specific code in the discovery path.
 
 The expected return shape is a mapping of `"<app_label>.<action>_<model>"` permission strings to optional constraint metadata. Discovery checks membership of the relevant `content-type + action` permission string in this mapping — an O(1) check after a single cached query. No object-level queries are performed at discovery time.
 
@@ -44,7 +53,7 @@ The expected return shape is a mapping of `"<app_label>.<action>_<model>"` permi
 
 Each backend integration provides an adapter exposing:
 
-- **`get_capabilities(user) -> set[str] | dict[str, Any]`** — the permission strings the identity holds. Default implementation delegates to `user.get_all_permissions()`. Backends needing custom resolution override this.
+- **`get_capabilities(user) -> set[str] | dict[str, Any]`** — the permission strings the identity holds. Default implementation resolves each capability through `user.has_perm()` (a strict superset of `get_all_permissions()` that also honors superuser status and view exemptions). Backends needing custom resolution override this.
 - **`map_action(mcp_action: str) -> str`** — maps an MCP dispatcher action to the backend permission action string. Standard CRUD maps trivially (`list`/`retrieve` → `view`, `create` → `add`, `update`/`partial_update` → `change`, `destroy` → `delete`). Non-CRUD actions require explicit declaration (see §5).
 - **`is_unrestricted(user, content_type) -> bool`** — returns `True` when the identity should bypass capability filtering for the given type (e.g. superuser, or a backend-defined exemption). Discovery and enforcement MUST consult this in addition to `get_capabilities()`. (See Consequences — the superuser caveat.)
 
@@ -65,6 +74,8 @@ Standard CRUD tools need no annotation; the adapter's `map_action()` default cov
 Discovery filters at **content-type + action granularity only** (V1 scope). Object-level constraints (e.g. "only devices in region X") are **not** evaluated at discovery time. They are enforced **automatically at execution** by the backend's existing query-restriction machinery, which the dispatcher already invokes. No additional frisian-mcp code is required for constraint enforcement on reads; we inherit it for free.
 
 ### 7. The OAuth identity MUST resolve to a real backend user (hard prerequisite)
+
+> **Superseded in 1.1.0 — see Amendment above.** This fail-loud prerequisite was relaxed: an unresolved OAuth identity is now a service principal gated by tier only, and the E002 startup check was retired. The section below is the original decision, retained for the record.
 
 This is the critical configuration gate.
 

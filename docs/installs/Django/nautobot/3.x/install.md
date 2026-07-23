@@ -154,8 +154,9 @@ FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = False
 # Safest default tier when a client doesn't specify one.
 FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = "read"
 
-# 1-year token expiry.  Shorten in environments with stricter rotation.
-FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 60 * 60 * 24 * 365
+# Token lifetime.  Package default is 3600 (1 hour); raise only if your
+# rotation policy allows a longer-lived Bearer.
+FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 3600
 
 # Hide OAuth .well-known discovery metadata.  Returns JSON 404 from the
 # .well-known endpoints so discovery-first MCP clients fall back cleanly to
@@ -170,9 +171,12 @@ FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False
 # call.  A read-tier token sees only list/retrieve; write actions are
 # hidden from discovery, not just blocked at execution.
 FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True
-FRISIAN_MCP_PERMISSION_ADAPTER = (
-    "frisian_mcp.contrib.permissions.exempt_view_adapter.ExemptViewPermissionAdapter"
-)
+# Leave FRISIAN_MCP_PERMISSION_ADAPTER unset: the default DjangoPermissionAdapter
+# resolves capabilities via user.has_perm(), which on Nautobot means the
+# principal's real ObjectPermissions.  ExemptViewPermissionAdapter is a
+# deprecated no-op in 1.1.0 — do not set it; and do not set a global
+# EXEMPT_VIEW_PERMISSIONS, which grants every authenticated principal a view of
+# the whole estate and defeats per-principal scoping.
 ```
 
 A full reference config file (drop-in, with the same hardened posture and
@@ -346,20 +350,13 @@ For internal agents or scripts where adding a DB row is overkill, configure
 HMAC-hashed static keys in `nautobot_config.py`:
 
 ```python
-import hmac
-import hashlib
-from django.conf import settings
-
-def _hash(raw: str) -> str:
-    return hmac.new(
-        settings.FRISIAN_MCP_HMAC_KEY.encode(),
-        raw.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-
+# FRISIAN_MCP_API_KEYS is keyed by the HMAC-SHA256 DIGEST of each raw key,
+# not the raw key itself — so a leaked nautobot_config.py exposes no usable
+# credential. Generate a digest for each key:
+#     nautobot-server mcp_hash_api_key <raw-key>
 FRISIAN_MCP_API_KEYS = {
-    _hash("my-agent-key"):    "read_write",
-    _hash("readonly-agent"):  "read",
+    "<64-hex HMAC-SHA256 digest of your read-write key>": "read_write",
+    "<64-hex HMAC-SHA256 digest of your read-only key>":  "read",
 }
 ```
 
@@ -413,8 +410,8 @@ client-credential entry as described above.
 ## Next Steps
 
 - [Nginx Configuration](nginx.md) — proxy settings for production deployments behind a reverse proxy
-- [Troubleshooting](../../../../troubleshooting/Django/nautobot/3.x/troubleshooting.md) — common problems and solutions from real deployments
-- [Installation & Configuration Reference](../../../../Reference/installation-configuration-reference.md) — complete settings reference
+- [Troubleshooting](../../../../v1.1/troubleshooting/Django/nautobot/3.x/troubleshooting.md) — common problems and solutions from real deployments
+- [Installation & Configuration Reference](../../../../v1.1/Reference/installation-configuration-reference.md) — complete settings reference
 
 ---
 

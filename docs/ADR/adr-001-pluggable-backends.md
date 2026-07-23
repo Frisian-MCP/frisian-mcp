@@ -42,9 +42,6 @@ class BaseDiscoveryBackend:
 class BaseInvocationBackend:
     def invoke(self, tool: ToolDefinition, arguments: dict, request) -> ToolResult:
         raise NotImplementedError
-
-    def get_request_context(self, mcp_request) -> RequestContext:
-        raise NotImplementedError
 ```
 
 The package ships two default implementations:

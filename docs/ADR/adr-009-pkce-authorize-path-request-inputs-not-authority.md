@@ -186,5 +186,5 @@ The choice of `cache.add()` over Redis-specific primitives (`GETDEL`, Lua script
 - IETF RFC 6749 — The OAuth 2.0 Authorization Framework.
 - IETF RFC 7636 — Proof Key for Code Exchange by OAuth Public Clients (PKCE).
 - IETF RFC 8252 — OAuth 2.0 for Native Apps (the reverse-DNS custom-scheme redirect convention used by §2's pattern syntax).
-- `docs/Security/security.md` — frisian-mcp's deployment-shape recommendations (path separation, rate limiting, group-scoped doc visibility); this ADR refines the OAuth surface that recommendation assumes.
-- `docs/Reference/installation-configuration-reference.md` — the complete settings reference; the new and removed settings in §2 / §3 land there in the same release.
+- `../v1.0/Security/security.md` — frisian-mcp's deployment-shape recommendations (path separation, rate limiting, group-scoped doc visibility); this ADR refines the OAuth surface that recommendation assumes.
+- `../v1.0/Reference/installation-configuration-reference.md` — the complete settings reference; the new and removed settings in §2 / §3 land there in the same release.

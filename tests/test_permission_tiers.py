@@ -10,7 +10,7 @@ import pytest
 from django.test import RequestFactory, override_settings
 
 from frisian_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
-from frisian_mcp.registry import ToolRegistry, _apply_max_tier_cap
+from frisian_mcp.registry import ToolRegistry, _apply_max_tier_cap, _resolve_request_tier
 from frisian_mcp.views import McpView, _get_token_permission
 
 _rf = RequestFactory()
@@ -866,6 +866,22 @@ class TestEndpointMaxTierCap:
         assert _apply_max_tier_cap("admin", req) == "read_write"
         assert _apply_max_tier_cap("read_write", req) == "read_write"
         assert _apply_max_tier_cap("read", req) == "read"
+
+    def test_stamped_effective_tier_still_honors_endpoint_cap(self) -> None:
+        """Defense-in-depth: a stale/elevated _mcp_effective_tier is re-capped.
+
+        The stamped effective tier short-circuits resolution, but must not
+        bypass the endpoint cap: if it is stale or wrongly stamped 'admin' while
+        _mcp_max_tier is 'read', _resolve_request_tier must still return 'read'.
+        """
+
+        class _R:
+            pass
+
+        req = _R()
+        req._mcp_effective_tier = "admin"  # type: ignore[attr-defined]  # pylint: disable=protected-access
+        req._mcp_max_tier = "read"  # type: ignore[attr-defined]  # pylint: disable=protected-access
+        assert _resolve_request_tier(req) == "read"
 
     # ------------------------------------------------------------------
     # _get_token_permission — cap applied through full resolution chain

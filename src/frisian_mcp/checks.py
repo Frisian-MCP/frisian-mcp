@@ -45,6 +45,32 @@ Registered checks
     without a ``backend_action`` annotation.  The permission adapter cannot
     derive the required Django permission verb for unannotated custom actions.
 
+``frisian_mcp.W012``
+    Warns (LOUD) when ``frisian_mcp.contrib.oauth`` is installed but
+    ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False``.  That flag 404s the
+    RFC 8414 / RFC 9728 well-known metadata endpoints *and* strips the
+    ``resource_metadata`` pointer from ``WWW-Authenticate`` challenges, so
+    discovery-first (spec-correct) MCP clients cannot locate the
+    authorization server and the OAuth handshake silently fails — only
+    clients with hard-coded endpoint URLs keep working.  Hiding metadata is
+    not an authentication gate; walk-up registration is governed by
+    ``FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER`` and
+    ``FRISIAN_MCP_OAUTH_REGISTRATION_OPEN``.
+
+``frisian_mcp.W013``
+    Warns (LOUD) when ``FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT`` is set but not
+    parseable as ``"N/period"``.  The runtime limiter fails open on a
+    malformed value, so an operator who *configured* brute-force throttling
+    is running without it — the "disabled looks like enabled" shape.  Boot
+    validation and request-time parsing share one parser
+    (:func:`frisian_mcp.contrib.oauth._rate_limiting.parse_rate_limit`) so
+    they cannot drift.
+
+Per-route configuration checks (``E004``, ``E005``, ``E1xx``, ``E2xx``,
+``W004``–``W007``) live in :mod:`frisian_mcp.route_audit` and are registered
+from there.  They are config-only: the tool registry is empty while system
+checks run, because auto-discovery is deferred to the first request.
+
 The checks module is imported from :class:`frisian_mcp.apps.FrisianMcpConfig`
 so the ``@register`` decorators fire at app load.  It contributes nothing
 at runtime beyond the registrations themselves.
@@ -56,6 +82,7 @@ import logging
 import re
 from typing import Any
 
+from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.checks import (  # pylint: disable=redefined-builtin
     Error,
@@ -73,6 +100,8 @@ W002_PLAINTEXT_API_KEYS = "frisian_mcp.W002"
 W003_PRIVILEGED_SERVICE_ACCOUNT = "frisian_mcp.W003"
 E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
 E003_UNANNOTATED_CUSTOM_ACTION = "frisian_mcp.E003"
+W012_OAUTH_DISCOVERY_HIDDEN = "frisian_mcp.W012"
+W013_MALFORMED_RATE_LIMIT = "frisian_mcp.W013"
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -299,3 +328,97 @@ def check_permission_aware_discovery(  # pylint: disable=unused-argument
         )
 
     return errors
+
+
+@register(Tags.security)
+def check_oauth_discovery_not_hidden(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Warning]:
+    """
+    Warn (LOUD) when OAuth is installed but its discovery metadata is hidden.
+
+    ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False`` makes the RFC 8414 and
+    RFC 9728 well-known endpoints return 404 and strips the
+    ``resource_metadata`` pointer from ``WWW-Authenticate`` challenges.
+    Spec-correct MCP clients bootstrap the OAuth handshake from exactly those
+    two surfaces, so with the flag off they cannot find the authorization
+    server at all — the handshake fails with nothing in the server logs
+    (live Claude.ai failure, V11-12 check 2).  Only clients with hard-coded
+    endpoint URLs keep working.
+
+    The configuration is coherent for a deployment whose every client is
+    pre-registered with pre-shared endpoints, which is why this is LOUD
+    (a :class:`Warning`) rather than FATAL.  No ``DEBUG`` gate: the handshake
+    is equally broken in development, which is where the live failure
+    happened.  Operators who genuinely mean it silence the check with
+    ``SILENCED_SYSTEM_CHECKS = ["frisian_mcp.W012"]``.
+    """
+    if not django_apps.is_installed("frisian_mcp.contrib.oauth"):
+        return []
+    if getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True):
+        return []
+
+    return [
+        Warning(
+            "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False while frisian_mcp.contrib.oauth "
+            "is installed. The RFC 8414 (/.well-known/oauth-authorization-server) and "
+            "RFC 9728 (/.well-known/oauth-protected-resource) endpoints return 404 and "
+            "401 challenges omit resource_metadata, so discovery-first MCP clients "
+            "(Claude.ai, Cursor, ...) cannot locate the authorization server and the "
+            "OAuth handshake silently fails. Only clients with hard-coded endpoint "
+            "URLs will connect.",
+            hint=(
+                "Remove FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY (default True) or set it to "
+                "True. Hiding discovery metadata is not an authentication gate — to keep "
+                "walk-up clients out, leave FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER and "
+                "FRISIAN_MCP_OAUTH_REGISTRATION_OPEN at their False defaults instead. "
+                "If every client genuinely uses pre-shared endpoint URLs, silence this "
+                "check with SILENCED_SYSTEM_CHECKS=['frisian_mcp.W012']."
+            ),
+            id=W012_OAUTH_DISCOVERY_HIDDEN,
+        )
+    ]
+
+
+@register(Tags.security)
+def check_oauth_token_rate_limit_format(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Warning]:
+    """
+    Warn (LOUD) when the configured token rate limit is unparseable.
+
+    The runtime limiter deliberately fails open on a malformed
+    ``FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT`` (a cache/config problem must not
+    become a token-issuance outage), which means a typo like ``"20/minutes"``
+    silently disables the brute-force throttle the operator believes is on.
+    Validation shares :func:`~frisian_mcp.contrib.oauth._rate_limiting.parse_rate_limit`
+    with the runtime so the boot check and request-time behavior cannot
+    disagree about what parses (V11-26 #5).
+    """
+    if not django_apps.is_installed("frisian_mcp.contrib.oauth"):
+        return []
+    raw = getattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT", None)
+    if not raw:
+        return []
+
+    from frisian_mcp.contrib.oauth._rate_limiting import (  # pylint: disable=import-outside-toplevel
+        parse_rate_limit,
+    )
+
+    if parse_rate_limit(raw) is not None:
+        return []
+
+    return [
+        Warning(
+            f"FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT={raw!r} is not parseable as 'N/period'. "
+            "The token-endpoint rate limiter fails open on a malformed value, so "
+            "brute-force throttling you configured is NOT active.",
+            hint=(
+                "Use the format 'N/period' with period one of: second, minute, hour, "
+                "day — e.g. FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT='20/minute'."
+            ),
+            id=W013_MALFORMED_RATE_LIMIT,
+        )
+    ]

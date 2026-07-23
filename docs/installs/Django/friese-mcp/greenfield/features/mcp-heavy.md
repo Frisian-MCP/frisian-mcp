@@ -1,7 +1,7 @@
 # Feature: @mcp_heavy — Large-Response Negotiation
 
 **Audience:** Developers working with tools that return large datasets  
-**Package version:** 1.0.x
+**Package version:** 1.1.x
 
 ---
 
@@ -9,7 +9,7 @@
 
 A tool that returns a list of 500 objects floods the agent's context window in a single call. The agent cannot reason or plan — it just spent its entire context budget receiving data it may not have needed. `@mcp_heavy` implements a two-call protocol: the first call returns a preview and a continuation token, and the second call returns only as much data as the agent actually needs.
 
-See [Read-Response Filtering](../../../../../Guide/read-response-filtering.md) for the design rationale and measured numbers.
+See [Read-Response Filtering](../../../../../v1.1/Guide/read-response-filtering.md) for the design rationale and measured numbers.
 
 ---
 
@@ -31,7 +31,7 @@ See [Read-Response Filtering](../../../../../Guide/read-response-filtering.md) f
 | Mode | Returns |
 |------|---------|
 | `summary` | First 10 dict keys / first 5 list items, values truncated to 100 chars |
-| `paginated` | One page of results; pass `page` (default 1) and `page_size` (default `frisian_MCP_HEAVY_PAGE_SIZE` or 20) |
+| `paginated` | One page of results; pass `page` (default 1) and `page_size` (default `FRISIAN_MCP_HEAVY_PAGE_SIZE` or 20) |
 | `filtered` | Result filtered to the keys listed in `filter_keys` |
 | `full` | Complete original result |
 
@@ -178,13 +178,13 @@ The agent should retry without the token to get a fresh probe.
 
 ## Threshold backstop (secondary, v2)
 
-Setting `frisian_MCP_AUTO_NEGOTIATE_THRESHOLD` in Django settings automatically wraps any tool response — including plain `@mcp_tool` tools — that exceeds the byte threshold in a probe envelope:
+Setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` in Django settings automatically wraps any tool response — including plain `@mcp_tool` tools — that exceeds the byte threshold in a probe envelope:
 
 ```python
 # settings.py
 
 # Auto-negotiate responses larger than 50 KB
-frisian_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000
 ```
 
 This is a safety net for tools you didn't know would return large responses. Prefer `@mcp_heavy` for explicit control — it documents the intention in the code and in `tools/list`.
@@ -197,13 +197,13 @@ This is a safety net for tools you didn't know would return large responses. Pre
 # settings.py
 
 # Default page size for paginated mode (default 20 if unset)
-frisian_MCP_HEAVY_PAGE_SIZE = 50
+FRISIAN_MCP_HEAVY_PAGE_SIZE = 50
 ```
 
 ---
 
 ## See also
 
-- [Read-Response Filtering](../../../../../Guide/read-response-filtering.md) — design rationale and token efficiency measurements
+- [Read-Response Filtering](../../../../../v1.1/Guide/read-response-filtering.md) — design rationale and token efficiency measurements
 - `features/mcp-tool.md` — for tools that return small responses
 - `features/dispatcher.md` — for using heavy tools inside a dispatcher

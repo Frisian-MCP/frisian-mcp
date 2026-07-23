@@ -140,7 +140,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 
 | Symptom | Likely cause |
 |---------|-------------|
-| Full object echoed on create | `@mcp_light` filtering not active — check `FRISIAN_MCP_WRITE_FILTERING` is not disabled |
+| Full object echoed on create | `verify=True` was set on the call — the lean envelope is the always-on default, and `verify=True` is the documented opt-out that returns the full inline object |
 | `continuation_token` missing | frisian-mcp version does not support continuation on write path |
 | 403 on write tool call | Token is `read` tier — use a `read_write` or `admin` tier token |
 | 404 on write tool call | Write tools are not mounted on this path — expected if using path separation architecture |
@@ -149,6 +149,6 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 
 ## Related Docs
 
-- [Write-Path Response Filtering](../../../../../Guide/write-path-response-filtering.md)
-- [The Token Problem](../../../../../Guide/the-token-problem.md)
+- [Write-Path Response Filtering](../../../../../v1.1/Guide/write-path-response-filtering.md)
+- [The Token Problem](../../../../../v1.1/Guide/the-token-problem.md)
 - [Permission Tiers](permission-visibility.md)

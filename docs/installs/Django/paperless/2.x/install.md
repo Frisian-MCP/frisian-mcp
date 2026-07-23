@@ -190,9 +190,13 @@ Generate a token in the Paperless-ngx UI under **Settings → API Tokens**, then
 For internal agents or scripts, configure a static key in your settings:
 
 ```python
+# FRISIAN_MCP_API_KEYS is keyed by the HMAC-SHA256 DIGEST of each raw key,
+# not the raw key itself — so a leaked settings file exposes no usable
+# credential. Generate a digest for each key:
+#     python manage.py mcp_hash_api_key <raw-key>
 FRISIAN_MCP_API_KEYS = {
-    "my-agent-key": "read_write",
-    "readonly-agent": "read",
+    "<64-hex HMAC-SHA256 digest of your read-write key>": "read_write",
+    "<64-hex HMAC-SHA256 digest of your read-only key>":  "read",
 }
 ```
 
@@ -205,7 +209,7 @@ Connect with:
       "type": "http",
       "url": "https://your-paperless.example.com/mcp/",
       "headers": {
-        "Authorization": "Bearer my-agent-key"
+        "Authorization": "Bearer <your-raw-key>"
       }
     }
   }
@@ -228,8 +232,8 @@ The client discovers the `/.well-known/oauth-authorization-server` metadata and 
 
 ## Next Steps
 
-- [Troubleshooting](../../../../troubleshooting/Django/paperless/2.x/troubleshooting.md) — common problems and solutions
-- [Installation & Configuration Reference](../../../../Reference/installation-configuration-reference.md) — complete settings reference
+- [Troubleshooting](../../../../v1.1/troubleshooting/Django/paperless/2.x/troubleshooting.md) — common problems and solutions
+- [Installation & Configuration Reference](../../../../v1.1/Reference/installation-configuration-reference.md) — complete settings reference
 
 ---
 

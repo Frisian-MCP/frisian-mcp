@@ -11,7 +11,7 @@
 
 When an MCP agent executes a create, update, or destroy operation, the conventional DRF response echoes the full serialized object back in the response body. For a single-object create on a simple model, this is a few hundred tokens — acceptable.
 
-The problem appears at bulk scale. A large Django application with full CRUD exposes bulk create and bulk update endpoints that accept and echo lists of objects. A 60-device bulk create in a production integration session produced a full echo response of ~10,798 tokens (43,190 bytes). At ~603 tokens per device, larger bulk operations scale linearly: a 200-device bulk create would produce roughly 36,000 tokens from the response alone.
+The problem appears at bulk scale. A large Django application with full CRUD exposes bulk create and bulk update endpoints that accept and echo lists of objects. A 60-device bulk create in a production integration session produced a full echo response of ~10,798 tokens (43,190 bytes). At ~180 tokens per device, larger bulk operations scale linearly: a 200-device bulk create would produce roughly 36,000 tokens from the response alone.
 
 Write operations are inherently sequential in many agent workflows. An agent provisions a set of devices, waits for confirmation, then moves to the next step (IP assignment, VLAN configuration, DNS registration). If each write step consumes tens of thousands of tokens from the context window, the agent's working budget for reasoning, retrieved state, and conversation history evaporates quickly. By the third or fourth bulk write in a session, the context window is gone.
 
@@ -41,14 +41,14 @@ All write tools return a lean confirmation envelope without agent intervention. 
 
 **Lean field extraction order:**
 
-The envelope always includes `status_code`, `data_size`, and `continuation_token`. The identifying fields are extracted in priority order from the serialized object: `id`/`pk` → `url` → `name`/`display` → any fields annotated with `@mcp_light_key`.
+The envelope always includes `status_code`, `data_size`, and `continuation_token`. The identifying fields are extracted in priority order from the serialized object: `id`/`pk` → `url` → `name`/`display` → any fields listed in the serializer's `Meta.mcp_light_key`.
 
-**`@mcp_light_key` annotation:**
+**`Meta.mcp_light_key` annotation:**
 
 Host app serializers can annotate specific fields to ensure they appear in every lean envelope for that serializer, even when those fields are not the conventional `id`/`url`/`name` fields:
 
 ```python
-from frisian_mcp.decorators import mcp_light_key
+from rest_framework import serializers
 
 class DeviceSerializer(serializers.ModelSerializer):
     site_slug = serializers.SlugRelatedField(
@@ -116,7 +116,7 @@ The write-path token savings are material enough to justify the behavior change.
 
 ## Validation
 
-The 60-device bulk create measurement (10,798 tokens full echo → 24 tokens lean envelope, 99.8% reduction) was taken during a network automation integration session against a production system. Production device objects are approximately 3,800 bytes each (~603 tokens/device), measured from the same session. The 99.8% reduction figure holds at any bulk size because the lean envelope size is constant regardless of the number of objects written.
+The 60-device bulk create measurement (10,798 tokens full echo → 24 tokens lean envelope, 99.8% reduction) was taken during a network automation integration session against a production system. A standalone full device representation is approximately 3,800 bytes (~603 tokens); within the bulk echo the per-device cost is lower, about 720 bytes (~180 tokens), consistent with the 10,798-token / 60-device figure above. The 99.8% reduction figure holds at any bulk size because the lean envelope size is constant regardless of the number of objects written.
 
 ---
 

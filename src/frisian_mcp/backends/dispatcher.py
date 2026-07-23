@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Container
+from typing import Any, NoReturn
 
 import jsonschema
 import jsonschema.exceptions
@@ -186,7 +186,7 @@ def _build_perm_action_filter_from_request(
     Called by the ``action="help"`` branch of dispatcher ``invoke`` so that help responses
     respect the same permission filtering as the ``tools/list`` action enum.
     """
-    caps: frozenset[str] | None = getattr(request, "_mcp_capabilities", None)
+    caps: Container[str] | None = getattr(request, "_mcp_capabilities", None)
     if caps is None:
         return None
     # Local imports avoid circular deps (registry imports dispatcher lazily).
@@ -237,10 +237,29 @@ def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., di
                 action_filter=perm_action_filter,
             )
 
-        if action not in action_map:
-            matches = difflib.get_close_matches(action, action_map.keys(), n=1)
+        def _raise_unknown_action(name: str) -> NoReturn:
+            # On a tier-capped route the did-you-mean candidates come from the
+            # caller-VISIBLE action set (same tier + Django-permission lens as
+            # help and the tools/list enum) — a suggestion computed over the
+            # full map would name a hidden action back to the caller inside
+            # the very error that denies it exists (V11-20/F3).  Uncapped
+            # legacy hosts keep the full-map hint unchanged.
+            if getattr(request, "_mcp_max_tier", None) is not None:
+                candidates = list(
+                    _visible_actions(
+                        meta,
+                        _resolve_request_tier(request),
+                        action_filter=_build_perm_action_filter_from_request(request, meta.name),
+                    )
+                )
+            else:
+                candidates = list(action_map)
+            matches = difflib.get_close_matches(name, candidates, n=1)
             hint = f" Did you mean: {matches[0]!r}?" if matches else ""
-            raise LookupError(f"Unknown action {action!r}.{hint}")
+            raise LookupError(f"Unknown action {name!r}.{hint}")
+
+        if action not in action_map:
+            _raise_unknown_action(action)
 
         entry = action_map[action]
 
@@ -263,6 +282,14 @@ def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., di
         caller_rank = _TIER_RANK.get(caller_tier, 0)
         action_rank = _TIER_RANK.get(entry.permission_tier, 0)
         if caller_rank < action_rank:
+            if getattr(request, "_mcp_max_tier", None) is not None:
+                # V11-20 (F3): on a tier-capped route the ceiling defines which
+                # actions exist; discovery already hides this one, so invoke
+                # must report the same absence a never-registered action gets —
+                # a tier error here would confirm the action exists and leak
+                # the elevation path.  Same rule as registry.dispatch's
+                # capped-tool ToolNotFoundError.
+                _raise_unknown_action(action)
             raise PermissionError(
                 f"Action {action!r} requires {entry.permission_tier!r} permission; "
                 f"caller has {caller_tier!r} permission."

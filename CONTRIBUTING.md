@@ -206,6 +206,25 @@ Coverage is measured but not gated at a hard threshold. Aim to keep coverage abo
 
 ---
 
+## Versioning
+
+frisian-mcp follows a semantic-ish scheme. Apply the bump that matches the change **in the same PR** — reviewers check for it. The rules are ordered by precedence; apply the **first** that matches:
+
+1. **New feature → minor bump.** For example, the per-route permission work was the `1.0.12 → 1.1.0` minor; subsequent `src/` fixes on top of it then advanced the patch level (the current release is `1.1.1`). A feature that also touches `src/` still takes the minor bump — the feature rule wins, and you do **not** additionally apply the patch rule.
+2. **Any *non-feature* change that touches `src/`** (bug fix, refactor, performance) **→ patch bump of `+0.0.1`** (`1.1.0 → 1.1.1 → 1.1.2 …`), required even for a one-line fix.
+3. **A change that does not touch `src/` does not bump.** Changes confined to `tests/`, `docs/`, or tooling/config leave the version untouched.
+
+The version has two **authoritative** sources, which must stay in sync:
+
+- `pyproject.toml` — `version = "…"`
+- `src/frisian_mcp/__init__.py` — `__version__ = "…"`
+
+Update both in the same commit; a mismatch between them is a release bug. `README.md` also displays the version as an **informational copy** (the badge line near the top) — update it to match when you bump, but it is not one of the authoritative sources.
+
+> **Structured release notes are planned, not yet set up.** Per-change release notes — the workflow NTC/Nautobot drives with [towncrier](https://towncrier.readthedocs.io/) — are intended for a future release but are **not** wired up yet. Until then, record user-facing changes under `[Unreleased]` in the changelog (see the PR checklist below). Do not add towncrier as part of an unrelated PR; this note exists so the versioning rule and that future tooling stay consistent.
+
+---
+
 ## PR Checklist
 
 Before requesting review, verify:
@@ -217,6 +236,7 @@ Before requesting review, verify:
 - [ ] `pytest` passes with no failures
 - [ ] New public functions/classes have docstrings
 - [ ] New features have tests; bug fixes have a regression test
+- [ ] If the PR touches `src/`, the version is bumped in **both** `pyproject.toml` and `src/frisian_mcp/__init__.py` (see [Versioning](#versioning))
 - [ ] CHANGELOG entry added under `[Unreleased]` if the change is user-facing
 - [ ] PR description explains *why* the change is needed, not just *what* it does
 

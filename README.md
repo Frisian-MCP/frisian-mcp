@@ -9,7 +9,7 @@ frisian-mcp turns your existing Django REST Framework ViewSets into [Model Conte
 
 **Designed for token-efficient agent workflows.** A 50-action Django app loads in 500–2,000 tokens of `tools/list` schema instead of the 15,000–25,000 conventional flat MCP would emit; a 60-device bulk-write response is 24 tokens instead of ~10,800 of full echo. Same surface, two orders of magnitude less context burned before the agent has done any reasoning. Full numbers in [Token efficiency](#token-efficiency).
 
-**Version:** 1.0.12 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
+**Version:** 1.1.0 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
 
 ```bash
 pip install frisian-mcp
@@ -56,13 +56,13 @@ Measured numbers from real integrations:
 | Scenario | Default MCP shape | frisian-mcp | Reduction |
 |---|---|---|---|
 | `tools/list` for a 50-action Django app | ~15,000–25,000 tokens | 500–2,000 tokens with `FRISIAN_MCP_DISPATCH_GROUPS` | ~95% |
-| `tools/list` for a Nautobot 3.x deployment | 1,737 flat tools | 15 dispatcher tools | tool surface reduced ~99% |
+| `tools/list` for a large infrastructure Django app | 1,737 flat tools | 15 dispatcher tools | tool surface reduced ~99% |
 | 60-device bulk-create response | ~10,798 tokens (full echo) | 24 tokens (lean envelope) | 99.8% |
 | 200-device bulk-create response | ~36,000 tokens | 24 tokens (constant) | 99.9% |
 
 The bulk-write savings are constant regardless of batch size — the lean envelope is fixed-shape and the full response is reachable via the continuation token without re-running the write. The dispatcher reduction is opt-in through `FRISIAN_MCP_DISPATCH_GROUPS` (autodiscovery alone gives the conventional flat shape).
 
-See [docs/Guide/the-token-problem.md](docs/Guide/the-token-problem.md), [docs/Guide/dispatcher-pattern.md](docs/Guide/dispatcher-pattern.md), and [docs/Guide/write-path-response-filtering.md](docs/Guide/write-path-response-filtering.md) for the design rationale and full measurements.
+See [The Token Problem](docs/v1.1/Guide/the-token-problem.md), [Dispatcher Pattern](docs/v1.1/Guide/dispatcher-pattern.md), and [Write-Path Response Filtering](docs/v1.1/Guide/write-path-response-filtering.md) for the design rationale and full measurements.
 
 ---
 
@@ -137,7 +137,7 @@ python manage.py mcp_doctor                # standard audit
 python manage.py mcp_doctor --security     # extended OAuth security audit
 ```
 
-Walks the configuration end-to-end and exits non-zero on errors. Run after every install, every config change, and as the first diagnostic step on any unexpected behaviour. See [docs/Guide/mcp-doctor.md](docs/Guide/mcp-doctor.md) for the full check list.
+Walks the configuration end-to-end and exits non-zero on errors. Run after every install, every config change, and as the first diagnostic step on any unexpected behaviour. See the [mcp_doctor guide](docs/v1.1/Guide/mcp-doctor.md) for the full check list.
 
 ---
 
@@ -218,7 +218,7 @@ frisian-mcp delegates authentication to DRF — any DRF authentication class wor
 | `frisian_mcp.contrib.oauth` | Full OAuth 2.0 — authorization code (PKCE) + client credentials; redirect URI allowlist |
 | `frisian_mcp.contrib.agents` | Per-credential tool allowlists; connections fail-closed when the credential is deactivated |
 
-Gateway-level access is controlled by `FRISIAN_MCP_PERMISSION_CLASSES`. Tool-level access is controlled by permission tiers (`read` / `write` / `admin`) mapped via `FRISIAN_MCP_TOKEN_TIER_MAP`. Use `FRISIAN_MCP_MAX_TIER` to cap all callers on an endpoint regardless of their credential tier.
+Gateway-level access is controlled by `FRISIAN_MCP_PERMISSION_CLASSES`. Tool-level access is controlled by permission tiers (`read` / `read_write` / `admin`) mapped via `FRISIAN_MCP_TOKEN_TIER_MAP`. Use `FRISIAN_MCP_MAX_TIER` to cap all callers on an endpoint regardless of their credential tier.
 
 ### Hardened-by-default posture (1.0.x)
 
@@ -229,47 +229,16 @@ The defaults are oriented toward production safety rather than walk-up convenien
 - **The PKCE default permission tier is `read`.** Mis-configurations cannot accidentally hand out write or admin scopes on first connect.
 - **Permission-aware discovery** (`FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True`) rebuilds dispatcher action enums per-request — a read-tier token sees only `list` / `retrieve` actions, write and admin actions are hidden from `tools/list` rather than just blocked at execution.
 - **`.well-known` discovery metadata is gated** by `FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY`. With it set to `False`, the OAuth metadata endpoints return parseable JSON 404s so discovery-first MCP clients fall back to their configured Bearer instead of being routed into a dead-end OAuth cascade.
-- **Authenticator chain ordering is no longer load-bearing** for correctness — both `FrisianMcpTokenAuthentication` and `OAuthTokenAuthentication` return `None` on lookup-miss so either order works. Tokens-first is the recommended convention for the WWW-Authenticate challenge shape (see [docs/Getting Started/getting-started.md](docs/Getting%20Started/getting-started.md#using-tokens-and-oauth-together)).
+- **Authenticator chain ordering is no longer load-bearing** for correctness — both `FrisianMcpTokenAuthentication` and `OAuthTokenAuthentication` return `None` on lookup-miss so either order works. Tokens-first is the recommended convention for the WWW-Authenticate challenge shape (see [docs/Getting Started/getting-started.md](docs/v1.1/Getting%20Started/getting-started.md#using-tokens-and-oauth-together)).
 - **SSE keepalive structure is documented**, with a one-time runtime warning when the package detects it is running under a synchronous WSGI worker (which cannot scale SSE without starving the worker pool). The recommended deployment is an ASGI worker class (`uvicorn.workers.UvicornWorker` or `uvicorn` directly).
 
 ### Authorize-path hardening
 
-The unknown-client variant of the OAuth authorize endpoint (`AUTO_REGISTER`) is, by design, a walk-up surface — an unauthenticated browser hits `/oauth/authorize` and the server lazily registers the client on first sight. Three coordinated changes ensure request inputs on that path describe *what the caller wants* but never *what the caller is permitted to do*. The full design rationale lives in [ADR-009](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md); the operator-facing summary is below.
+The unauthenticated OAuth authorize path (`AUTO_REGISTER`) is a walk-up surface: request inputs describe what the caller wants, never what the caller is permitted to do. See [ADR-009](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md) for the design rationale and the [security guide](docs/v1.1/Security/security.md) for the threat model and recommended deployment patterns.
 
-- **`FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST`** gates the unknown-client branch. With `AUTO_REGISTER=True` and an empty allowlist (the default), no unknown client can register on any host — the configuration is fail-closed and behaves exactly as `AUTO_REGISTER=False`. To allow walk-up registration, declare the trusted host set explicitly:
+### Per-route permission tiers
 
-  ```python
-  FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True
-  FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = [
-      "claude.ai",              # exact host
-      "*.anthropic.com",        # leading-*. wildcard, label-boundary anchored
-      "com.example.app",        # reverse-DNS native-app scheme (RFC 8252)
-  ]
-  ```
-
-  The `*.` wildcard matches a non-empty left-hand label sequence ending in the suffix (`api.anthropic.com`, `x.y.anthropic.com`) but never the bare apex (`anthropic.com`) and never a suffix-substring attacker host (`anthropic.com.evil.example`). Patterns and hosts are IDNA-normalized before comparison, so a Cyrillic look-alike host cannot bypass an entry spelled in ASCII. A request whose redirect URI fails the check is rejected with `error=invalid_client` (not `invalid_redirect_uri`) so the response shape does not advertise which check rejected it. Loopback redirect URIs (`127.0.0.1`, `::1`, `localhost`) still require an explicit allowlist entry under `AUTO_REGISTER` — there is no implicit loopback bypass on this path.
-
-- **`FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP` is removed.** The setting (and its helper `_pkce_permission_for_uri`) accepted a `redirect_uri → tier` mapping and applied it to the stored `OAuthClient.permission` at first contact under `AUTO_REGISTER`. The `redirect_uri` is no longer a tier signal on any path. Operators who depended on per-redirect tier inference must now set `OAuthClient.permission` explicitly in the Django admin after auto-registration. The token endpoint emits `oauth_pkce_redirect_uri_ignored_as_tier_signal` (INFO) at code redemption when a code-exchange would have, under the old behavior, promoted the client's tier.
-
-- **Token authority is fixed at issuance.** `OAuthAccessToken.permission` is snapshotted when the token is issued and is the ceiling for that token's lifetime. The authenticator returns `min(token.permission, client.permission)` — so an operator admin-console *downgrade* of the issuing client narrows every outstanding token live, but an admin-console *upgrade* does NOT widen previously-issued tokens. To grant a wider tier to an existing client, the operator must reissue the token after the upgrade.
-
-- **`FRISIAN_MCP_OAUTH_AUTO_APPROVE` is reframed as "remember consent."** The setting no longer means "skip the consent form" — it now means "remember consent for repeat grants of the same `(user, client_id, redirect_uri, scope)` tuple." When `AUTO_APPROVE=True`, the first authorize for any new tuple still renders the consent form; subsequent authorizes for the *same* tuple fast-path on the stored consent. When `AUTO_APPROVE=False` (the default), the consent form renders on every authorize regardless of whether a prior consent record exists for the tuple. The DEBUG-derived default (`bool(DEBUG)`) is removed; the default is now `False` unconditionally. A new `OAuthAuthorizeConsent` model records each granted consent and is admin-browsable with a `revoke_selected_consents` bulk action. Operators with machine-to-machine flows that cannot render a consent form must set `AUTO_APPROVE=True` AND pre-populate `OAuthAuthorizeConsent` records via the admin to preserve silent code issuance.
-
-- **`FRISIAN_MCP_OAUTH_TIER_PERMISSIONS` controls `OAuthServicePrincipal.has_perm`.** Previously, `has_perm` returned `True` for any permission string at `read_write` / `admin` tiers. It now default-denies. Operators declare the per-tier allowlist explicitly:
-
-  ```python
-  FRISIAN_MCP_OAUTH_TIER_PERMISSIONS = {
-      "read":       ["dcim.view_device"],
-      "read_write": ["dcim.change_device"],
-      "admin":      ["dcim.delete_device"],
-  }
-  ```
-
-  Inheritance is monotonic up the ladder — `admin` accumulates its own list plus `read_write` plus `read`. Empty mapping or unknown perm string returns `False`. This affects only host code that calls `request.user.has_perm(...)` *outside* the MCP layer; the MCP-internal tier filter (`FRISIAN_MCP_MAX_TIER`, the dispatcher per-action gate, `FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`) is unchanged.
-
-- **PKCE authorization-code single-use is atomic.** The previous `cache.get` → checks → `cache.delete` sequence had a race window under concurrent exchanges of the same code. The token endpoint now gates code consumption on `cache.add()` against a separate consume-marker key family (`frisian_mcp:oauth_code_consumed:`). Concurrent or replayed exchanges of the same code return `invalid_grant` and log `oauth_authorization_code_replay_detected` at `WARNING`. The primitive is backend-agnostic across Django's `BaseCache` contract (LocMem, Redis, Memcached, DatabaseCache). Operators on `DummyCache` should switch to a real cache backend for any deployment that ships OAuth — `DummyCache` makes the gate silently inert. No new setting is required.
-
-See [docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md](docs/ADR/adr-009-pkce-authorize-path-request-inputs-not-authority.md) for the full design rationale across all six changes, [docs/Security/security.md](docs/Security/security.md) for the threat model and recommended deployment patterns, and [docs/Reference/installation-configuration-reference.md](docs/Reference/installation-configuration-reference.md) for the complete settings reference.
+`FRISIAN_MCP_ROUTES` mounts `read`, `read_write`, and `admin` surfaces on separate paths, each with its own tool allow/deny list and tier ceiling on a deny-all baseline. A tool denied on a route does not exist there — it is absent from discovery and invocation, not merely rejected at call time. Misconfigurations are caught at startup; a route that would serve a privileged surface anonymously refuses to boot. See [ADR-010](docs/ADR/adr-010-per-route-permission-model.md) for the model and its security rationale.
 
 ---
 

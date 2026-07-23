@@ -399,3 +399,109 @@ class TestGroupDispatcherTierEnforcement:
             {"resource": "item", "action": "create", "params": {}},
         )
         assert result["called"] == "item.create"
+
+
+# ---------------------------------------------------------------------------
+# V11-20 (F3) — invoke-side absence on a tier-capped route
+# ---------------------------------------------------------------------------
+
+
+class TestGroupInvokeCappedAbsence:
+    """On a capped route an above-ceiling action is ABSENT at invoke (V11-20/F3).
+
+    Discovery already hides above-ceiling actions; strict WI-2 requires the
+    invoke path to agree — the tier cap defines what exists on the door, the
+    permission-aware member filter only refines what exists.
+    """
+
+    @staticmethod
+    def _capped_request(rf: RequestFactory) -> Any:
+        """An anonymous (read-tier) request on a read-capped route."""
+        req = _request(rf, permission=None)
+        req._mcp_max_tier = "read"
+        return req
+
+    def _installed(self, populated_registry: ToolRegistry, settings: Any) -> None:
+        settings.FRISIAN_MCP_DISPATCH_GROUPS = {"svc": ["item"]}
+        with patch("frisian_mcp.registry.tool_registry", populated_registry):
+            _install_dispatch_groups()
+
+    def test_above_ceiling_action_is_absent_not_permission_error(
+        self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
+    ) -> None:
+        """A capped read caller invoking a write action gets the unknown-tool absence."""
+        self._installed(populated_registry, settings)
+        with pytest.raises(LookupError) as excinfo:
+            populated_registry.dispatch(
+                self._capped_request(rf),
+                "svc",
+                {"resource": "item", "action": "create", "params": {}},
+            )
+        assert not isinstance(excinfo.value, PermissionError)
+        assert "Unknown tool 'item_create' in group 'svc'" in str(excinfo.value)
+        assert "permission" not in str(excinfo.value)
+
+    def test_absence_message_matches_never_existed_template(
+        self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
+    ) -> None:
+        """Above-ceiling and never-existed actions share one error template byte-for-byte."""
+        self._installed(populated_registry, settings)
+        with pytest.raises(LookupError) as above:
+            populated_registry.dispatch(
+                self._capped_request(rf),
+                "svc",
+                {"resource": "item", "action": "create", "params": {}},
+            )
+        with pytest.raises(LookupError) as missing:
+            populated_registry.dispatch(
+                self._capped_request(rf),
+                "svc",
+                {"resource": "item", "action": "zzznope", "params": {}},
+            )
+        assert str(above.value).replace("item_create", "TOOL") == str(missing.value).replace(
+            "item_zzznope", "TOOL"
+        )
+
+    def test_permission_filter_is_not_consulted_for_above_ceiling_action(
+        self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
+    ) -> None:
+        """Absence precedes the permission-aware filter — it must not fire (or leak) first."""
+        self._installed(populated_registry, settings)
+        req = self._capped_request(rf)
+        perm_filter = MagicMock(return_value=False)
+        req._mcp_perm_entry_filter = perm_filter
+        with pytest.raises(LookupError):
+            populated_registry.dispatch(
+                req, "svc", {"resource": "item", "action": "create", "params": {}}
+            )
+        perm_filter.assert_not_called()
+
+    def test_within_ceiling_action_keeps_naming_permission_error(
+        self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
+    ) -> None:
+        """A Django-permission denial on a VISIBLE action stays a 403 that names it.
+
+        That error is actionable (the action exists on this door; the caller's
+        account lacks a grant), so converting it to absence would hide real
+        remediation — the ruling only converts above-ceiling actions.
+        """
+        self._installed(populated_registry, settings)
+        req = self._capped_request(rf)
+        req._mcp_perm_entry_filter = MagicMock(return_value=False)
+        with pytest.raises(PermissionError) as excinfo:
+            populated_registry.dispatch(
+                req, "svc", {"resource": "item", "action": "list", "params": {}}
+            )
+        assert "'item'/'list'" in str(excinfo.value)
+
+    def test_uncapped_mount_keeps_tier_permission_error(
+        self, populated_registry: ToolRegistry, settings: Any, rf: RequestFactory
+    ) -> None:
+        """Legacy uncapped mounts keep the explicit tier error (no absence contract)."""
+        self._installed(populated_registry, settings)
+        with pytest.raises(PermissionError):
+            populated_registry.dispatch(
+                _request(rf, permission="read"),
+                "svc",
+                {"resource": "item", "action": "create", "params": {}},
+            )

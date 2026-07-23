@@ -5,6 +5,28 @@
 
 ---
 
+## v1.1.0 — 2026-07
+
+### Added
+
+- **Per-route permission model** (`FRISIAN_MCP_ROUTES`). Mount the gateway at multiple paths, each with its own tier ceiling and `allow_list` / `deny_list` of tools, on a deny-all baseline. A startup surface audit (Django `check` plus `mcp_doctor --strict`) reports net-empty and dead-entry routes before deploy. See [ADR-010](../ADR/adr-010-per-route-permission-model.md).
+- **Permission-aware discovery** (`FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`). `tools/list` is filtered to each caller's own identity, resolved via Django's `user.has_perm()`, so discovery matches host authorization natively — honoring superuser status, `EXEMPT_VIEW_PERMISSIONS`, and custom auth backends. See [ADR-008](../ADR/adr-008-permission-aware-discovery.md).
+
+### Changed
+
+- Default permission-adapter capability resolution moved from `user.get_all_permissions()` to `user.has_perm()`.
+
+### Deprecated
+
+- `ExemptViewPermissionAdapter` is now a no-op — the default adapter honors view exemptions natively. Remove `FRISIAN_MCP_PERMISSION_ADAPTER`; nothing replaces it.
+
+### Removed
+
+- Retired the **E002** startup check (unresolved-OAuth-identity gate); unmapped OAuth clients now fall back to service-principal, tier-only discovery.
+- Retired the legacy `FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP` setting; under the hardened authorize path a request's `redirect_uri` cannot influence a client's permission tier.
+
+---
+
 ## v1.0 — 2026-06
 
 ### Restored: `Meta.mcp_light_key` consumption in the lean write envelope
@@ -22,8 +44,8 @@ class DeviceSerializer(serializers.ModelSerializer):
 ```
 
 This restores the behaviour documented in the
-[Installation & Configuration Reference](../Reference/installation-configuration-reference.md)
-and the [Write-Path Response Filtering](../Guide/write-path-response-filtering.md)
+[Installation & Configuration Reference](../v1.1/Reference/installation-configuration-reference.md)
+and the [Write-Path Response Filtering](../v1.1/Guide/write-path-response-filtering.md)
 guide — both docs already describe the feature; the implementation now matches.
 
 > `mcp_light_key` is a class attribute on the serializer's `Meta`, **not** a
@@ -33,7 +55,7 @@ guide — both docs already describe the feature; the implementation now matches
 
 ## v0.9.0 — 2026-05
 
-The dispatcher release. Adds the `FRISIAN_MCP_DISPATCH_GROUPS` pattern, `FRISIAN_MCP_AUTODISPATCH`, URL auto-registration, and a complete test suite now at 978 passing tests.
+The dispatcher release. Adds the `FRISIAN_MCP_DISPATCH_GROUPS` pattern, URL auto-registration, and a complete test suite now at 978 passing tests.
 
 ### New: FRISIAN_MCP_DISPATCH_GROUPS
 
@@ -50,10 +72,6 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 Token arithmetic validated against a 1,967-tool Django application: 5 dispatcher groups replace 1,967 flat tool schemas. Schema token load drops from ~490,000 tokens to ~2,000–4,000 tokens — a 99%+ reduction. Resources not included in any group remain as flat tools with no breaking change.
 
 Each dispatcher accepts `action=help` to return the full resource/action tree for that group. Tool schemas are loaded lazily, only when the agent is about to use them.
-
-### New: FRISIAN_MCP_AUTODISPATCH
-
-Automatic resource-level dispatching without manual group configuration. Set `FRISIAN_MCP_AUTODISPATCH = True` to group all discovered tools by resource name automatically. One dispatcher per resource rather than one tool per action.
 
 ### New: URL auto-registration
 
@@ -354,7 +372,7 @@ Initial release. PyPI namespace registered. Core MCP gateway working.
 
 **Imminent**
 
-- PyPI public release (v1.0.0)
+- PyPI public release
 - AAIF submission — frisian-mcp will be submitted to the Linux Foundation's AI Application Interoperability Framework alongside the MCP ecosystem
 
 ---

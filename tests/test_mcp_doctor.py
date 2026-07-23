@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from io import StringIO
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from django.conf import settings
 from django.test import override_settings
 
-from frisian_mcp.management.commands.mcp_doctor import Command
+from frisian_mcp.management.commands.mcp_doctor import _NOTE, _WARN, Command
 
 
 def _run(**kwargs: Any) -> tuple[str, str]:
@@ -72,6 +74,107 @@ class TestMcpDoctorInstalledApps:
         with pytest.raises(SystemExit) as exc_info:
             _run()
         assert exc_info.value.code == 1
+
+
+class TestMcpDoctorGatewayMounting:
+    """V11-19: the gateway-mount check must understand FRISIAN_MCP_ROUTES."""
+
+    _ROUTES = {
+        "default": {"path": "prodisbroken", "highest_tier": "read", "allow_list": ["*"]},
+        "elevated": {"path": "fixbrokenprod", "highest_tier": "read_write", "allow_list": ["*"]},
+        "admin": {"path": "breakingprod", "highest_tier": "admin", "allow_list": ["*"]},
+    }
+
+    def test_routes_host_does_not_emit_gateway_false_positive(self) -> None:
+        """A ROUTES deployment must not warn that frisian_mcp:gateway is unresolvable.
+
+        The routes ARE the gateway (PR-7 JC1); the legacy reverse-URL name is
+        deliberately never registered, so probing for it is a guaranteed false
+        positive on every per-route host.
+        """
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=self._ROUTES):
+            out, _ = _run()
+        assert "Could not resolve frisian_mcp:gateway" not in out
+
+    def test_routes_host_never_advises_the_fail_open_legacy_include(self) -> None:
+        """The remedy must not be advertised on a ROUTES host: it re-exposes everything.
+
+        ``include('frisian_mcp.urls')`` mounts the full unfiltered registry beside
+        the deny-carved routes — the exact fail-open JC1 skips.  The doctor must
+        never advise an operator to undo their carve-outs.
+        """
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=self._ROUTES):
+            out, _ = _run()
+        assert "include('frisian_mcp.urls')" not in out
+
+    def test_routes_host_reports_the_route_mounts_as_the_gateway(self) -> None:
+        """The check should affirm the real surface, naming the configured paths."""
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=self._ROUTES):
+            out, _ = _run()
+        assert "mounted per-route" in out
+        for path in ("prodisbroken", "fixbrokenprod", "breakingprod"):
+            assert path in out
+
+    def test_malformed_routes_degrade_without_a_second_error(self) -> None:
+        """A bad ROUTES mapping is the surface audit's to grade, not this check's.
+
+        This check must not raise or emit its own differently-worded error on a
+        parse failure — it acknowledges ROUTES mode and defers to the audit.
+        """
+        with override_settings(
+            FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES={"bad": "not-a-mapping"}
+        ):
+            out, _ = _run()
+        assert "Could not resolve frisian_mcp:gateway" not in out
+        assert "FRISIAN_MCP_ROUTES is configured" in out
+
+    def test_legacy_host_still_probes_and_advises(self) -> None:
+        """No ROUTES + no legacy mount → the reverse probe and its advice still fire."""
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=None):
+            out, _ = _run()
+        assert "Could not resolve frisian_mcp:gateway" in out
+        assert "include('frisian_mcp.urls')" in out
+        assert "mounted per-route" not in out
+
+
+class TestMcpDoctorWarningTally:
+    """V11-19 bug 2: the ⚠ lines shown must equal the count in the summary."""
+
+    @staticmethod
+    def _shown_warnings(out: str) -> list[str]:
+        return [line for line in out.splitlines() if _WARN in line]
+
+    @staticmethod
+    def _summary_count(out: str) -> int:
+        for line in out.splitlines():
+            match = re.search(r"(\d+) warning\(s\) to review", line)
+            if match:
+                return int(match.group(1))
+        return 0
+
+    def test_optional_app_notice_is_a_note_not_a_counted_warning(self) -> None:
+        """An absent optional app is informational: a distinct glyph, not a ⚠.
+
+        Regression: it was rendered with the ⚠ glyph but never added to the
+        review tally, so the doctor showed more warnings than it counted.
+        """
+        apps = [a for a in settings.INSTALLED_APPS if a != "frisian_mcp.contrib.agents"]
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, INSTALLED_APPS=apps):
+            out, _ = _run()
+
+        note_line = next(
+            line for line in out.splitlines() if "contrib.agents not installed" in line
+        )
+        assert _NOTE in note_line
+        assert _WARN not in note_line
+
+    def test_shown_warning_count_equals_summary_count(self) -> None:
+        """Shown ⚠ count equals the summary count, where it used to be off by one."""
+        apps = [a for a in settings.INSTALLED_APPS if a != "frisian_mcp.contrib.agents"]
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, INSTALLED_APPS=apps):
+            out, _ = _run()
+
+        assert len(self._shown_warnings(out)) == self._summary_count(out)
 
 
 class TestMcpDoctorSecurity:
@@ -480,3 +583,247 @@ class TestMcpDoctorAutoApproveConsentRecords:
         """No drift warning when AUTO_APPROVE is False."""
         out, _ = _run(security=True)
         assert "no OAuthAuthorizeConsent rows exist" not in out
+
+
+class TestMcpDoctorRouteSurface:
+    """
+    PR-18: mcp_doctor surfaces the per-route findings ``manage.py check`` cannot.
+
+    These need a populated tool registry (empty at check time), so the command
+    forces discovery and runs the *same* surface-audit pass PR-9a built.  The
+    ``--strict`` flag escalates LOUD findings to errors so CI can gate here.
+    Each test seeds a controlled registry and restores global state, so the
+    forced discovery cannot bleed into other tests.
+    """
+
+    @staticmethod
+    def _seed_and_check(routes: Any, *, strict: bool) -> tuple[list[str], list[str]]:
+        """Seed a neutral group surface, run only the route-surface check, restore state."""
+        from django.apps import apps as django_apps
+
+        from frisian_mcp.backends.group_dispatcher import (
+            build_group_input_schema,
+            make_group_invoke,
+        )
+        from frisian_mcp.registry import tool_registry
+
+        app_config = django_apps.get_app_config("frisian_mcp")
+        saved_tools = dict(tool_registry._tools)  # noqa: SLF001
+        saved_discovered = getattr(app_config, "_mcp_discovered", False)
+        try:
+            tool_registry._tools.clear()  # noqa: SLF001
+            members = ["item_list", "item_create", "order_list"]
+            for name in members:
+                tool_registry.register(
+                    name=name,
+                    fn=lambda _a, _r, _n=name: {"tool": _n},
+                    description=name,
+                    input_schema={"type": "object", "properties": {}},
+                    permission_classes=[],
+                    permission_tier="read_write" if name.endswith("create") else "read",
+                    is_write=name.endswith("create"),
+                )
+            tool_registry.register(
+                name="catalog",
+                fn=make_group_invoke(
+                    "catalog", frozenset(members), tool_registry, frozenset({"item", "order"})
+                ),
+                description="group",
+                input_schema=build_group_input_schema(),
+                permission_classes=[],
+                permission_tier="read",
+                is_dispatcher=True,
+                group_tool_names=frozenset(members),
+            )
+            # Pretend discovery already ran so force_tool_discovery keeps our seed.
+            app_config._mcp_discovered = True  # noqa: SLF001
+
+            warnings: list[str] = []
+            errors: list[str] = []
+            with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=routes):
+                Command(stdout=StringIO())._check_route_surface(warnings, errors, strict=strict)
+            return warnings, errors
+        finally:
+            tool_registry._tools.clear()  # noqa: SLF001
+            tool_registry._tools.update(saved_tools)  # noqa: SLF001
+            app_config._mcp_discovered = saved_discovered  # noqa: SLF001
+
+    def test_not_applicable_when_routes_unset(self) -> None:
+        """A legacy (no FRISIAN_MCP_ROUTES) host reports cleanly, not an error."""
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False):
+            warnings: list[str] = []
+            errors: list[str] = []
+            with override_settings(FRISIAN_MCP_ROUTES=None):
+                Command(stdout=StringIO())._check_route_surface(warnings, errors, strict=True)
+        assert not warnings and not errors
+
+    def test_audit_failure_is_error_under_strict_but_warning_otherwise(self) -> None:
+        """A discovery/audit failure must fail --strict, not exit zero as if clean.
+
+        Regression: under --strict an audit that could not run was downgraded to
+        a warning, so a strict CI gate passed despite auditing nothing.
+
+        Driven through ``handle()`` rather than ``_check_route_surface`` directly,
+        because the property under test is the *exit code* a CI pipeline gates on.
+        Discovery now runs in ``handle()``, so a unit call to the check would not
+        exercise the failure path at all.
+        """
+        routes = {"default": {"path": "mcp", "allow_list": ["*"]}}
+        with (
+            override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=routes),
+            patch(
+                "frisian_mcp.route_audit.force_tool_discovery",
+                side_effect=RuntimeError("discovery blew up"),
+            ),
+        ):
+            # A gate that cannot evaluate must not pass: non-zero exit.
+            with pytest.raises(SystemExit) as excinfo:
+                _run(strict=True)
+            assert excinfo.value.code == 1
+
+            # Without --strict the command is a diagnostic, not a gate: it
+            # reports the failure and still exits zero.
+            out, _ = _run(strict=False)
+
+        assert "could not run" in out
+
+    def test_strict_exit_is_the_only_difference_on_a_healthy_host(self) -> None:
+        """--strict must not invent failures: a clean surface still exits zero."""
+        routes = {"default": {"path": "mcp", "allow_list": ["*"]}}
+        with override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=routes):
+            out, _ = _run(strict=True)
+        assert "could not run" not in out
+
+    def test_discovery_runs_before_registry_reading_checks(self) -> None:
+        """Bug 2: the performance check must not measure an empty registry.
+
+        ``_run_deferred_discovery`` is wired to ``request_started``, which never
+        fires under a management command — so without an explicit force, every
+        registry-reading check sees zero tools and the page-size / cache warnings
+        it exists to raise can never fire.  Pin the ordering: discovery is forced
+        before the performance hints read the registry.
+        """
+        calls: list[str] = []
+
+        real_force = Command._force_discovery
+        real_perf = Command._check_performance_hints
+
+        def spy_force(self: Command) -> Exception | None:
+            calls.append("discovery")
+            return real_force(self)
+
+        def spy_perf(self: Command, warnings: list[str], **kwargs: Any) -> None:
+            calls.append("performance")
+            return real_perf(self, warnings, **kwargs)
+
+        with (
+            override_settings(FRISIAN_MCP_STARTUP_PRINT=False),
+            patch.object(Command, "_force_discovery", spy_force),
+            patch.object(Command, "_check_performance_hints", spy_perf),
+        ):
+            _run()
+
+        assert calls.index("discovery") < calls.index("performance")
+
+    def test_discovery_is_forced_on_a_legacy_host_with_no_routes(self) -> None:
+        """Discovery is unconditional — it is not a per-route concern.
+
+        This is the half a mere reorder would miss.  ``_check_route_surface``
+        early-returns when ``FRISIAN_MCP_ROUTES`` is unset, so while discovery
+        lived inside it, a legacy single-mount host never populated its registry
+        and its performance hints measured zero tools forever.  Hoisting the force
+        into ``handle()`` is what fixes those hosts, not the ordering alone.
+        """
+        with (
+            override_settings(FRISIAN_MCP_STARTUP_PRINT=False, FRISIAN_MCP_ROUTES=None),
+            patch("frisian_mcp.route_audit.force_tool_discovery") as forced,
+        ):
+            _run()
+
+        assert forced.called
+
+    def test_performance_hints_say_so_when_discovery_failed(self) -> None:
+        """An unmeasurable tool count is reported, never silently rendered as zero.
+
+        Reporting the empty registry as a real measurement would retire the
+        page-size and cache warnings without anyone noticing — the same
+        silence-as-success shape as the strict gate above, one check over.
+        """
+        with (
+            override_settings(FRISIAN_MCP_STARTUP_PRINT=False),
+            patch(
+                "frisian_mcp.route_audit.force_tool_discovery",
+                side_effect=RuntimeError("discovery blew up"),
+            ),
+        ):
+            out, _ = _run()
+
+        assert "could not be evaluated" in out
+
+    def test_clean_route_reports_nothing(self) -> None:
+        """A route that exposes tools with no dead entries is clean."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["*"]}}, strict=True
+        )
+        assert not warnings and not errors
+
+    def test_net_empty_is_warning_without_strict(self) -> None:
+        """W008 (deny zeroes allow) is a warning by default — no error, no exit."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["catalog"], "deny_list": ["catalog"]}},
+            strict=False,
+        )
+        assert any("W008" in w for w in warnings)
+        assert not errors
+
+    def test_net_empty_is_error_under_strict(self) -> None:
+        """W008 escalates to an error under --strict, so CI exits non-zero."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["catalog"], "deny_list": ["catalog"]}},
+            strict=True,
+        )
+        assert any("W008" in e for e in errors)
+
+    def test_soft_carve_out_stays_warning_under_strict(self) -> None:
+        """W009 (a working carve-out) is SOFT — --strict must NOT escalate it."""
+        warnings, errors = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["*"], "deny_list": ["catalog:item"]}},
+            strict=True,
+        )
+        assert any("W009" in w for w in warnings)
+        assert not errors
+
+    def test_route_attributed_exactly_once(self) -> None:
+        """The rendered finding names its route once, never doubled."""
+        warnings, _ = self._seed_and_check(
+            {"default": {"path": "mcp", "allow_list": ["catalog"], "deny_list": ["catalog"]}},
+            strict=False,
+        )
+        assert warnings
+        assert warnings[0].count("route 'default'") == 1
+
+
+class TestMcpDoctorCiGateFixture:
+    """V11-21: the CI ``mcp_doctor --strict`` gate must stay green on its fixture.
+
+    The pipeline runs ``django-admin mcp_doctor --strict`` against
+    ``frisian_mcp._ci_doctor_settings``.  For the gate to be stable rather than
+    flaky, that representative config must produce no error-level or LOUD
+    finding.  This pins it as a unit test so a fixture regression is caught here,
+    not only in CI.
+    """
+
+    def test_ci_doctor_config_passes_strict(self) -> None:
+        """The gate's representative config exits 0 under --strict."""
+        from frisian_mcp import _ci_doctor_settings as cfg
+
+        with override_settings(
+            FRISIAN_MCP_STARTUP_PRINT=False,
+            FRISIAN_MCP_ROUTES=cfg.FRISIAN_MCP_ROUTES,
+            FRISIAN_MCP_ALLOW_UNAUTHENTICATED=cfg.FRISIAN_MCP_ALLOW_UNAUTHENTICATED,
+        ):
+            # No SystemExit: --strict found nothing error-level or LOUD.
+            out, _ = _run(strict=True)
+
+        assert "error(s) found" not in out
+        assert "mounted per-route" in out

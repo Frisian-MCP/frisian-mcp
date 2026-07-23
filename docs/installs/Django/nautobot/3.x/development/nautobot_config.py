@@ -151,9 +151,9 @@ FRISIAN_MCP_OAUTH_REGISTRATION_OPEN = False
 # permissions on walk-up.
 FRISIAN_MCP_OAUTH_PKCE_DEFAULT_PERMISSION = "read"
 
-# 1-year token expiry suits long-running agents.  Shorten in environments
-# with stricter rotation requirements.
-FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 60 * 60 * 24 * 365
+# Token lifetime.  Package default is 3600 (1 hour); raise only if your
+# rotation policy allows a longer-lived Bearer.
+FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS = 3600
 
 # Hide OAuth ``.well-known`` discovery metadata.  Returns JSON 404 from
 # ``/.well-known/oauth-authorization-server`` and
@@ -169,9 +169,12 @@ FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False
 # ``{list, retrieve}``; write actions are hidden from ``tools/list``, not
 # just blocked at execution.
 FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY = True
-FRISIAN_MCP_PERMISSION_ADAPTER = (
-    "frisian_mcp.contrib.permissions.exempt_view_adapter.ExemptViewPermissionAdapter"
-)
+# Leave FRISIAN_MCP_PERMISSION_ADAPTER unset: the default DjangoPermissionAdapter
+# resolves capabilities via user.has_perm(), which on Nautobot means the
+# principal's real ObjectPermissions.  ExemptViewPermissionAdapter is a
+# deprecated no-op in 1.1.0 — do not set it; and do not set a global
+# EXEMPT_VIEW_PERMISSIONS, which grants every authenticated principal a view of
+# the whole estate and defeats per-principal scoping.
 
 # Synthesise ``bulk_create`` for every resource.  Nautobot's BulkModelViewSet
 # exposes ``bulk_update`` / ``bulk_partial_update`` / ``bulk_destroy`` as

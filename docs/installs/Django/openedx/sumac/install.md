@@ -238,9 +238,13 @@ FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 8_000  # bytes
 ### Using a frisian-mcp Static API Key
 
 ```python
+# FRISIAN_MCP_API_KEYS is keyed by the HMAC-SHA256 DIGEST of each raw key,
+# not the raw key itself — so a leaked settings file exposes no usable
+# credential. Generate a digest for each key:
+#     python manage.py lms mcp_hash_api_key <raw-key>
 FRISIAN_MCP_API_KEYS = {
-    "my-agent-key": "read_write",
-    "readonly-agent": "read",
+    "<64-hex HMAC-SHA256 digest of your read-write key>": "read_write",
+    "<64-hex HMAC-SHA256 digest of your read-only key>":  "read",
 }
 ```
 
@@ -251,7 +255,7 @@ FRISIAN_MCP_API_KEYS = {
       "type": "http",
       "url": "https://your-lms.example.com/mcp/",
       "headers": {
-        "Authorization": "Bearer my-agent-key"
+        "Authorization": "Bearer <your-raw-key>"
       }
     }
   }
@@ -286,8 +290,8 @@ The `openedx_frisian_mcp/` plugin app included in this repository contains:
 
 ## Next Steps
 
-- [Troubleshooting](../../../../troubleshooting/Django/openedx/sumac/troubleshooting.md) — common problems and solutions
-- [Installation & Configuration Reference](../../../../Reference/installation-configuration-reference.md) — complete settings reference
+- [Troubleshooting](../../../../v1.1/troubleshooting/Django/openedx/sumac/troubleshooting.md) — common problems and solutions
+- [Installation & Configuration Reference](../../../../v1.1/Reference/installation-configuration-reference.md) — complete settings reference
 
 ---
 
