@@ -368,5 +368,4 @@ Initial release. PyPI namespace registered. Core MCP gateway working.
 
 ---
 
-
 *Changelog maintained by the frisian-mcp development team.*
