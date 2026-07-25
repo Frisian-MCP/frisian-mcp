@@ -44,11 +44,15 @@ def _request(*, header: str | None = None, query: str | None = None) -> Any:
 
 
 def _settings(*, global_default: bool = False, policy: str | None = None) -> Any:
-    """Return an ``override_settings`` context for the given global + policy."""
-    kwargs: dict[str, Any] = {USAGE_REPORTING_SETTING: global_default}
-    if policy is not None:
-        kwargs[USAGE_POLICY_SETTING] = policy
-    return override_settings(**kwargs)
+    """Return an ``override_settings`` context for the given global + policy.
+
+    Always overrides USAGE_POLICY_SETTING -- including to ``None`` for the
+    "unset" cases -- so an ambient/project ``allow``/``deny`` can never leak
+    into the None matrix cells or the default-policy assertions.
+    """
+    return override_settings(
+        **{USAGE_REPORTING_SETTING: global_default, USAGE_POLICY_SETTING: policy}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +147,8 @@ class TestResolveSystemPolicy:
 
     def test_unset_setting_is_none(self) -> None:
         """No policy setting at all defers (None), never forcing on/off."""
-        assert resolve_system_policy() in (None,)
+        with override_settings(**{USAGE_POLICY_SETTING: None}):
+            assert resolve_system_policy() in (None,)
 
     @pytest.mark.parametrize("raw", [None, 123, ["deny"], {"policy": "deny"}])
     def test_non_string_defers(self, raw: object) -> None:
