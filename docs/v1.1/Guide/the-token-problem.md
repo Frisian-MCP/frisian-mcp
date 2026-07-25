@@ -125,7 +125,7 @@ The agent receives the metadata it needs to decide what to do — fetch the full
 ```python
 # Auto-discovered ModelViewSets negotiate large responses via a byte threshold —
 # no per-endpoint decorator required. This ships ACTIVE with a default of 25_000
-# bytes: any non-write response over the threshold (list, detail, or custom tool
+# bytes: any successful non-write response over the threshold (list, detail, or custom tool
 # output) probes first out of the box — high-cardinality lists are the common
 # case. Override to tune, or set None to disable. See the Configuration Reference.
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)

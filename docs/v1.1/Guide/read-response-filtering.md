@@ -129,7 +129,7 @@ Use `@mcp_heavy` directly when you want **explicit** control — a named heavy t
 
 ## Automatic Threshold Negotiation
 
-For large applications where not every ViewSet has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` enables automatic `@mcp_heavy` behavior as a safety net. **It ships active with a default of `25000` bytes** — any non-write response over the threshold probes first out of the box, with no configuration (high-cardinality lists are the common case, but detail reads and custom tool output are covered too). Override the value to tune, or set it to `None` to disable the backstop entirely:
+For large applications where not every ViewSet has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` enables automatic `@mcp_heavy` behavior as a safety net. **It ships active with a default of `25000` bytes** — any successful non-write response over the threshold probes first out of the box, with no configuration (high-cardinality lists are the common case, but detail reads and custom tool output are covered too). Override the value to tune, or set it to `None` to disable the backstop entirely:
 
 ```python
 # settings.py — the default is 25000; set a value only to override, or None to disable
@@ -174,20 +174,20 @@ See [Write-Response Filtering](write-path-response-filtering.md) for the `@mcp_l
 
 ---
 
-## Summary: When to Apply @mcp_heavy
+## Summary: When to Make a Read Heavy
 
-Apply `@mcp_heavy` to any list action where:
+Register a read as an `@mcp_heavy` tool (or rely on the auto-negotiate threshold) when:
 
 - The record count depends on user-supplied filters that could match an unbounded number of records
 - The underlying model has many fields or nested relationships, making individual records large
-- The list endpoint is expected to be called frequently in agent workflows
+- The read is expected to be called frequently in agent workflows
 
-Do not apply `@mcp_heavy` to list actions where:
+Skip an explicit `@mcp_heavy` tool when:
 
 - The result set is bounded by design and will always be small (e.g., a list of status choices, a handful of configuration objects)
 - The endpoint is not intended for agent consumption and is excluded via `@mcp_ignore`
 
-When in doubt, apply it. The probe overhead is one round-trip. The cost of a context window exhausted on a single list call is the entire session.
+When in doubt, make it heavy. The probe overhead is one round-trip. The cost of a context window exhausted on a single read is the entire session.
 
 ---
 
