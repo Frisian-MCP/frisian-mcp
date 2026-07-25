@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.frisian-mcp/django",
+  "title": "Frisian MCP (Django)",
+  "description": "Your DRF API as MCP tools — 1,800 endpoints become 16 dispatchers, permissioned by Django.",
+  "websiteUrl": "https://frisian-mcp.com",
+  "repository": {
+    "url": "https://github.com/Frisian-MCP/frisian-mcp",
+    "source": "github"
+  },
+  "version": "1.0.12",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.frisian-mcp.com/mcp/"
+    }
+  ]
+}

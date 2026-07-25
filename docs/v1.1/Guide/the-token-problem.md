@@ -124,8 +124,11 @@ The agent receives the metadata it needs to decide what to do — fetch the full
 
 ```python
 # Auto-discovered ModelViewSets negotiate large responses via a byte threshold —
-# no per-endpoint decorator required:
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000  # bytes
+# no per-endpoint decorator required. This ships ACTIVE with a default of 25_000
+# bytes: any non-write response over the threshold (list, detail, or custom tool
+# output) probes first out of the box — high-cardinality lists are the common
+# case. Override to tune, or set None to disable. See the Configuration Reference.
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)
 ```
 
 For an explicit heavy tool with a curated schema, `@mcp_heavy` is a registration factory — it takes `name`, `description`, and `input_schema`, and wraps a `(arguments, request)` callable, not a bare `ModelViewSet` method:
@@ -233,6 +236,8 @@ The dispatcher pattern collapses the tool surface so the agent can see what is a
 **All three:** Agent sees 13 tools. Agent calls a list endpoint, receives metadata and the first page. Agent calls a bulk create, receives a 24-token confirmation. Agent's context budget is preserved for reasoning, state retrieval, and the next step.
 
 The three-part pattern is the complete answer for scale. A production MCP server against any non-trivial dataset needs all three.
+
+To *measure* these savings per call — the schema, request, and result token cost of any dispatcher call, in the same tokenizer agents are billed against — see [Token Usage Reporting](token-usage-reporting.md), the opt-in `_usage` observability block.
 
 ---
 

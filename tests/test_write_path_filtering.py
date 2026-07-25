@@ -1305,14 +1305,23 @@ class TestWriteContinuationTokenOwnerBinding:
     issued by the *write* path, so a future change that special-cased write-token
     caching could not silently drop the protection.
 
-    The owner key composes the tool name and the MCP session id (among other
-    fields), so two of the three drift dimensions are exercised here: a different
-    session and a different tool.  The happy-path test anchors the other two —
-    it confirms a refusal is caused by owner drift, not an unrelated error.
+    The owner key composes the tool name, auth credential, tier, and user.
+    TUR-16 removed the MCP session id from the key — it drifts across a real
+    client's per-call requests, so binding on it broke a caller's own resume.
+    These tests exercise the dimensions that DO gate (a different tool; a
+    foreign caller/tier) AND prove that a same-caller session drift does NOT
+    gate.  The happy-path test anchors that a refusal is caused by owner drift,
+    not an unrelated error.
     """
 
-    def test_replay_from_different_session_is_refused(self, rf: RequestFactory) -> None:
-        """A write token issued to one session cannot be replayed by another session."""
+    def test_replay_across_session_drift_is_served(self, rf: RequestFactory) -> None:
+        """TUR-16: the SAME caller resumes its own write token across a session-id drift.
+
+        A real MCP client mints a fresh ``Mcp-Session-Id`` per tool-call POST,
+        so the mint and redeem legs carry different session headers.  Session is
+        no longer part of the owner key, so the caller's own continuation is
+        served (pre-TUR-16 this was a spurious ``owner_mismatch``).
+        """
         full_object = {"id": "uuid-A", "name": "device-A", "payload": "x" * 100}
 
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
@@ -1326,6 +1335,7 @@ class TestWriteContinuationTokenOwnerBinding:
         )
         token = _tool_result(resp1)["continuation_token"]
 
+        # Redeem under a DIFFERENT session id — same anonymous caller/tool/tier.
         resp2 = _call_with_cache(
             rf,
             isolated,
@@ -1335,14 +1345,50 @@ class TestWriteContinuationTokenOwnerBinding:
             "agent-B",
         )
 
+        assert not _is_error(resp2)
+        assert _tool_result(resp2)["payload"] == full_object["payload"]
+
+    def test_replay_from_different_caller_is_refused(self, rf: RequestFactory) -> None:
+        """A write token issued to one caller cannot be replayed by a foreign caller.
+
+        SEC-3 cross-caller protection survives the TUR-16 session removal: the
+        binding still refuses when the auth/tier/user identity differs.  Here the
+        stored owner is tampered to a foreign tier; the redeeming request (same
+        session/tool) computes a different key and is refused.
+        """
+        full_object = {"id": "uuid-A2", "name": "device-A2", "payload": "x" * 100}
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return full_object
+
+        isolated = _build_write_registry("device.create", _create)
+        cache_store: dict[str, Any] = {}
+
+        resp1 = _call_with_cache(
+            rf, isolated, cache_store, "device.create", {"name": "device-A2"}, "agent-A"
+        )
+        token = _tool_result(resp1)["continuation_token"]
+
+        # Tamper the cached entry's owner to a FOREIGN caller (different tier),
+        # simulating a token minted by a higher-tier caller being replayed by a
+        # lower-tier one; the owner key no longer matches.
+        (cache_key,) = list(cache_store)
+        cache_store[cache_key]["owner_key"] = "tool=device.create:auth=anon:tier=admin"
+
+        resp2 = _call_with_cache(
+            rf,
+            isolated,
+            cache_store,
+            "device.create",
+            {"continuation_token": token, "mode": "full"},
+            "agent-A",
+        )
+
         assert _is_error(resp2)
         body = _tool_result(resp2)
         assert "does not belong" in body["error"]
-        # The cached payload VALUE must NOT leak to the wrong caller
-        # anywhere in the serialized body — asserting on the field NAME
-        # ("payload") would miss the real concern (the cached secret
-        # content) and would also false-positive if "payload" appeared
-        # in any error string.
+        # The cached payload VALUE must NOT leak to the wrong caller anywhere in
+        # the serialized body.
         assert full_object["payload"] not in json.dumps(body)
 
     def test_replay_against_different_tool_is_refused(self, rf: RequestFactory) -> None:

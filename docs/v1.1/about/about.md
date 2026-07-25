@@ -105,8 +105,6 @@ This was validated across every tested integration: Nautobot, NetBox, Paperless-
 
 For plugin-based hosts like NetBox, the integration uses a thin plugin wrapper that wires frisian-mcp into the plugin system — again, without touching NetBox core. The wrapper is ~100 lines and lives entirely outside the NetBox source tree.
 
-## Who Built This
-
-Built by an engineer frustrated with context bloat in MCP tooling — where connecting to a large API meant burning an entire agent session just to discover what tools were available. The MCP standard has been a focus since Anthropic introduced it in 2024, through its growth and its donation to the AAIF under the Linux Foundation in December 2025. This package is the result of nearly two years of working with agents in production — learning what works and what doesn't.
+## Who Is This For?
 
 frisian-mcp isn't designed only for enterprise systems. The solo developer automating a side project deserves tools that don't hallucinate. The vibe coder building a small business app deserves agent integration that doesn't exhaust context windows. frisian-mcp is for anyone building with Django who wants agents to actually work.

@@ -24,7 +24,7 @@ It does not work for a meaningful share of real Django projects. Three categorie
 
 **Projects with no ViewSets at all.** Function-based views decorated with `@api_view` are common, especially in older Django projects or in apps that grew organically. ViewSet-only auto-discovery produces zero tools on these projects.
 
-A rigid pipeline forces these projects to either fork the package or skip MCP integration entirely. Neither outcome is good for adoption or for the AAIF positioning the package aims for.
+A rigid pipeline forces these projects to either fork the package or skip MCP integration entirely.
 
 ## Decision
 
@@ -66,7 +66,7 @@ A single combined "MCP backend" interface would force projects to reimplement bo
 
 ## Consequences
 
-**Positive.** Mature Django projects can adopt frisian-mcp without forking. The package serves as a protocol and registry layer, with project-specific logic plugging in cleanly. The AAIF submission story is "extensible framework" rather than "rigid package."
+**Positive.** Mature Django projects can adopt frisian-mcp without forking. The package serves as a protocol and registry layer, with project-specific logic plugging in cleanly.
 
 **Positive.** Future invocation backends — `AsyncInvocation`, `CeleryInvocation` — can ship as additions without breaking existing installs. The extension points exist from v1; the built-in implementations expand over time.
 

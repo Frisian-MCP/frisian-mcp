@@ -119,8 +119,8 @@ The tool is registered at import time and surfaced in `tools/list` with the five
 Most large applications expose their REST surface through auto-discovered `ModelViewSet`s, and you do not want to register every list endpoint by hand. Set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` instead — any auto-discovered tool whose response exceeds the byte threshold is auto-wrapped in the same probe envelope without a per-ViewSet code change:
 
 ```python
-# settings.py
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000  # bytes
+# settings.py — this ships active at 25_000 bytes by default; set a value only to override
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)
 ```
 
 Use `@mcp_heavy` directly when you want **explicit** control — a named heavy tool that surfaces in `tools/list` with a curated input schema, distinct from the auto-discovered ViewSet action.
@@ -129,14 +129,14 @@ Use `@mcp_heavy` directly when you want **explicit** control — a named heavy t
 
 ## Automatic Threshold Negotiation
 
-For large applications where not every ViewSet has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` enables automatic `@mcp_heavy` behavior as a safety net:
+For large applications where not every ViewSet has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` enables automatic `@mcp_heavy` behavior as a safety net. **It ships active with a default of `25000` bytes** — any non-write response over the threshold probes first out of the box, with no configuration (high-cardinality lists are the common case, but detail reads and custom tool output are covered too). Override the value to tune, or set it to `None` to disable the backstop entirely:
 
 ```python
-# settings.py
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50000  # bytes
+# settings.py — the default is 25000; set a value only to override, or None to disable
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25000  # bytes (shipped default)
 ```
 
-When a list response would exceed this threshold (in bytes), frisian-mcp applies probe-first behavior automatically even on ViewSets that are not explicitly decorated. The response format is identical to an explicitly decorated ViewSet.
+When **any** successful non-write tool response would exceed this threshold (in bytes), frisian-mcp applies probe-first behavior automatically even on ViewSets and tools that are not explicitly decorated. This is not limited to list actions — it covers detail/retrieve reads and any custom `@mcp_tool` output whose serialized JSON is over the threshold. (Writes return their lean confirmation envelope before the backstop, and explicitly `@mcp_heavy`-decorated tools use their own probe path.) The response format is identical to an explicitly decorated ViewSet. The exact default value and upgrade behavior are documented in the [Installation & Configuration Reference](../Reference/installation-configuration-reference.md#frisian_mcp_auto_negotiate_threshold).
 
 Auto-negotiation is a fallback, not a replacement for explicit annotation. An explicitly decorated ViewSet is always probe-first; auto-negotiation only triggers when the response would be large enough to warrant it. For ViewSets where you know the result will always be large, explicit annotation is clearer and more predictable.
 

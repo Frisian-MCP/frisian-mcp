@@ -368,13 +368,5 @@ Initial release. PyPI namespace registered. Core MCP gateway working.
 
 ---
 
-## Roadmap
-
-**Imminent**
-
-- PyPI public release
-- AAIF submission — frisian-mcp will be submitted to the Linux Foundation's AI Application Interoperability Framework alongside the MCP ecosystem
-
----
 
 *Changelog maintained by the frisian-mcp development team.*

@@ -315,11 +315,12 @@ def mcp_heavy(
     ``page_size``, ``filter_keys``) are automatically merged into the registered
     ``inputSchema`` so that ``tools/list`` exposes the protocol to clients.
 
-    **Secondary backstop (v2):** ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` — when set to a
-    byte-count integer in Django settings, *any* tool response above that size is
-    automatically wrapped in a probe envelope, even on tools not decorated with
-    ``@mcp_heavy``.  This setting is secondary; prefer ``@mcp_heavy`` for explicit
-    heavy tools.
+    **Secondary backstop (v2):** ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` — a byte-count
+    integer; *any* tool response above that size is automatically wrapped in a probe
+    envelope, even on tools not decorated with ``@mcp_heavy``.  It defaults to ``25000``
+    bytes (~25 KB) so high-cardinality list actions probe-first out of the box; set it
+    to ``None`` in Django settings to disable the backstop, or to a larger value to probe
+    less often.  This setting is secondary; prefer ``@mcp_heavy`` for explicit heavy tools.
 
     Args:
         name: Unique MCP tool name (e.g. ``"enterprise.list_all_tools"``).

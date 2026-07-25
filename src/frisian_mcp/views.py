@@ -78,6 +78,7 @@ from frisian_mcp.registry import (
 )
 from frisian_mcp.resources import ResourceNotFoundError, resource_registry
 from frisian_mcp.route_views import RouteView, route_views
+from frisian_mcp.usage import maybe_attach_usage
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,20 @@ audit_logger = logging.getLogger("frisian_mcp.audit")
 _TOOLS_LIST_CACHE_KEY = "frisian_mcp:tools_list"
 _HEAVY_CACHE_PREFIX = "frisian_mcp:heavy:"
 _HEAVY_CACHE_TTL: int = 300  # seconds; tokens expire after 5 minutes
+
+#: Default byte threshold for the auto-negotiate backstop
+#: (``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD``).  A tool response whose serialized
+#: JSON exceeds this many bytes is returned as a probe envelope so the caller can
+#: negotiate how much to retrieve, instead of a context-blowing full payload.
+#:
+#: This ships non-``None`` (the historical default was ``None`` = dormant) so
+#: high-cardinality list actions probe-first on every host without the operator
+#: having to discover the knob.  ~25 KB is on the order of ~6k cl100k_base tokens:
+#: above a normal small filtered read, well below a large list page (a 114-row
+#: device list serialized to ~145 KB on the Nautobot test box and probes cleanly
+#: at this value).  Operators raise it to probe less often, or set
+#: ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None`` to disable the backstop.
+_DEFAULT_AUTO_NEGOTIATE_THRESHOLD: int = 25_000
 
 #: Sentinel for the one-time WSGI-SSE-worker-pinning warning emitted on the
 #: first SSE keepalive request served from a sync worker.  Sync workers cannot
@@ -241,7 +256,17 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
     * the effective permission tier — refuses replay after a downgrade
     * the user PK if any — refuses cross-user replay
     * the agent connection PK if the request is per-agent scoped (PKG-6)
-    * the MCP session ID if the client supplied one
+
+    The MCP session id (``Mcp-Session-Id`` header) is intentionally NOT part of
+    the key (TUR-16).  It is a client-supplied transport header, not a server
+    secret, and real MCP clients (e.g. the Claude.ai connector) mint a fresh
+    session id per tool-call POST — so binding on it broke legitimate
+    probe→redeem resume on authenticated routes (the probe issued a
+    continuation_token the caller could never redeem) while adding no real
+    protection: cross-caller/cross-tool/post-downgrade replay is already
+    refused by the tool + auth-credential + tier + user components above, and
+    an attacker who holds the victim's credential can re-fetch the data
+    outright.  Session drift must never gate a caller's own resume.
 
     The shape is intentionally a single string so the comparison is a
     simple equality check; the exact field set need not be stable across
@@ -271,10 +296,10 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
     conn_pk = getattr(conn, "pk", None) if conn is not None else None
     conn_part = f":conn={conn_pk}" if conn_pk is not None else ""
 
-    session_id = (request.META or {}).get("HTTP_MCP_SESSION_ID", "")
-    session_part = f":session={session_id}" if session_id else ""
-
-    return f"tool={tool_name}:auth={auth_id}:tier={tier}{user_part}{conn_part}{session_part}"
+    # NOTE (TUR-16): the Mcp-Session-Id header is deliberately excluded — it
+    # drifts across a real client's per-call requests and adds no protection
+    # beyond auth/tier/user/tool.  See the docstring for the full rationale.
+    return f"tool={tool_name}:auth={auth_id}:tier={tier}{user_part}{conn_part}"
 
 
 def _build_heavy_cache_entry(result: Any, request: Any, tool_name: str) -> dict[str, Any]:
@@ -372,6 +397,74 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
 def _jsonrpc_success(request_id: JsonRpcId, result: JsonDict) -> JsonResponse:
     """Return a JSON-RPC 2.0 success response."""
     return JsonResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def _caller_visible_schema(request: Any, tool_name: str) -> Any:
+    """Return the ``inputSchema`` for *tool_name* as surfaced to *this* caller.
+
+    Mirrors :meth:`ToolRegistry.list_tools` exactly so that ``schema_tokens``
+    counts what the caller could actually see -- the tier-filtered (and, under
+    ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY``, permission-filtered) dispatcher
+    schema, not the full one.  Counting the full schema on a tier-capped route
+    would disclose, via the token count, the size of actions the caller is not
+    authorised to see (security TUR-6).  Returns ``None`` when the tool is not
+    visible to the request, in which case the count is treated as empty.
+
+    Only called when usage reporting has already resolved ON, so the possibly
+    non-trivial schema rebuild never runs on the default (disabled) path.
+    """
+    entry = _request_visible_entry(request, tool_name)
+    if entry is None:
+        return None
+    # Plain (non-dispatcher) tool, or a dispatcher without meta: the entry's own
+    # permission_tier already gated the whole tool, so the schema is unfiltered.
+    if not entry.is_dispatcher or entry.dispatcher_meta is None:
+        return entry.input_schema
+    # Dispatcher: rebuild the action enum filtered to the caller's tier and, when
+    # permission-aware discovery is on, their Django capabilities -- reusing the
+    # exact helpers tools/list and action="help" use.
+    from frisian_mcp.backends.dispatcher import (  # pylint: disable=import-outside-toplevel
+        _build_dispatcher_input_schema,
+        _build_perm_action_filter_from_request,
+    )
+
+    action_filter = _build_perm_action_filter_from_request(request, tool_name)
+    return _build_dispatcher_input_schema(
+        entry.dispatcher_meta,
+        max_tier=_get_token_permission(request),
+        action_filter=action_filter,
+    )
+
+
+def _usage_success(
+    request: Any,
+    request_id: JsonRpcId,
+    payload: Any,
+    *,
+    tool_name: str,
+    usage_args: Any,
+) -> JsonResponse:
+    """Build a ``tools/call`` success response, attaching ``_usage`` when enabled.
+
+    Serializes *payload* once into ``content[0].text`` and reuses that exact
+    string for ``result_tokens``.  When token-usage reporting resolves OFF (the
+    default, and unconditionally under a system ``deny``) the result is
+    byte-identical to the pre-feature output -- no ``_usage`` key, no counting,
+    and the schema rebuild is skipped via the lazy ``schema_json`` callable.
+    """
+    emitted_text = json.dumps(payload)
+    result_obj: JsonDict = {
+        "content": [{"type": "text", "text": emitted_text}],
+        "isError": False,
+    }
+    maybe_attach_usage(
+        result_obj,
+        request=request,
+        schema_json=lambda: _caller_visible_schema(request, tool_name),
+        arguments=usage_args,
+        emitted_text=emitted_text,
+    )
+    return _jsonrpc_success(request_id, result_obj)
 
 
 def _jsonrpc_error(
@@ -1178,6 +1271,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # self-teaching escape hatch.  Strip it from ``arguments`` here so the
     # underlying tool implementation never sees the protocol flag.  Pattern
     # matches how ``verify`` is stripped on the write-path below.
+    # Snapshot the ORIGINAL inbound arguments for the usage ``request_tokens``
+    # count (TUR-1 sec 2): count what the agent actually sent, before lite/verify
+    # stripping or key normalization.  A copy so nothing downstream perturbs it.
+    _usage_args: dict[str, Any] = dict(arguments)
+
     arguments = dict(arguments)
     _lite: bool = bool(arguments.pop("lite", False))
     # Fallback: agents that cached an older schema (before ``lite`` was added as
@@ -1325,9 +1423,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         _log_audit_context(
             request, tool_name, arguments, decision="allow", reason="continuation_served"
         )
-        return _jsonrpc_success(
-            request_id,
-            {"content": [{"type": "text", "text": json.dumps(served)}], "isError": False},
+        return _usage_success(
+            request, request_id, served, tool_name=tool_name, usage_args=_usage_args
         )
 
     # Record last_seen_at for this agent connection (fire-and-forget UPDATE).
@@ -1565,9 +1662,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         and not (_write_entry is not None and _write_entry.is_heavy)
     ):
         if _verify:
-            return _jsonrpc_success(
-                request_id,
-                {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False},
+            return _usage_success(
+                request, request_id, result, tool_name=tool_name, usage_args=_usage_args
             )
         from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
             _extract_lean_envelope,
@@ -1586,9 +1682,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             pk_val = arguments.get("pk") or arguments.get("id")
             if pk_val is not None:
                 _lean["id"] = pk_val
-        return _jsonrpc_success(
-            request_id,
-            {"content": [{"type": "text", "text": json.dumps(_lean)}], "isError": False},
+        return _usage_success(
+            request, request_id, _lean, tool_name=tool_name, usage_args=_usage_args
         )
 
     # Dispatcher-routed write: a group dispatcher routed to a write-tier
@@ -1605,9 +1700,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         if _d_entry is not None and _d_entry.is_write and not _d_entry.is_heavy:
             _d_verify = bool(_d_params.get("verify", False))
             if _d_verify:
-                return _jsonrpc_success(
-                    request_id,
-                    {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False},
+                return _usage_success(
+                    request, request_id, result, tool_name=tool_name, usage_args=_usage_args
                 )
             from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
                 _extract_lean_envelope,
@@ -1629,9 +1723,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 pk_val = _d_params.get("pk") or _d_params.get("id")
                 if pk_val is not None:
                     _d_lean["id"] = pk_val
-            return _jsonrpc_success(
-                request_id,
-                {"content": [{"type": "text", "text": json.dumps(_d_lean)}], "isError": False},
+            return _usage_success(
+                request, request_id, _d_lean, tool_name=tool_name, usage_args=_usage_args
             )
 
     # @mcp_heavy tools: cache the result and return a probe envelope so the agent
@@ -1647,14 +1740,17 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             _HEAVY_CACHE_TTL,
         )
         probe = _build_probe_envelope(result, _token)
-        return _jsonrpc_success(
-            request_id,
-            {"content": [{"type": "text", "text": json.dumps(probe)}], "isError": False},
+        return _usage_success(
+            request, request_id, probe, tool_name=tool_name, usage_args=_usage_args
         )
 
     # Threshold backstop (secondary, v2): auto-negotiate any tool response that exceeds
     # FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD bytes.  Prefer @mcp_heavy for explicit control.
-    _threshold: int | None = getattr(settings, "FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD", None)
+    # Defaults to _DEFAULT_AUTO_NEGOTIATE_THRESHOLD (on) so high-cardinality lists probe
+    # first without per-host config; an explicit None in settings disables the backstop.
+    _threshold: int | None = getattr(
+        settings, "FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD", _DEFAULT_AUTO_NEGOTIATE_THRESHOLD
+    )
     if _threshold is not None:
         _serialized = json.dumps(result)
         if len(_serialized.encode()) > _threshold:
@@ -1665,18 +1761,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 _HEAVY_CACHE_TTL,
             )
             probe = _build_probe_envelope(result, _token)
-            return _jsonrpc_success(
-                request_id,
-                {"content": [{"type": "text", "text": json.dumps(probe)}], "isError": False},
+            return _usage_success(
+                request, request_id, probe, tool_name=tool_name, usage_args=_usage_args
             )
 
-    return _jsonrpc_success(
-        request_id,
-        {
-            "content": [{"type": "text", "text": json.dumps(result)}],
-            "isError": False,
-        },
-    )
+    return _usage_success(request, request_id, result, tool_name=tool_name, usage_args=_usage_args)
 
 
 def _handle_resources_list(request_id: JsonRpcId, request: Any) -> JsonResponse:
