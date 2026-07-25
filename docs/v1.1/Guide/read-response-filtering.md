@@ -8,7 +8,7 @@
 
 ## What @mcp_heavy Does
 
-`@mcp_heavy` is a decorator applied to ViewSet list actions. It changes the MCP response from a bare result set into a structured metadata envelope, ensuring the agent receives size and pagination information before committing to a full data transfer.
+`@mcp_heavy` is an explicit tool-registration decorator for read/list tools (see [How to Register a Heavy Tool](#how-to-register-a-heavy-tool) below — it is not applied to a ViewSet method). It changes the MCP response from a bare result set into a structured metadata envelope, ensuring the agent receives size and pagination information before committing to a full data transfer.
 
 Without `@mcp_heavy`, a list call returns all matching records in a single response. With `@mcp_heavy`, the first call returns a probe response: total record count, estimated data size, and the first page of results. The agent then decides whether to paginate, refine the filter, or proceed with the data it has received.
 
@@ -136,9 +136,9 @@ For large applications where not every ViewSet has been individually reviewed, `
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25000  # bytes (shipped default)
 ```
 
-When **any** successful non-write tool response would exceed this threshold (in bytes), frisian-mcp applies probe-first behavior automatically even on ViewSets and tools that are not explicitly decorated. This is not limited to list actions — it covers detail/retrieve reads and any custom `@mcp_tool` output whose serialized JSON is over the threshold. (Writes return their lean confirmation envelope before the backstop, and explicitly `@mcp_heavy`-decorated tools use their own probe path.) The response format is identical to an explicitly decorated ViewSet. The exact default value and upgrade behavior are documented in the [Installation & Configuration Reference](../Reference/installation-configuration-reference.md#frisian_mcp_auto_negotiate_threshold).
+When **any** successful non-write tool response would exceed this threshold (in bytes), frisian-mcp applies probe-first behavior automatically even for tools and auto-discovered ViewSet actions that are not explicitly registered as heavy. This is not limited to list actions — it covers detail/retrieve reads and any custom `@mcp_tool` output whose serialized JSON is over the threshold. (Writes return their lean confirmation envelope before the backstop, and explicitly registered `@mcp_heavy` tools use their own probe path.) The response format is identical to an explicitly registered `@mcp_heavy` tool. The exact default value and upgrade behavior are documented in the [Installation & Configuration Reference](../Reference/installation-configuration-reference.md#frisian_mcp_auto_negotiate_threshold).
 
-Auto-negotiation is a fallback, not a replacement for explicit annotation. An explicitly decorated ViewSet is always probe-first; auto-negotiation only triggers when the response would be large enough to warrant it. For ViewSets where you know the result will always be large, explicit annotation is clearer and more predictable.
+Auto-negotiation is a fallback, not a replacement for explicit registration. An explicitly registered `@mcp_heavy` tool is always probe-first; auto-negotiation only triggers when the response would be large enough to warrant it. For endpoints you know will always return large results, an explicit `@mcp_heavy` tool is clearer and more predictable.
 
 ---
 

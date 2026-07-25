@@ -34,9 +34,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **`FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` now ships a default (`25000` bytes) instead of
-  `None` (behavior change on upgrade).** The auto-negotiate backstop wraps any tool response
-  whose serialized JSON exceeds the threshold in a probe envelope, so the caller negotiates
-  how much to retrieve rather than receiving a context-blowing payload. Previously the
+  `None` (behavior change on upgrade).** The auto-negotiate backstop wraps any successful
+  non-write response whose serialized JSON exceeds the threshold in a probe envelope, so the
+  caller negotiates how much to retrieve rather than receiving a context-blowing payload.
+  (Writes return their lean confirmation envelope before the backstop; `@mcp_heavy` tools use
+  their own probe path.) Previously the
   package default was `None`, leaving the backstop **dormant** until an operator explicitly
   set the value — so high-cardinality list actions (e.g. a full device list) returned their
   entire payload by default. It now defaults to `25000` bytes (~25 KB, ≈6k `cl100k_base`

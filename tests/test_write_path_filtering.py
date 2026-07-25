@@ -1352,9 +1352,11 @@ class TestWriteContinuationTokenOwnerBinding:
         """A write token issued to one caller cannot be replayed by a foreign caller.
 
         SEC-3 cross-caller protection survives the TUR-16 session removal: the
-        binding still refuses when the auth/tier/user identity differs.  Here the
-        stored owner is tampered to a foreign tier; the redeeming request (same
-        session/tool) computes a different key and is refused.
+        binding still refuses when the auth/tier/user identity differs.  The
+        stored owner is tampered by mutating exactly ONE dimension of the real,
+        structurally-valid key (tier read -> admin), so this proves a
+        valid-but-foreign key is refused — not merely that a malformed string
+        fails equality.
         """
         full_object = {"id": "uuid-A2", "name": "device-A2", "payload": "x" * 100}
 
@@ -1369,11 +1371,16 @@ class TestWriteContinuationTokenOwnerBinding:
         )
         token = _tool_result(resp1)["continuation_token"]
 
-        # Tamper the cached entry's owner to a FOREIGN caller (different tier),
-        # simulating a token minted by a higher-tier caller being replayed by a
-        # lower-tier one; the owner key no longer matches.
+        # Tamper the cached entry's owner to a FOREIGN caller by mutating exactly
+        # ONE dimension of the STRUCTURALLY-VALID key produced at mint time
+        # (tier read -> admin) — simulating a token minted by a higher-tier
+        # caller being replayed by a lower-tier one.  Preserving every other
+        # segment proves a valid-but-foreign key is refused, not just a
+        # malformed string.
         (cache_key,) = list(cache_store)
-        cache_store[cache_key]["owner_key"] = "tool=device.create:auth=anon:tier=admin"
+        original_owner = cache_store[cache_key]["owner_key"]
+        assert "tier=read" in original_owner
+        cache_store[cache_key]["owner_key"] = original_owner.replace("tier=read", "tier=admin", 1)
 
         resp2 = _call_with_cache(
             rf,

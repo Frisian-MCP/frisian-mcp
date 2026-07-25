@@ -316,11 +316,14 @@ def mcp_heavy(
     ``inputSchema`` so that ``tools/list`` exposes the protocol to clients.
 
     **Secondary backstop (v2):** ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` — a byte-count
-    integer; *any* tool response above that size is automatically wrapped in a probe
-    envelope, even on tools not decorated with ``@mcp_heavy``.  It defaults to ``25000``
-    bytes (~25 KB) so high-cardinality list actions probe-first out of the box; set it
-    to ``None`` in Django settings to disable the backstop, or to a larger value to probe
-    less often.  This setting is secondary; prefer ``@mcp_heavy`` for explicit heavy tools.
+    integer; any successful **non-write** response above that size is automatically wrapped
+    in a probe envelope, even on tools not decorated with ``@mcp_heavy``.  (Writes return
+    their lean confirmation envelope *before* this backstop is reached, and ``@mcp_heavy``
+    tools use their own probe path — so the backstop covers reads, list and detail, plus
+    custom tool output.)  It defaults to ``25000`` bytes (~25 KB) so high-cardinality reads
+    probe-first out of the box; set it to ``None`` in Django settings to disable the
+    backstop, or to a larger value to probe less often.  This setting is secondary; prefer
+    ``@mcp_heavy`` for explicit heavy tools.
 
     Args:
         name: Unique MCP tool name (e.g. ``"enterprise.list_all_tools"``).

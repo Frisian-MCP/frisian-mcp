@@ -310,8 +310,13 @@ block never silently disappears because a dependency is missing.
 
 Token usage reporting is intentionally narrow. It is **not**:
 
-- **Persistence.** Nothing is written to a database, cache, or log by the feature.
-  Each `_usage` block is computed for one call and returned inline.
+- **A stored usage record.** No usage *data* is written to a database, cache, or
+  log by the feature — the counts are never stored, aggregated, or emitted to a log
+  stream. Each `_usage` block is computed for one call and returned inline. (The one
+  thing the feature can write to a log is an operational **failure** warning: on the
+  fail-safe path, if building or serializing the block ever raises, a warning is
+  logged and the response is returned unchanged. That is an error signal about the
+  reporting machinery — never a record of any usage numbers.)
 - **A ledger or aggregation.** There is no cross-call sum, no per-agent running
   total, no session accounting. Counts are per-call only.
 - **Billing.** The numbers are an observability signal, not a metering or
