@@ -129,7 +129,7 @@ def maybe_attach_usage(
             if isinstance(content, list):
                 content_list = content
                 line_item = {"type": "text", "text": "_usage: " + dumps_for_count(block)}
-    except Exception:  # noqa: BLE001 - observability must never break the tool response
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         logger.warning(
             "frisian-mcp token-usage reporting failed; returning the tool response "
             "without a _usage block",

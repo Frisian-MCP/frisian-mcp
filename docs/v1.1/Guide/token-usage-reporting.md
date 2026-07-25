@@ -240,8 +240,9 @@ payload the agent parses) is never touched:
 }
 ```
 
-The line is **labeled JSON**: the literal prefix `_usage: ` followed by the same
-five-key block as the sibling, serialized with the same `json.dumps` boundary. The
+The line is **labeled JSON**: the literal prefix `_usage:` (with a trailing space)
+followed by the same five-key block as the sibling, serialized with the same
+`json.dumps` boundary. The
 prefix disambiguates it when a client concatenates text blocks, and the JSON body
 is machine-parseable so an agent can reliably extract the numbers to self-report.
 The numbers are identical to the sibling — it is one computed block feeding both

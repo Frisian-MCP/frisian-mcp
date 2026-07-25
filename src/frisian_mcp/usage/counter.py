@@ -40,12 +40,12 @@ def _load_encoder() -> Any | None:
     callers transparently use the approximation instead.
     """
     try:
-        import tiktoken  # pylint: disable=import-outside-toplevel
-    except Exception:  # noqa: BLE001 - any import failure means "unavailable"
+        import tiktoken  # pylint: disable=import-outside-toplevel,import-error
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         return None
     try:
         return tiktoken.get_encoding(TOKENIZER_ENCODING)
-    except Exception:  # noqa: BLE001 - a load failure must not break the request
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         return None
 
 
@@ -83,7 +83,7 @@ def count_tokens(text: str) -> int:
     if encoder is not None:
         try:
             return len(encoder.encode(text))
-        except Exception:  # noqa: BLE001 - never break the request path
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             return _approx_tokens(text)
     return _approx_tokens(text)
 
