@@ -38,6 +38,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Enables real cl100k_base token counts for the opt-in ``_usage`` block.
+# When this extra is not installed the feature degrades to a character-based
+# approximation (encoding == "approx-char4") and never raises -- see
+# frisian_mcp/usage/counter.py.
+usage = [
+    "tiktoken>=0.7,<1",
+]
 dev = [
     "black",
     "isort",
@@ -199,3 +206,10 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 testpaths = ["tests"]
+markers = [
+    "contract: token-usage _usage I/O shape / backwards-compat contracts (fast PR gate)",
+    "smoke: import / deploy-shaped fast checks (fast PR gate)",
+    "usage_real_tokenizer: assertions that require the real cl100k_base encoder (frisian-mcp[usage]); skipped on the approx-char4 fallback venv",
+    "nightly: scheduled-only coverage (tiktoken drift canary, py-version matrix)",
+    "slow: excluded from the fast PR gate",
+]

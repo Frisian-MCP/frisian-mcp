@@ -66,6 +66,19 @@ Registered checks
     (:func:`frisian_mcp.contrib.oauth._rate_limiting.parse_rate_limit`) so
     they cannot drift.
 
+``frisian_mcp.W014``
+    Warns when ``FRISIAN_MCP_USAGE_REPORTING_POLICY`` is set to a value the
+    token-usage resolver will not honour as ``"allow"``/``"deny"`` — including
+    a non-string (``b"deny"``, a list) or a dirty string (a ``"deny"`` with a
+    trailing NUL or surrounding junk).  The resolver treats such a value as
+    *unset* (defer), so a deny-intended
+    misconfiguration silently **fails open**: a per-request flag can then
+    enable reporting the operator meant to forbid.  The check reuses
+    :func:`frisian_mcp.usage.resolver.resolve_system_policy` so it flags
+    exactly the values the resolver would defer on — it cannot drift from the
+    runtime — and it never coerces the value (``deny`` is never guessed from an
+    ambiguous config).
+
 Per-route configuration checks (``E004``, ``E005``, ``E1xx``, ``E2xx``,
 ``W004``–``W007``) live in :mod:`frisian_mcp.route_audit` and are registered
 from there.  They are config-only: the tool registry is empty while system
@@ -92,6 +105,7 @@ from django.core.checks import (  # pylint: disable=redefined-builtin
 )
 
 from frisian_mcp.registry import _VALID_PERMISSION_TIERS, tool_registry
+from frisian_mcp.usage.resolver import USAGE_POLICY_SETTING, resolve_system_policy
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +116,7 @@ E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
 E003_UNANNOTATED_CUSTOM_ACTION = "frisian_mcp.E003"
 W012_OAUTH_DISCOVERY_HIDDEN = "frisian_mcp.W012"
 W013_MALFORMED_RATE_LIMIT = "frisian_mcp.W013"
+W014_INVALID_USAGE_POLICY = "frisian_mcp.W014"
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -420,5 +435,57 @@ def check_oauth_token_rate_limit_format(  # pylint: disable=unused-argument
                 "day — e.g. FRISIAN_MCP_OAUTH_TOKEN_RATE_LIMIT='20/minute'."
             ),
             id=W013_MALFORMED_RATE_LIMIT,
+        )
+    ]
+
+
+@register(Tags.security)
+def check_usage_reporting_policy_value(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Warning]:
+    """
+    Warn when ``FRISIAN_MCP_USAGE_REPORTING_POLICY`` is set to an unhonoured value.
+
+    The layered token-usage opt-in treats the system policy as authoritative:
+    ``"deny"`` forces reporting OFF and cannot be re-enabled by a per-request
+    flag.  The resolver honours only the exact strings ``"allow"`` and
+    ``"deny"`` (after strip + lowercase); any other value — a non-string such
+    as ``b"deny"`` or a list, or a dirty string like a ``"deny"`` with a
+    trailing NUL — resolves to ``None`` (defer).  A deny-intended
+    misconfiguration therefore silently **fails open**: a request flag can
+    enable reporting the operator meant to forbid.
+
+    This check surfaces that at startup so the operator corrects the value
+    before it matters.  It reuses
+    :func:`~frisian_mcp.usage.resolver.resolve_system_policy` — the same
+    normalisation the runtime uses — so the boot check and request-time
+    behaviour cannot disagree about what is honoured (the "disabled looks like
+    enabled" shape).  It deliberately does **not** coerce an unknown value to
+    ``deny``: that would trade a visible fail-open for an invisible behaviour
+    change and add an implicit path the deny-authority invariant must hold
+    across.
+    """
+    raw = getattr(settings, USAGE_POLICY_SETTING, None)
+    if raw is None:
+        # Unset is the default and fully valid (defer to request / global).
+        return []
+    if resolve_system_policy() is not None:
+        # The resolver honours this value as "allow"/"deny" — correctly set.
+        return []
+
+    return [
+        Warning(
+            f"{USAGE_POLICY_SETTING}={raw!r} is set but is not one of the honoured "
+            'string values "allow" / "deny". The token-usage resolver treats it as '
+            "unset and DEFERS to the per-request flag, so if you intended 'deny' the "
+            "control silently fails open — a request header/query can enable reporting.",
+            hint=(
+                f"Set {USAGE_POLICY_SETTING} to the exact string 'allow' or 'deny' "
+                "(case-insensitive), or remove it (None) to defer to "
+                "FRISIAN_MCP_USAGE_REPORTING. Non-string values (bytes, lists) and "
+                "dirty strings are never coerced to 'deny'."
+            ),
+            id=W014_INVALID_USAGE_POLICY,
         )
     ]

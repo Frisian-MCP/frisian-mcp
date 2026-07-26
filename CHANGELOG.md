@@ -9,6 +9,47 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in token-usage reporting.** Successful dispatcher results can carry a `_usage` block
+  (`schema_tokens`, `request_tokens`, `result_tokens`, `total_tokens`, `encoding`) as an
+  additive sibling of `content`/`isError`, counted with the pinned tiktoken `cl100k_base`
+  encoding (optional `frisian-mcp[usage]` extra; degrades to an `approx-char4` fallback, never
+  500s). **Off by default** — with reporting off the response is byte-identical to before.
+  Layered opt-in: global default `FRISIAN_MCP_USAGE_REPORTING` (bool) → system policy
+  `FRISIAN_MCP_USAGE_REPORTING_POLICY` (`allow`/`deny`/`None`) → per-request
+  `X-Frisian-MCP-Usage` header / `?usage=` query. **System `deny` is authoritative** — a
+  request flag can never re-enable it. A `frisian_mcp.W014` startup check warns when the policy
+  is set to an unhonored value. No persistence, ledger, or billing. See the
+  [Token Usage Reporting](docs/v1.1/Guide/token-usage-reporting.md) guide.
+- **Model-visible usage line** (`FRISIAN_MCP_USAGE_IN_CONTENT`, bool, default `False`; per-request
+  `X-Frisian-MCP-Usage-Content` header / `?usage_content=` query). When enabled alongside
+  reporting, the same usage numbers are appended as a **second `content` item** (labeled JSON,
+  `_usage: {…}`) so the agent can read and self-report its own cost — `content[0]` is never
+  modified and `result_tokens` still measures `content[0]` only. Subordinate to the master gate:
+  it has no `allow`/`deny` of its own and system `deny` suppresses both surfaces. The caller-side
+  sibling remains the default. (A future MCP `_meta` emission is a small additive follow-up once
+  `_meta` client-forwarding is dependable — no contract change.)
+
+### Changed
+
+- **`FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` now ships a default (`25000` bytes) instead of
+  `None` (behavior change on upgrade).** The auto-negotiate backstop wraps any successful
+  non-write response whose serialized JSON exceeds the threshold in a probe envelope, so the
+  caller negotiates how much to retrieve rather than receiving a context-blowing payload.
+  (Writes return their lean confirmation envelope before the backstop; `@mcp_heavy` tools use
+  their own probe path.) Previously the
+  package default was `None`, leaving the backstop **dormant** until an operator explicitly
+  set the value — so high-cardinality list actions (e.g. a full device list) returned their
+  entire payload by default. It now defaults to `25000` bytes (~25 KB, ≈6k `cl100k_base`
+  tokens): above a normal small filtered read, well below a large list page.
+
+  **Upgrade impact:** every host (NetBox, Nautobot, paperless, …) gains probe-first behavior
+  for large responses on upgrade — no config change required. To preserve the old always-full
+  behavior, set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None` (fully disables the backstop);
+  raise the value to probe less often, or lower it to probe sooner. `@mcp_heavy` remains the
+  preferred explicit mechanism for known-heavy tools.
+
 ### Fixed
 
 - **Issue #12 — custom detail actions:** Auto-discovered DRF `@action(detail=True)` handlers

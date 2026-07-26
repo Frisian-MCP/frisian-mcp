@@ -275,13 +275,104 @@ FRISIAN_MCP_EXPOSE_ERRORS = True  # development only
 
 ### FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD
 
-**Type:** `int` (bytes)  
-**Default:** system default (see package source)
+**Type:** `int` (bytes), or `None` to disable  
+**Default:** `25000` (bytes)
 
-Response size threshold above which frisian-mcp automatically applies `@mcp_heavy` pagination behavior, even on ViewSets that are not explicitly decorated. Prevents large responses from exhausting agent context windows without requiring manual decoration of every ViewSet.
+Response size threshold above which frisian-mcp automatically applies `@mcp_heavy` probe-first behavior, even on ViewSets and tools that are not explicitly decorated. **Any successful non-write tool response** whose serialized JSON exceeds this size is returned as a small probe envelope (size + retrieval modes + continuation token) instead of the full payload, so the agent negotiates how much to retrieve rather than receiving a context-blowing response. This is byte-size-keyed and not limited to list actions — it covers **reads (both list and detail/retrieve) and any custom `@mcp_tool` output** over the threshold. Writes return their lean confirmation envelope before the backstop, and explicitly `@mcp_heavy`-decorated tools use their own probe path. Prevents large responses from exhausting agent context windows without requiring manual decoration of every ViewSet.
+
+**The default is active** (`25000` bytes ≈ ~6k `cl100k_base` tokens — above a normal small filtered read, well below a large list page). Any qualifying response over the threshold therefore probes first out of the box, with no per-host configuration; high-cardinality lists are the common trigger.
+
+- **Raise** the value to probe less often (larger responses returned in full); **lower** it to probe sooner.
+- Set **`FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None`** to fully disable the backstop and return every response in full regardless of size.
+
+`@mcp_heavy` remains the preferred **explicit** mechanism for known-heavy tools; this threshold is the automatic backstop for everything else. See the [Read-Response Filtering](../Guide/read-response-filtering.md) guide and [ADR-005](../../ADR/adr-005-read-response-filtering.md).
+
+> **Upgrade note.** Earlier releases shipped this setting as `None` (dormant), so the backstop only fired when an operator set a value. It now defaults to `25000`, so every host gains probe-first behavior for large responses on upgrade with no config change. To preserve the old always-full behavior, set it explicitly to `None`.
 
 ```python
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50000  # bytes
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25000  # bytes (this is also the shipped default)
+# FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None  # opt out: always return full responses
+```
+
+---
+
+### FRISIAN_MCP_USAGE_REPORTING
+
+**Type:** `bool` (a recognized string token is also accepted)  
+**Default:** `False`
+
+Global default for the opt-in `_usage` token-reporting block attached to
+successful dispatcher results. Ships **off**, so responses are byte-identical to a
+build without the feature. When `True`, `_usage` is attached to successful
+(`isError: false`) results unless a system policy or per-request flag overrides it
+(see [`FRISIAN_MCP_USAGE_REPORTING_POLICY`](#frisian_mcp_usage_reporting_policy)).
+Token counts use the pinned tiktoken `cl100k_base` encoding when the optional
+`frisian-mcp[usage]` extra is installed, and a character-based approximation
+otherwise. See the [Token Usage Reporting](../Guide/token-usage-reporting.md)
+guide for the full contract and the precedence truth table.
+
+Prefer a real boolean. A **string** value is accepted but parsed as a token, not
+by Python truthiness: `"on"`/`"true"`/`"yes"`/`"1"` enable; `"off"`/`"false"`/`"no"`/`"0"`
+and any unrecognized string resolve to **off**. This prevents a config-type typo
+like `FRISIAN_MCP_USAGE_REPORTING = "false"` (a Python-truthy string) from silently
+turning reporting on — the global layer parses tokens exactly as the per-request
+flag does.
+
+```python
+FRISIAN_MCP_USAGE_REPORTING = True  # attach _usage to successful results by default
+```
+
+---
+
+### FRISIAN_MCP_USAGE_REPORTING_POLICY
+
+**Type:** `str` (`"allow"` | `"deny"`) or `None`  
+**Default:** `None`
+
+System-level policy for token usage reporting, checked with the **highest
+authority** in the three-layer resolution (system policy → per-request flag →
+global default):
+
+- `"deny"` — forces reporting **off and locked**; a per-request flag can never
+  re-enable it. Use this when `_usage` must not appear on a surface at all.
+- `"allow"` — turns reporting on by default while still letting an individual
+  request opt out.
+- `None` (default) — defers to the per-request flag, then to
+  `FRISIAN_MCP_USAGE_REPORTING`.
+
+The policy must be the **exact string** `'allow'` or `'deny'` (case-insensitive,
+surrounding whitespace tolerated). Any other value — a non-string such as
+`b"deny"` or a list, or a dirty string — is not honored and defers to the lower
+layers; it does **not** fail safe to deny. A startup system check,
+**`frisian_mcp.W014`**, warns whenever this setting is set to such an unhonored
+value, so a deny-intended misconfiguration is surfaced at boot instead of silently
+failing open at request time. Fix the value (or unset it) to clear the warning.
+
+Callers express a per-request preference at the transport level via the
+`X-Frisian-MCP-Usage` header or the `usage` query parameter (header wins);
+malformed values are treated as unset and can never enable the feature. See the
+[Token Usage Reporting](../Guide/token-usage-reporting.md) guide for the full
+truth table.
+
+```python
+FRISIAN_MCP_USAGE_REPORTING_POLICY = 'deny'  # authoritative: no _usage on this surface
+```
+
+---
+
+### FRISIAN_MCP_USAGE_IN_CONTENT
+
+**Type:** `bool` (a recognized string token is also accepted)  
+**Default:** `False`
+
+Global default for the **model-visible** usage line. By default the `_usage` block is a caller-side sibling of `content` that the model driving a standard MCP client never sees. When this is `True` (and reporting is otherwise enabled), the same usage numbers are also appended as a second `content` item — labeled JSON, `_usage: {…}` — so the agent can read and self-report its own cost. `content[0]` (the tool payload) is never modified.
+
+Like `FRISIAN_MCP_USAGE_REPORTING`, this setting is parsed through the same shared boolean coercion: prefer a real bool, but a **string** value is interpreted as a token — `"on"`/`"true"`/`"yes"`/`"1"` enable; `"off"`/`"false"`/`"no"`/`"0"` and any unrecognized string resolve to **off** — so a config-confused `"false"` can never silently enable the line.
+
+This is a **subordinate** surface: it has no `allow`/`deny` policy of its own and can never turn reporting on. It only chooses *where* usage appears within an already-enabled master decision, so a system-level `deny` (or reporting being off) suppresses **both** the sibling and the in-content line. Per-request override via the `X-Frisian-MCP-Usage-Content` header or `usage_content` query parameter (header wins). `result_tokens` still measures `content[0]` only — the appended line is not counted. See the [Token Usage Reporting](../Guide/token-usage-reporting.md) guide for the interaction matrix, a sample two-block response, and the forward note on MCP `_meta`.
+
+```python
+FRISIAN_MCP_USAGE_IN_CONTENT = True  # also surface a model-visible _usage: {…} content line
 ```
 
 ---

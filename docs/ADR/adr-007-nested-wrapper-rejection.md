@@ -149,7 +149,6 @@ Test cases for T3:
 2. **`contacts__create` with `data: {email, first_name}`** — returns INVALID_PARAMS with message identifying `data`, listing wrapped fields, listing declared fields.
 3. **`contacts__create` with `{"objects": [{...}]}`** — bulk-create proceeds; guard does not fire.
 4. **`dcim__devices` with a declared FK `{"site": {"name": "hq-1"}}`** — FK dict passes; guard does not fire.
-5. **Existing records `6b7e67eb`, `c123f361`, `b1b58efa`** — cleaned up as part of T3 demo DB cleanup.
 
 ---
 

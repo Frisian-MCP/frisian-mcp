@@ -164,6 +164,33 @@ The server routes this to the DRF ViewSet and returns the result.
 
 ---
 
+## Enabling token-usage reporting
+
+If your instance has token-usage reporting enabled, the agent can receive a per-call `_usage` block — and, optionally, a model-visible usage line it can read to self-report its own cost. The opt-in is a **transport-level header or query parameter that the connector sends**. It is **not** a tool argument, and the model cannot turn it on from inside a tool call.
+
+**Header (recommended)** — add it to the connector's `headers`, alongside `Authorization`:
+
+```json
+"headers": {
+  "Authorization": "Bearer <your-token>",
+  "X-Frisian-MCP-Usage": "on",
+  "X-Frisian-MCP-Usage-Content": "on"
+}
+```
+
+**Query parameter** — for OAuth connectors (Claude.ai, ChatGPT, Grok) where you configure only the endpoint URL, append the flags to that URL:
+
+```text
+https://mcp.frisian-mcp.com/mcp/?usage=on&usage_content=on
+```
+
+- `X-Frisian-MCP-Usage: on` / `?usage=on` attaches the caller-side `_usage` block.
+- `X-Frisian-MCP-Usage-Content: on` / `?usage_content=on` **also** appends a model-visible `_usage:` line inside `content`, so the agent can read its own token cost.
+
+> **Do not put `usage` in a tool call's `arguments`.** It is a request-transport flag, not a queryset filter — passing `{"params": {"usage": true}}` (or `usage` anywhere under `arguments`) is forwarded to the ViewSet and rejected as an unknown filter field (`422`). The header or query parameter is the only opt-in path, and it must be sent by the client/connector, not the model. Whether reporting can be enabled at all is still governed by the server's policy — a system-level `deny` suppresses it regardless of what the connector sends. See [Token Usage Reporting](token-usage-reporting.md) for the full contract.
+
+---
+
 ## Troubleshooting
 
 **401 Unauthorized** — The token is missing, expired, or not recognized (an authentication failure). Verify the `Authorization` header is present and the token value is correct. Tokens can be inspected in the Django admin under **Frisian MCP → Tokens**.

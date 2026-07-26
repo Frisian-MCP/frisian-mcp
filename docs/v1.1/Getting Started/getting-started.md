@@ -226,8 +226,8 @@ def search_devices(arguments, request):
 **For auto-discovered ViewSets** — which is what the rest of this guide is about — you usually don't need to decorate anything. Set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` instead: any auto-discovered tool whose response exceeds the byte threshold is auto-wrapped in the same probe envelope, with no per-ViewSet code change required:
 
 ```python
-# settings.py
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000  # bytes
+# settings.py — ships active at 25_000 bytes by default; set a value only to override, or None to disable
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)
 ```
 
 An agent calling a heavy tool — explicit or threshold-wrapped — receives the preview, total size, available modes, and a continuation token. The agent decides whether to paginate, filter, or pull the full payload. The context window is not pre-filled with records the agent may not need.

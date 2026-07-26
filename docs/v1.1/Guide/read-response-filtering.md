@@ -8,7 +8,7 @@
 
 ## What @mcp_heavy Does
 
-`@mcp_heavy` is a decorator applied to ViewSet list actions. It changes the MCP response from a bare result set into a structured metadata envelope, ensuring the agent receives size and pagination information before committing to a full data transfer.
+`@mcp_heavy` is an explicit tool-registration decorator for read/list tools (see [How to Register a Heavy Tool](#how-to-register-a-heavy-tool) below — it is not applied to a ViewSet method). It changes the MCP response from a bare result set into a structured metadata envelope, ensuring the agent receives size and pagination information before committing to a full data transfer.
 
 Without `@mcp_heavy`, a list call returns all matching records in a single response. With `@mcp_heavy`, the first call returns a probe response: total record count, estimated data size, and the first page of results. The agent then decides whether to paginate, refine the filter, or proceed with the data it has received.
 
@@ -119,8 +119,8 @@ The tool is registered at import time and surfaced in `tools/list` with the five
 Most large applications expose their REST surface through auto-discovered `ModelViewSet`s, and you do not want to register every list endpoint by hand. Set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` instead — any auto-discovered tool whose response exceeds the byte threshold is auto-wrapped in the same probe envelope without a per-ViewSet code change:
 
 ```python
-# settings.py
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000  # bytes
+# settings.py — this ships active at 25_000 bytes by default; set a value only to override
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)
 ```
 
 Use `@mcp_heavy` directly when you want **explicit** control — a named heavy tool that surfaces in `tools/list` with a curated input schema, distinct from the auto-discovered ViewSet action.
@@ -129,16 +129,16 @@ Use `@mcp_heavy` directly when you want **explicit** control — a named heavy t
 
 ## Automatic Threshold Negotiation
 
-For large applications where not every ViewSet has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` enables automatic `@mcp_heavy` behavior as a safety net:
+For large applications where not every ViewSet has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` enables automatic `@mcp_heavy` behavior as a safety net. **It ships active with a default of `25000` bytes** — any successful non-write response over the threshold probes first out of the box, with no configuration (high-cardinality lists are the common case, but detail reads and custom tool output are covered too). Override the value to tune, or set it to `None` to disable the backstop entirely:
 
 ```python
-# settings.py
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50000  # bytes
+# settings.py — the default is 25000; set a value only to override, or None to disable
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25000  # bytes (shipped default)
 ```
 
-When a list response would exceed this threshold (in bytes), frisian-mcp applies probe-first behavior automatically even on ViewSets that are not explicitly decorated. The response format is identical to an explicitly decorated ViewSet.
+When **any** successful non-write tool response would exceed this threshold (in bytes), frisian-mcp applies probe-first behavior automatically even for tools and auto-discovered ViewSet actions that are not explicitly registered as heavy. This is not limited to list actions — it covers detail/retrieve reads and any custom `@mcp_tool` output whose serialized JSON is over the threshold. (Writes return their lean confirmation envelope before the backstop, and explicitly registered `@mcp_heavy` tools use their own probe path.) The response format is identical to an explicitly registered `@mcp_heavy` tool. The exact default value and upgrade behavior are documented in the [Installation & Configuration Reference](../Reference/installation-configuration-reference.md#frisian_mcp_auto_negotiate_threshold).
 
-Auto-negotiation is a fallback, not a replacement for explicit annotation. An explicitly decorated ViewSet is always probe-first; auto-negotiation only triggers when the response would be large enough to warrant it. For ViewSets where you know the result will always be large, explicit annotation is clearer and more predictable.
+Auto-negotiation is a fallback, not a replacement for explicit registration. An explicitly registered `@mcp_heavy` tool is always probe-first; auto-negotiation only triggers when the response would be large enough to warrant it. For endpoints you know will always return large results, an explicit `@mcp_heavy` tool is clearer and more predictable.
 
 ---
 
@@ -174,20 +174,20 @@ See [Write-Response Filtering](write-path-response-filtering.md) for the `@mcp_l
 
 ---
 
-## Summary: When to Apply @mcp_heavy
+## Summary: When to Make a Read Heavy
 
-Apply `@mcp_heavy` to any list action where:
+Register a read as an `@mcp_heavy` tool (or rely on the auto-negotiate threshold) when:
 
 - The record count depends on user-supplied filters that could match an unbounded number of records
 - The underlying model has many fields or nested relationships, making individual records large
-- The list endpoint is expected to be called frequently in agent workflows
+- The read is expected to be called frequently in agent workflows
 
-Do not apply `@mcp_heavy` to list actions where:
+Skip an explicit `@mcp_heavy` tool when:
 
 - The result set is bounded by design and will always be small (e.g., a list of status choices, a handful of configuration objects)
 - The endpoint is not intended for agent consumption and is excluded via `@mcp_ignore`
 
-When in doubt, apply it. The probe overhead is one round-trip. The cost of a context window exhausted on a single list call is the entire session.
+When in doubt, make it heavy. The probe overhead is one round-trip. The cost of a context window exhausted on a single read is the entire session.
 
 ---
 

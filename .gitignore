@@ -31,3 +31,8 @@ env/
 # Coverage
 .coverage
 htmlcov/
+
+# MCP registry publishing
+key.pem
+*.pem
+mcp-registry-auth

@@ -744,6 +744,52 @@ class TestHeavyContinuationOwnerBinding:
         result = _tool_result(response)
         assert result == {"ok": True}
 
+    def test_call2_serves_across_session_id_drift(self, rf: RequestFactory) -> None:
+        """TUR-16: a probe minted under one Mcp-Session-Id resumes under a different one.
+
+        The Claude.ai connector mints a fresh session id per tool-call POST, so
+        the probe (write) and redeem (read) legs carry different session
+        headers.  Session is no longer part of the owner key, so the same
+        caller's continuation must still be served.
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        reg = self._isolated_registry_with_heavy("sec3.heavy6", {"ok": True})
+        # Owner key as computed at PROBE time, under session "write".
+        write_req = _build_call_tool_request(rf, "sec3.heavy6", {})
+        write_req.META["HTTP_MCP_SESSION_ID"] = "session-write"
+        owner = _heavy_owner_key(write_req, "sec3.heavy6")
+
+        # REDEEM under a DIFFERENT session id (fresh per-POST session).
+        redeem_req = _post(
+            rf,
+            _jsonrpc(
+                "tools/call",
+                {
+                    "name": "sec3.heavy6",
+                    "arguments": {"continuation_token": "x", "mode": "full"},
+                },
+            ),
+        )
+        redeem_req.user = AnonymousUser()
+        redeem_req.META["HTTP_MCP_SESSION_ID"] = "session-read-different"
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {
+                "result": {"ok": True},
+                "owner_key": owner,
+                "tool_name": "sec3.heavy6",
+            }
+            response = _view(redeem_req)
+
+        # Served despite the session-id drift (pre-TUR-16 this was owner_mismatch).
+        assert _tool_result(response) == {"ok": True}
+
 
 # ---------------------------------------------------------------------------
 # SEC-3 — _heavy_owner_key composition unit probes
@@ -777,16 +823,53 @@ class TestHeavyOwnerKey:
         b = _heavy_owner_key(self._request(rf), "tool.b")
         assert a != b
 
-    def test_session_id_header_appears_in_key(self, rf: RequestFactory) -> None:
-        """A request carrying MCP-Session-ID has the session bound into the key."""
+    def test_session_id_does_not_affect_key(self, rf: RequestFactory) -> None:
+        """TUR-16: Mcp-Session-Id is NOT in the owner key, so it can't gate resume.
+
+        Real MCP clients mint a fresh session id per tool-call POST; binding on
+        it broke legitimate probe->redeem resume.  Two requests differing only
+        in the session header must produce the SAME key (and neither carries a
+        ``session=`` segment).
+        """
         from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
             _heavy_owner_key,
         )
 
-        request = self._request(rf)
-        request.META["HTTP_MCP_SESSION_ID"] = "session-xyz-123"
-        key = _heavy_owner_key(request, "x.list")
-        assert "session=session-xyz-123" in key
+        req_a = self._request(rf)
+        req_a.META["HTTP_MCP_SESSION_ID"] = "session-A"
+        req_b = self._request(rf)
+        req_b.META["HTTP_MCP_SESSION_ID"] = "session-B"
+        key_a = _heavy_owner_key(req_a, "x.list")
+        key_b = _heavy_owner_key(req_b, "x.list")
+        key_none = _heavy_owner_key(self._request(rf), "x.list")
+        assert key_a == key_b == key_none
+        assert "session=" not in key_a
+
+    def test_same_type_different_auth_pk_changes_key(self, rf: RequestFactory) -> None:
+        """Same type+tier+user, different token pk => different key (anti-replay anchor).
+
+        Isolates the credential-pk dimension alone (TUR-16 kept ``auth={type}:{pk}``
+        rather than keying on the OAuth client) so a distinct token issued to the
+        same principal cannot redeem another token's continuation.
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        req_a = self._request(rf)
+        auth_a = MagicMock()
+        auth_a.pk = 7
+        auth_a.permission = "admin"
+        req_a.auth = auth_a
+
+        req_b = self._request(rf)
+        auth_b = MagicMock()
+        auth_b.pk = 8
+        auth_b.permission = "admin"
+        req_b.auth = auth_b
+
+        # Same auth type + tier + (anon) user; only the token pk differs.
+        assert _heavy_owner_key(req_a, "x.list") != _heavy_owner_key(req_b, "x.list")
 
     def test_tier_change_changes_the_key(self, rf: RequestFactory) -> None:
         """A token whose tier later downgrades produces a different owner key."""
