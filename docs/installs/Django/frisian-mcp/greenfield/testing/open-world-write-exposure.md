@@ -38,7 +38,7 @@ See [Security Architecture](../../../../../v1.1/Security/security.md) for the fu
 
 ---
 
-## Test 2: Direct Invocation of Write Tool on Read Path Returns 404
+## Test 2: Direct Invocation of Write Tool on Read Path Returns Tool-Not-Found
 
 **Setup:** From the write-path `tools/list`, take the name of a write tool. Attempt to invoke it via `/mcp/` directly:
 
@@ -54,9 +54,9 @@ See [Security Architecture](../../../../../v1.1/Security/security.md) for the fu
 }
 ```
 
-**Pass condition:** Response is a tool-not-found error (not a permission error). The tool does not exist on this path — the router never registered it here.
+**Pass condition:** Response is a JSON-RPC tool-not-found error — code `-32601` (`Unknown tool`) delivered inside an **HTTP 200** body — not a permission error. The tool does not exist on this path; the router never registered it here.
 
-**Fail condition:** Response is a 403 permission error. This means the write tool IS registered on the read path but blocked by permission class. Path separation has not been achieved — a permission misconfiguration would expose the tool.
+**Fail condition:** Response is a permission error — `isError: true` with an application-level `status_code` of 403. This means the write tool IS registered on the read path but blocked by a permission class. Path separation has not been achieved — a permission misconfiguration would expose the tool.
 
 ---
 
@@ -66,7 +66,7 @@ See [Security Architecture](../../../../../v1.1/Security/security.md) for the fu
 
 **Pass condition:** The error response for a non-existent tool is identical in shape and timing to the response for any other non-existent tool name. No timing side-channel, no schema leakage.
 
-**What to avoid:** A read-path 404 that takes 15ms (route found, permission check ran) vs a truly missing route that takes 2ms tells a probing agent the write route exists. Route separation eliminates this timing signal entirely.
+**What to avoid:** A read-path not-found response that takes 15ms (route found, permission check ran) vs a truly missing route that takes 2ms tells a probing agent the write route exists. Route separation eliminates this timing signal entirely.
 
 ---
 
@@ -93,9 +93,9 @@ This test is most useful as a regression check after deploying path separation f
 | Symptom | Likely cause |
 |---------|-------------|
 | Write tools visible on read path | Single `McpView` instance serving both paths — use separate view instances with separate URL mounts |
-| Write tool returns 403 instead of 404 | Write tool is registered on the read path but permission-gated; path separation is not achieved |
+| Write tool returns a permission error (`status_code` 403) instead of tool-not-found | Write tool is registered on the read path but permission-gated; path separation is not achieved |
 | Admin tools appear in write-path listing | Tools registered with `admin=True` but no separate admin path configured — they default to the main tool registry |
-| Timing difference between 404s | Route lookup cost differs — investigate middleware execution order |
+| Timing difference between not-found responses | Route lookup cost differs — investigate middleware execution order |
 
 ---
 

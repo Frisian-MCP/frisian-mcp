@@ -13,7 +13,7 @@
 This ADR was accepted and shipped in frisian-mcp 1.1.0. Two elements of the original design evolved during implementation:
 
 - **Capability resolution uses `user.has_perm()`, not `user.get_all_permissions()`.** `has_perm` is a strict superset that also honors superuser status, view exemptions (`EXEMPT_VIEW_PERMISSIONS`), and custom auth backends natively — the same predicate the host authorizes with. Consequently the `ExemptViewPermissionAdapter` referenced in §4 and the Nautobot validation table is now a **deprecated no-op**: exemptions are honored without it. Remove `FRISIAN_MCP_PERMISSION_ADAPTER`; nothing replaces it.
-- **The fail-loud OAuth prerequisite (§7) was relaxed to fail-soft.** An OAuth identity that does not resolve to a real Django user is now treated as a **service principal** that bypasses capability filtering, with the permission **tier as the sole gate** — it sees tier-appropriate tools, not an empty list. The `has_perm` short-circuit made the original "empty permission set shows nothing" failure mode moot, so the startup check that enforced §7 (E002) was **retired**. Clients that need per-identity scoping still map to a Django user as in §7; leaving a client unmapped is now a supported configuration, not a startup error.
+- **The fail-loud OAuth prerequisite (§7) was relaxed to fail-soft.** An OAuth identity that does not resolve to a real Django user is now treated as a **service principal** that bypasses capability filtering, with the permission **tier as the sole gate** — it sees tier-appropriate tools, not an empty list. The `has_perm` short-circuit made the original "empty permission set shows nothing" failure mode moot, so the startup check that enforced §7 (E002) was **retired**. Clients that need per-identity scoping still map to a Django user as in §7; leaving a client unmapped is now a supported configuration, not a startup error.  This was done to allow `open-world` read-only paths that otherwise would have been blocked by the system.
 
 ---
 
@@ -92,7 +92,7 @@ A feature that filters discovery against an empty permission set would show **no
 
 ### 8. Opt-in, default off, no migration impact
 
-A single feature flag (default `False`) governs the behavior. Default-off is byte-for-byte today's behavior: existing tokens, tiers, and discovery are unchanged; no migration is introduced; upgrading installs see zero behavior change unless they opt in. Enabling the flag is what introduces the per-identity discovery filter (and, per §7, the resolve-to-real-user precondition).
+A single feature flag (default `False`) governs the behavior. Default-off is byte-for-byte today's behavior: existing tokens, tiers, and discovery are unchanged; no migration is introduced; upgrading installs see zero behavior change unless they opt in. Enabling the flag is what introduces the per-identity discovery filter (per the Amendment, the §7 resolve-to-real-user step applies only to clients mapped to a real user; an unmapped OAuth client is now a supported, tier-gated configuration).
 
 ## Consequences
 
@@ -110,7 +110,7 @@ A single feature flag (default `False`) governs the behavior. Default-off is byt
 
 - **Superuser / exemption caveat (implementation requirement).** A backend may grant access via a path *other* than enumerated permissions — e.g. a superuser with no explicit permissions, or a view-exempt model. `get_capabilities()` alone will under-report these and would wrongly hide tools. Discovery MUST also consult the adapter's `is_unrestricted()` per content-type to match the backend's actual enforcement. Failure to do so makes superusers see an empty surface.
 - **Custom-action mapping is manual.** Non-CRUD tools require correct `backend_action` annotation. A wrong or missing annotation mis-gates the tool (hidden when it shouldn't be, or shown when it shouldn't). Mitigated by defaulting CRUD automatically and surfacing unmapped non-CRUD actions in a startup check.
-- **OAuth prerequisite is operational friction.** Per §7, OAuth deployments must configure the service-user mapping before the feature does anything. This is intentional (fail-loud over fail-open) but is a documentation and onboarding burden; the startup error must name the exact missing setting.
+- **OAuth prerequisite is operational friction.** *Superseded in 1.1.0 — see Amendment: the fail-loud prerequisite was relaxed to fail-soft (E002 retired), so an unmapped OAuth client is now a supported, tier-gated configuration rather than a startup error.* Original decision, retained as design history: per §7, OAuth deployments must configure the service-user mapping before the feature does anything; this was intentional (fail-loud over fail-open) but a documentation and onboarding burden, and the startup error had to name the exact missing setting.
 - **Public contract surface.** `backend_action`, the feature flag name, and the adapter method signatures become public API once shipped. They must be right before release; renaming later is a breaking change.
 
 ### Neutral
@@ -135,5 +135,5 @@ Other backends (default Django `ModelBackend`, custom backends) satisfy the cont
 ## Open items for implementation
 
 1. Final names: the feature flag, the `backend_action` decorator parameter, and the adapter method signatures (these become public contract).
-2. Startup validation: when the flag is on, verify (a) the OAuth identity resolves to a real user where applicable, and (b) every registered non-CRUD dispatcher tool has a `backend_action` mapping; fail loud with actionable errors otherwise.
+2. Startup validation: when the flag is on, verify (a) the OAuth identity resolves to a real user where applicable *(superseded in 1.1.0 — E002 retired; unmapped clients are now supported, so this check was not built)*, and (b) every registered non-CRUD dispatcher tool has a `backend_action` mapping; fail loud with actionable errors otherwise.
 3. Whether `is_unrestricted()` needs a per-action signature (Nautobot's exemption is view-only) or whether per-content-type is sufficient for V1.
