@@ -353,4 +353,4 @@ To delete individual OAuth clients without hitting this issue, use the **Delete*
 
 ## Cross-references
 
-See [verification tests](../../../../../installs/Django/friese-mcp/greenfield/testing/) to confirm the installation is working correctly after setup.
+See [verification tests](../../../../../installs/Django/frisian-mcp/greenfield/testing/) to confirm the installation is working correctly after setup.

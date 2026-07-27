@@ -175,4 +175,4 @@ Then update your MCP client's server URL to `https://your-lms.example.com/api/mc
 
 ## Cross-references
 
-See [verification tests](../../../../../installs/Django/friese-mcp/greenfield/testing/) to confirm the installation is working correctly after setup.
+See [verification tests](../../../../../installs/Django/frisian-mcp/greenfield/testing/) to confirm the installation is working correctly after setup.

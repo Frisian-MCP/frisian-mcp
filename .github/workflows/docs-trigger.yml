@@ -1,0 +1,104 @@
+# Notify frisian-mcp-api to rebuild frisian-mcp.com when these docs change.
+#
+# This is the SENDER half of a two-repo handshake. The receiver already exists:
+#   frisian-mcp-api → .github/workflows/site-deploy.yml
+#     on: repository_dispatch: types: [docs-updated]
+# It checks out this repo's docs/ tree and rebuilds the Astro site → S3 → CloudFront.
+#
+# The two sides must stay in sync: if the `docs-updated` event_type changes here,
+# change it there too.
+#
+# -----------------------------------------------------------------------------
+# REQUIRED SECRET (create by hand in THIS repo):
+#   Settings → Secrets and variables → Actions → New repository secret
+#
+#   Name:  SITE_DEPLOY_DISPATCH_TOKEN
+#   Value: a fine-grained Personal Access Token (or GitHub App installation
+#          token) scoped to ONLY Frisian-MCP/frisian-mcp-api:
+#            • Repository access: Frisian-MCP/frisian-mcp-api (that repo only)
+#            • Permissions → Contents: Read and write  (dispatch requires write)
+#            • Permissions → Metadata: Read-only        (auto-selected)
+#
+#   Why not GITHUB_TOKEN: it is scoped to the repo the workflow runs in and
+#   cannot POST a repository_dispatch to a DIFFERENT repo. Cross-repo dispatch
+#   requires an explicit token. Do not widen this token's scope — it needs
+#   exactly one repo and one permission.
+#
+#   Each additional docs-source repo (e.g. a future npm/Node package) gets its
+#   own copy of this workflow and its OWN dispatch token.
+# -----------------------------------------------------------------------------
+name: Trigger site redeploy on docs change
+
+on:
+  push:
+    branches: [main]
+    # ONLY docs changes rebuild the site. Code-only pushes must not.
+    paths:
+      - 'docs/**'
+  # Manual re-fire from this repo's Actions tab (e.g. after fixing the secret).
+  workflow_dispatch:
+
+# The job authenticates with the PAT above, so the default GITHUB_TOKEN needs
+# no permissions at all. Least privilege: grant nothing.
+permissions: {}
+
+# Rapid successive docs pushes only need the newest site build. Cancelling the
+# older dispatch is safe: the receiver always builds from the current tree.
+concurrency:
+  group: docs-trigger
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify frisian-mcp-api to redeploy the site
+        env:
+          DISPATCH_TOKEN: ${{ secrets.SITE_DEPLOY_DISPATCH_TOKEN }}
+          # Identify exactly which commit triggered this. Sent as client_payload
+          # for traceability in the receiver's logs. NOTE: the receiver currently
+          # resolves its own docs ref (DOCS_SOURCE_REF, production-guarded to
+          # 'main') and does not consume these fields — they are informational
+          # until that guard is revisited on the receiver side.
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISPATCH_TOKEN}" ]; then
+            echo "::error::SITE_DEPLOY_DISPATCH_TOKEN is not set. Create the fine-grained PAT described in this file's header and add it as a repository secret."
+            exit 1
+          fi
+
+          payload=$(jq -n \
+            --arg sha "${SOURCE_SHA}" \
+            --arg ref "${SOURCE_REF}" \
+            '{event_type:"docs-updated",
+              client_payload:{source:"frisian-mcp", ref:$ref, sha:$sha}}')
+
+          # Capture the body separately from the status code. A bare `curl -f`
+          # discards the response body, and the most likely failure here — an
+          # expired or wrongly-scoped PAT — is only diagnosable from that body.
+          http_code=$(curl -sS -o /tmp/dispatch-response.txt -w '%{http_code}' \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/Frisian-MCP/frisian-mcp-api/dispatches \
+            -d "${payload}")
+
+          # A successful repository_dispatch returns 204 No Content.
+          if [ "${http_code}" != "204" ]; then
+            echo "::error::repository_dispatch failed with HTTP ${http_code}."
+            echo "Response body:"
+            cat /tmp/dispatch-response.txt
+            echo ""
+            case "${http_code}" in
+              401) echo "::error::401 — the token is invalid or expired. Regenerate SITE_DEPLOY_DISPATCH_TOKEN." ;;
+              403) echo "::error::403 — the token lacks 'Contents: Read and write' on Frisian-MCP/frisian-mcp-api, or is not scoped to that repo." ;;
+              404) echo "::error::404 — repo not found OR the token cannot see it. A fine-grained PAT with no access to the target repo returns 404, not 403." ;;
+            esac
+            exit 1
+          fi
+
+          echo "Dispatched 'docs-updated' to Frisian-MCP/frisian-mcp-api (sha ${SOURCE_SHA})."
