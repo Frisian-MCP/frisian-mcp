@@ -50,7 +50,7 @@ Both layers must hold independently. A tool with tight permission classes is not
 
 Attempt to invoke the write tool with the read token.
 
-**Pass condition:** 403 response (PermissionError from the tool's `permission_classes`). The write tool does not execute.
+**Pass condition:** The call is denied by the **tier check** — the `read` token's tier is below the tool's `read_write` tier — and the write tool does not execute. On a standard single mount this surfaces as an `isError: true` result (HTTP 200) carrying an application-level `status_code` of 403. The denial is the tier gate, evaluated *before and independently of* the tool's `permission_classes` (the separate check exercised in Test 4) — a write tool with no `permission_classes` set is still blocked here.
 
 ---
 

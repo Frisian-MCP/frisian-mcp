@@ -100,7 +100,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 }
 ```
 
-**Pass condition:** Response is the lean delete confirmation. No serialized object data.
+**Pass condition:** Response is the lean delete confirmation. No serialized object data, and no `data_size` / `continuation_token` (a delete leaves nothing to retrieve). The `status_code` (204) is an application-level field *inside* the MCP result — the HTTP transport response is 200 with a JSON-RPC body, not an HTTP 204.
 
 ---
 
@@ -141,9 +141,9 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 | Symptom | Likely cause |
 |---------|-------------|
 | Full object echoed on create | `verify=True` was set on the call — the lean envelope is the always-on default, and `verify=True` is the documented opt-out that returns the full inline object |
-| `continuation_token` missing | frisian-mcp version does not support continuation on write path |
-| 403 on write tool call | Token is `read` tier — use a `read_write` or `admin` tier token |
-| 404 on write tool call | Write tools are not mounted on this path — expected if using path separation architecture |
+| `continuation_token` missing on create/update | frisian-mcp version does not support continuation on write path (note: deletes omit it by design) |
+| Write tool call denied — `isError`, `status_code` 403 | Token is `read` tier — use a `read_write` or `admin` tier token |
+| Write tool call returns tool-not-found (`-32601`) | Write tools are not mounted on this path — expected if using path separation architecture |
 
 ---
 

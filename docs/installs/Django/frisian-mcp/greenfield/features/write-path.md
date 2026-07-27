@@ -113,7 +113,11 @@ class DeviceSerializer(serializers.ModelSerializer):
 
 Fields listed in `mcp_light_key` appear in every lean envelope for that serializer, in addition to the standard identifying fields.
 
-**Lean field extraction order:** `id` / `pk` → `url` → `name` / `display` → `mcp_light_key` annotated fields → `status_code`, `data_size`, `continuation_token` (always present).
+**Lean field extraction order:** `id` / `pk` → `url` → `name` / `display` → `mcp_light_key` annotated fields → `status_code`, `data_size`, `continuation_token`.
+
+`status_code`, `data_size`, and `continuation_token` are present on **create / update / bulk** write envelopes.
+
+> **Delete is the exception.** A destroy returns a minimal confirmation — `{"deleted": true, "status_code": 204}` — and **omits** `data_size` and `continuation_token`. There is no serialized object left to retrieve, so there is no continuation to offer.
 
 ---
 

@@ -13,11 +13,19 @@
 #   Settings → Secrets and variables → Actions → New repository secret
 #
 #   Name:  SITE_DEPLOY_DISPATCH_TOKEN
-#   Value: a fine-grained Personal Access Token (or GitHub App installation
-#          token) scoped to ONLY Frisian-MCP/frisian-mcp-api:
+#   Value: a fine-grained Personal Access Token scoped to ONLY
+#          Frisian-MCP/frisian-mcp-api:
 #            • Repository access: Frisian-MCP/frisian-mcp-api (that repo only)
 #            • Permissions → Contents: Read and write  (dispatch requires write)
 #            • Permissions → Metadata: Read-only        (auto-selected)
+#
+#   ⚠️ A PAT, NOT a GitHub App installation token. App installation access tokens
+#   expire ONE HOUR after creation, so storing one in this secret works for an
+#   hour and then fails 401 forever — and the 401 diagnostic below would send you
+#   round in circles reissuing a token that expires again just as fast. If you
+#   prefer a GitHub App, do NOT store its token: mint it at runtime from the App's
+#   JWT/installation credentials (e.g. actions/create-github-app-token) and pass
+#   the minted value into the step instead of reading this secret.
 #
 #   Why not GITHUB_TOKEN: it is scoped to the repo the workflow runs in and
 #   cannot POST a repository_dispatch to a DIFFERENT repo. Cross-repo dispatch
@@ -98,7 +106,22 @@ jobs:
           # Capture the body separately from the status code. A bare `curl -f`
           # discards the response body, and the most likely failure here — an
           # expired or wrongly-scoped PAT — is only diagnosable from that body.
+          # Bounded timeouts: without them a stalled GitHub API connection hangs
+          # until the job timeout (hours by default), holding the concurrency
+          # group and delaying the site rebuild for no benefit.
+          #
+          # --retry covers the transient case that actually matters here: a
+          # dropped dispatch means the site silently never rebuilds until someone
+          # pushes docs again. curl retries only connection errors and 5xx, never
+          # a 4xx — so a bad token still fails fast instead of being retried. A
+          # duplicate dispatch from a retried 5xx is harmless: the receiver
+          # serialises on its own concurrency group and always builds current main.
           http_code=$(curl -sS -o /tmp/dispatch-response.txt -w '%{http_code}' \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 5 \
+            --retry-connrefused \
             -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${DISPATCH_TOKEN}" \

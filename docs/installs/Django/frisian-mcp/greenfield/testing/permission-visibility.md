@@ -98,7 +98,7 @@ Tier ranks: `read (0) < read_write (1) < admin (2)`
 | Admin tools visible to read token | `permission_tier` not set on `@mcp_tool` call — defaults to `read` |
 | Write tools missing from rw-token listing | Tool registered with `admin=True` accidentally |
 | Dispatcher tool missing from any listing | Dispatcher incorrectly registered with `permission_tier` other than `read` |
-| Cross-tier invocation succeeds | `permission_classes` not set on the tool — access control falls through to tool handler |
+| Cross-tier invocation succeeds | Tool registered at the wrong `permission_tier` — e.g. a write operation without `write=True` defaults to `read`, so a read token can invoke it. Tier enforcement runs independently of `permission_classes`, so a missing `permission_classes` never causes this. |
 
 ---
 
