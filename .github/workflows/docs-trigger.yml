@@ -42,8 +42,27 @@ on:
 # no permissions at all. Least privilege: grant nothing.
 permissions: {}
 
-# Rapid successive docs pushes only need the newest site build. Cancelling the
-# older dispatch is safe: the receiver always builds from the current tree.
+# De-duplicates rapid successive docs pushes into a single dispatch. Scope note,
+# so this is not mistaken for deployment-ordering protection: cancelling a job
+# HERE cannot cancel a dispatch that already reached frisian-mcp-api — once the
+# receiver run starts it is independent of this workflow. The job is a single
+# curl, so the cancellable window is ~seconds; this saves a redundant dispatch,
+# nothing more.
+#
+# Deploy ordering is guaranteed on the RECEIVER side, by two properties of
+# frisian-mcp-api/.github/workflows/site-deploy.yml:
+#   1. `concurrency: {group: site-deploy, cancel-in-progress: false}` serialises
+#      site deploys — two builds cannot overlap or interleave their S3 syncs.
+#   2. It checks out DOCS_SOURCE_REF (production-guarded to `main`), NOT the sha
+#      from client_payload — so every build reads main AT ITS OWN RUNTIME. The
+#      last build to run therefore publishes current content by construction; a
+#      late-finishing build cannot republish a stale tree.
+#
+# ⚠️ Property 2 is why client_payload.sha is informational only. Making the
+# receiver deploy the dispatched sha would REMOVE this guarantee: a queued build
+# would then pin an older commit and could overwrite a newer site. If that change
+# is ever made, the receiver must add its own freshness check (e.g. skip when the
+# payload sha is not an ancestor of current main).
 concurrency:
   group: docs-trigger
   cancel-in-progress: true
