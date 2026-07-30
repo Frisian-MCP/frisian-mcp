@@ -49,7 +49,7 @@ frisian-mcp applies `@mcp_light` write-path filtering by default: create, update
 }
 ```
 
-**Pass condition:** Response contains `id`, `status_code`, `data_size`, and `continuation_token`. Response does NOT contain nested serialized fields beyond those listed.
+**Pass condition:** Response contains the invariant fields `id` (or `pk`), `status_code`, `data_size`, and `continuation_token`, and does NOT contain nested serialized fields beyond those listed. `url` and `name` / `display` are **conditional** — they appear only when the serializer exposes them, so treat them as optional rather than asserting on them.
 
 **Fail condition:** Response contains the full DRF-serialized object (all fields echoed back). This indicates write-path filtering is not applied.
 

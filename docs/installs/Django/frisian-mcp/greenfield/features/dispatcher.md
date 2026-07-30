@@ -92,15 +92,22 @@ class OrdersDispatcher:
 
     @mcp_action(
         name="list",
-        description="List orders, optionally filtered by status.",
-        params={"status": "open | paid | shipped | cancelled"},
+        description="List orders, optionally filtered by status and date_from.",
+        params={
+            "status": "open | paid | shipped | cancelled",
+            "date_from": "ISO 8601 date — return orders on or after this date",
+            "limit": "Maximum number of results (default 20)",
+        },
     )
     def list_orders(self, arguments: dict, request: HttpRequest) -> list:
         from myapp.models import Order
         qs = Order.objects.all()
         if status := arguments.get("status"):
             qs = qs.filter(status=status)
-        return list(qs.values("id", "status", "total", "created_at")[:50])
+        if date_from := arguments.get("date_from"):
+            qs = qs.filter(created_at__gte=date_from)
+        limit = int(arguments.get("limit", 20))
+        return list(qs.values("id", "status", "total", "created_at")[:limit])
 
     @mcp_action(
         name="retrieve",

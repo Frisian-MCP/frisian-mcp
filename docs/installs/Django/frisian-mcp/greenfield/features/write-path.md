@@ -88,11 +88,13 @@ The `verify` parameter is injected automatically into every write tool's input s
 }
 ```
 
+The object above is the **`arguments`** payload for the tool call — `verify` rides alongside the tool's normal arguments. For a dispatcher tool it is nested under `params.arguments` in the full JSON-RPC envelope: `{"method": "tools/call", "params": {"name": "<dispatcher>", "arguments": { … }}}`.
+
 ---
 
 ## Continuation token — retrieve full object without re-executing the write
 
-The `continuation_token` in the lean envelope reuses the `@mcp_heavy` cache infrastructure. Pass it to the heavy-fetch path with `mode=full` to retrieve the complete serialized object. The write is not re-run.
+The `continuation_token` in the lean envelope reuses the `@mcp_heavy` cache infrastructure. Pass it back to retrieve the complete serialized object; `mode` defaults to `full` when a `continuation_token` is present, so `mode=full` is optional but may be sent explicitly. The write is not re-run.
 
 ---
 

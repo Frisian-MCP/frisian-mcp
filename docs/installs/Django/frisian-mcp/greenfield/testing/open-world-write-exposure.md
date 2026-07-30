@@ -30,11 +30,11 @@ See [Security Architecture](../../../../../v1.1/Security/security.md) for the fu
 
 ## Test 1: Read Path `tools/list` Contains No Write Tools
 
-**Setup:** Call `/mcp/tools/list` with a read-tier token (or no token if the path is public).
+**Setup:** POST a JSON-RPC `tools/list` request to `/mcp` with a read-tier token (or no token if the path is public).
 
 **Pass condition:** Response contains no tools with write or admin semantics. Create, update, destroy tools are absent.
 
-**How to verify:** Cross-check the listing against `/mcp-write/tools/list` (with an authorized write token). Tools present on the write path but absent on the read path confirm correct separation.
+**How to verify:** Cross-check the listing against a `tools/list` POST to `/mcp-write/` (with an authorized write token). Tools present on the write path but absent on the read path confirm correct separation.
 
 ---
 

@@ -1033,10 +1033,11 @@ class TestIssue53AcceptanceMatrix:
             }
             response = _view(redeem_req)
 
-        data = _response_data(response)
-        assert (
-            data["result"].get("isError") is not True
-        ), f"mode={mode!r} was refused despite session-id drift being the only change"
+        result = _tool_result(response)
+        assert "error" not in result, (
+            f"mode={mode!r} was refused despite session-id drift being the only change: "
+            f"{result.get('error')!r}"
+        )
 
     def test_anonymous_open_route_round_trip_survives_session_drift(
         self, rf: RequestFactory
