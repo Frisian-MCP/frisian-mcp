@@ -899,11 +899,13 @@ class TestHeavyOwnerKey:
 
 class TestIssue53AcceptanceMatrix:
     """
-    End-to-end coverage of the Issue 53 / TUR-16 acceptance criteria, gap-filling
-    what :class:`TestHeavyContinuationOwnerBinding` and :class:`TestHeavyOwnerKey`
-    exercise at the unit level: every ``available_modes`` entry redeeming through
-    the real ``McpView`` dispatch, and an explicit DENY per replay dimension
-    (credential, user, tier) rather than only the generic mismatch case.
+    End-to-end coverage of the Issue 53 / TUR-16 acceptance criteria.
+
+    Gap-fills what :class:`TestHeavyContinuationOwnerBinding` and
+    :class:`TestHeavyOwnerKey` exercise at the unit level: every
+    ``available_modes`` entry redeeming through the real ``McpView``
+    dispatch, and an explicit DENY per replay dimension (credential, user,
+    tier) rather than only the generic mismatch case.
     """
 
     @staticmethod
@@ -1121,10 +1123,10 @@ class TestIssue53AcceptanceMatrix:
             FrisianMcpToken,
         )
 
-        User = get_user_model()  # pylint: disable=invalid-name
+        user_model = get_user_model()
         self._configure_token_auth(settings)
-        user_a = User.objects.create_user(username="matrix-user-a")
-        user_b = User.objects.create_user(username="matrix-user-b")
+        user_a = user_model.objects.create_user(username="matrix-user-a")
+        user_b = user_model.objects.create_user(username="matrix-user-b")
         token_a = FrisianMcpToken.objects.create(name="a", user=user_a, permission="read")
         token_b = FrisianMcpToken.objects.create(name="b", user=user_b, permission="read")
 
@@ -1159,9 +1161,9 @@ class TestIssue53AcceptanceMatrix:
             FrisianMcpToken,
         )
 
-        User = get_user_model()  # pylint: disable=invalid-name
+        user_model = get_user_model()
         self._configure_token_auth(settings)
-        user = User.objects.create_user(username="matrix-cred-user")
+        user = user_model.objects.create_user(username="matrix-cred-user")
         token_a = FrisianMcpToken.objects.create(name="a", user=user, permission="admin")
         token_b = FrisianMcpToken.objects.create(name="b", user=user, permission="admin")
 
@@ -1197,9 +1199,9 @@ class TestIssue53AcceptanceMatrix:
             FrisianMcpToken,
         )
 
-        User = get_user_model()  # pylint: disable=invalid-name
+        user_model = get_user_model()
         self._configure_token_auth(settings)
-        user = User.objects.create_user(username="matrix-tier-user")
+        user = user_model.objects.create_user(username="matrix-tier-user")
         token = FrisianMcpToken.objects.create(name="t", user=user, permission="read_write")
 
         stored = {"secret": True}
