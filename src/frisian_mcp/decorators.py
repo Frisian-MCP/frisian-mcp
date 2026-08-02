@@ -237,13 +237,23 @@ _NEGOTIATION_PROPERTIES: dict[str, Any] = {
     "continuation_token": {
         "type": "string",
         "description": (
-            "Token from a prior probe call. Supply with 'mode' to fetch the full response."
+            "Token from a prior probe call, used to fetch the cached result."
+            " Place at the TOP LEVEL of arguments, as a sibling of 'action' and"
+            " 'params' — NOT inside 'params'. Supply 'mode' alongside it to choose"
+            " how much of the response to retrieve; omitting 'mode' returns the"
+            " COMPLETE dataset, which for a large result may be very expensive."
         ),
     },
     "mode": {
         "type": "string",
         "enum": ["summary", "paginated", "filtered", "full"],
-        "description": "Response mode for the continuation call.",
+        "description": (
+            "How much of the cached result to return on a continuation call."
+            " Only meaningful when sent together with 'continuation_token', and"
+            " must sit at the TOP LEVEL alongside it — not inside 'params'."
+            " Omitting it defaults to 'full' (the complete dataset); use"
+            " 'summary' or 'paginated' to bound the response size."
+        ),
     },
     "page": {
         "type": "integer",
@@ -260,6 +270,18 @@ _NEGOTIATION_PROPERTIES: dict[str, Any] = {
         "description": "Top-level keys to retain in 'filtered' mode.",
     },
 }
+
+#: The protocol key that is *never* a legitimate action parameter, so the
+#: dispatcher can recognise it unambiguously wherever it appears (T6).
+#:
+#: Only ``continuation_token`` qualifies.  The other four negotiation fields
+#: collide with real host data: ``mode`` is a genuine model field on Nautobot's
+#: ``dcim.Interface``, and ``page``/``page_size`` are DRF's own
+#: ``PageNumberPagination`` query parameters.  Those four are protocol fields
+#: only *in the context of a continuation call* — i.e. when accompanied by a
+#: ``continuation_token`` — and must otherwise be passed through to the action
+#: untouched.  See ``_make_dispatcher_invoke``.
+NEGOTIATION_PROTOCOL_ONLY_KEY = "continuation_token"
 
 
 def _merge_negotiation_schema(base: dict[str, Any]) -> dict[str, Any]:

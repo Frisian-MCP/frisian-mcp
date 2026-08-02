@@ -13,6 +13,7 @@ import jsonschema
 import jsonschema.exceptions
 from django.http import HttpRequest
 
+from frisian_mcp.decorators import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
 from frisian_mcp.registry import ToolInputError
 
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
@@ -100,8 +101,12 @@ def _build_dispatcher_input_schema(
         f"{name}: {{{', '.join(entry.params.keys())}}}" if entry.params else f"{name}: (no params)"
         for name, entry in visible.items()
     )
-    params_description = f"Action-specific parameters. {param_hints}."
-    return {
+    params_description = (
+        f"Action-specific parameters. {param_hints}."
+        " Response-negotiation fields (continuation_token, mode, ...) do NOT go"
+        " here — they are top-level siblings of 'action' and 'params'."
+    )
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "action": {
@@ -119,6 +124,12 @@ def _build_dispatcher_input_schema(
             },
         },
     }
+    # ADR-005 line 73 requires the negotiation protocol to be disclosed in the
+    # generated schema.  Until T6 this was applied on the @mcp_heavy path only,
+    # so dispatcher tools — and the FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD
+    # backstop, which reads this same schema — advertised `available_modes` in
+    # the probe envelope while never telling the agent where to put the fields.
+    return _merge_negotiation_schema(schema)
 
 
 def _build_help_response(
@@ -210,6 +221,36 @@ def _build_perm_action_filter_from_request(
     return action_filter
 
 
+def _reject_misplaced_continuation_token(arguments: dict[str, Any]) -> None:
+    """
+    Raise when ``continuation_token`` is nested inside ``params`` (T6).
+
+    ``params`` is by ADR-002 the action-specific passthrough to the underlying
+    ViewSet, so a token placed there is forwarded to the filterset, which
+    correctly rejects it as an unknown filter field.  That error is accurate but
+    useless: it tells the agent the key is not a filter, never that the key is
+    real and simply in the wrong place.  Since the response-negotiation protocol
+    is the only teaching surface an agent has mid-negotiation, name the correct
+    placement explicitly instead.
+
+    Only ``continuation_token`` is checked.  It is the one negotiation field that
+    can never be a legitimate filter, so misplacement is unambiguous.  ``mode``,
+    ``page``, ``page_size`` and ``filter_keys`` all collide with real host data
+    and are left alone — see :data:`~frisian_mcp.decorators.NEGOTIATION_PROTOCOL_ONLY_KEY`.
+    """
+    nested = arguments.get("params")
+    if isinstance(nested, dict) and NEGOTIATION_PROTOCOL_ONLY_KEY in nested:
+        raise ToolInputError(
+            f"{NEGOTIATION_PROTOCOL_ONLY_KEY!r} was sent inside 'params', where it is"
+            " treated as an action filter and rejected. It is a response-negotiation"
+            " field and belongs at the TOP LEVEL of arguments, as a sibling of"
+            " 'action' and 'params'. Re-send as"
+            " {'action': ..., 'continuation_token': ...,"
+            " 'mode': 'summary'|'paginated'|'filtered'|'full'}."
+            " Omitting 'mode' returns the complete dataset."
+        )
+
+
 def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., dict[str, Any]]:
     """Build the invoke callable for *cls*, closing over *meta*."""
     instance = cls()
@@ -217,11 +258,20 @@ def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., di
 
     def invoke(arguments: dict[str, Any], request: HttpRequest) -> dict[str, Any]:
         action: str | None = arguments.get("action")
+        _reject_misplaced_continuation_token(arguments)
         # Accept both nested {action, params: {...}} and flat {action, key: val} forms.
         # Schema-driven agents (GPT function-calling) pass args flat; reasoning agents
         # use the params wrapper. Fall back to flat when params is absent or empty.
+        #
+        # continuation_token is excluded from the flat sweep because it is never a
+        # legitimate action parameter (T6).  In practice views.py short-circuits a
+        # top-level continuation_token before dispatch, so this is belt-and-braces —
+        # but it keeps the flat form from ever reclassifying a protocol key as a
+        # filter.  The other negotiation fields are deliberately NOT excluded: they
+        # collide with real host data (Nautobot's dcim.Interface.mode; DRF's
+        # page/page_size) and must pass through to the action untouched.
         params: dict[str, Any] = arguments.get("params") or {
-            k: v for k, v in arguments.items() if k != "action"
+            k: v for k, v in arguments.items() if k not in ("action", NEGOTIATION_PROTOCOL_ONLY_KEY)
         }
 
         if action is None or action == "help":

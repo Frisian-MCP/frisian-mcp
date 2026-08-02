@@ -669,3 +669,108 @@ class TestDispatcherCappedAbsence:
             # so the bogus action is a schema error before invoke — unchanged
             # legacy shape.
             tiered_registry.dispatch(request, "jobs", {"action": "zzznope", "params": {}})
+
+
+# ---------------------------------------------------------------------------
+# TestNegotiationFieldContract (T6)
+# ---------------------------------------------------------------------------
+
+
+class TestNegotiationFieldContract:
+    """
+    The response-negotiation protocol must be discoverable on the dispatcher path.
+
+    ADR-005 line 73 requires the protocol to be disclosed in the generated
+    schema, but ``_merge_negotiation_schema`` was previously applied only on the
+    ``@mcp_heavy`` path.  Dispatcher tools — and the
+    ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` backstop, which reads the same
+    schema — advertised ``available_modes`` in the probe envelope while never
+    telling the agent where to put the fields.  All four modes were in fact
+    reachable; only their placement was undiscoverable.
+    """
+
+    def test_schema_declares_all_five_negotiation_fields(
+        self, isolated_registry: ToolRegistry
+    ) -> None:
+        """The dispatcher inputSchema declares the negotiation protocol."""
+        entry = isolated_registry.get_entry("tasks")
+        assert entry is not None
+        props = entry.input_schema["properties"]
+        for field in ("continuation_token", "mode", "page", "page_size", "filter_keys"):
+            assert field in props, f"{field!r} undisclosed on the dispatcher path"
+
+    def test_schema_keeps_action_and_params(self, isolated_registry: ToolRegistry) -> None:
+        """Disclosure is additive — the dispatcher contract is unchanged."""
+        props = isolated_registry.get_entry("tasks").input_schema["properties"]
+        assert set(props["action"]["enum"]) == {"create", "list", "delete"}
+        assert props["params"]["additionalProperties"] is True
+
+    def test_mode_enum_is_disclosed(self, isolated_registry: ToolRegistry) -> None:
+        """The agent can read the valid modes off the schema, not just the envelope."""
+        props = isolated_registry.get_entry("tasks").input_schema["properties"]
+        assert set(props["mode"]["enum"]) == {"summary", "paginated", "filtered", "full"}
+
+    def test_params_description_warns_off_nesting(self, isolated_registry: ToolRegistry) -> None:
+        """``params``' own description tells the agent the protocol fields go elsewhere."""
+        props = isolated_registry.get_entry("tasks").input_schema["properties"]
+        assert "top-level" in props["params"]["description"].lower()
+
+    def test_continuation_token_in_params_names_correct_placement(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """
+        A token nested in ``params`` raises an error that teaches the fix.
+
+        Previously it was forwarded to the ViewSet, where the filterset correctly
+        rejected it as an unknown filter field — accurate but useless, because it
+        never revealed that the key was real and merely misplaced.
+        """
+        request = rf.post("/mcp/", content_type="application/json")
+        request.auth = None
+        with pytest.raises(ToolInputError) as excinfo:
+            isolated_registry.dispatch(
+                request,
+                "tasks",
+                {"action": "list", "params": {"continuation_token": "abc123"}},
+            )
+        msg = str(excinfo.value)
+        assert "TOP LEVEL" in msg
+        assert "continuation_token" in msg
+        # Distinguishable from a genuine unknown-filter rejection.
+        assert "filter" in msg.lower()
+
+    def test_flat_form_still_sweeps_ordinary_params(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """
+        REGRESSION GUARD: the flat argument form must keep working.
+
+        ``{action, key: val}`` exists deliberately for schema-driven agents (GPT
+        function-calling) that cannot nest.  T6 narrows this sweep, so this is the
+        highest-risk regression in the change — breaking it would trade a
+        documented annoyance for a silent client incompatibility.
+        """
+        request = rf.post("/mcp/", content_type="application/json")
+        request.auth = None
+        result = isolated_registry.dispatch(
+            request, "tasks", {"action": "create", "title": "flat-form task"}
+        )
+        assert result == {"created": "flat-form task"}
+
+    def test_colliding_field_names_still_reach_the_action(
+        self, isolated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """
+        ``mode``/``page``/``page_size`` are NOT reserved — they collide with real data.
+
+        ``mode`` is a genuine model field on at least one real host application,
+        and ``page``/``page_size`` are DRF ``PageNumberPagination`` query
+        parameters, so treating them as protocol-only would break legitimate
+        filtering and pagination.  Only ``continuation_token`` is unambiguous.
+        """
+        request = rf.post("/mcp/", content_type="application/json")
+        request.auth = None
+        result = isolated_registry.dispatch(
+            request, "tasks", {"action": "delete", "params": {"id": "7", "mode": "access"}}
+        )
+        assert result == {"deleted": "7"}

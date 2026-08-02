@@ -205,7 +205,31 @@ class TestBuildProbeEnvelope:
     def test_structure(self) -> None:
         """Probe envelope has all required fields."""
         env = _build_probe_envelope({"key": "value"}, "tok123")
-        assert set(env.keys()) == {"preview", "total_size", "available_modes", "continuation_token"}
+        assert set(env.keys()) == {
+            "preview",
+            "total_size",
+            "available_modes",
+            "continuation_token",
+            "usage",
+        }
+
+    def test_usage_discloses_placement_and_cost_of_omitting_mode(self) -> None:
+        """
+        T6: the envelope that advertises the modes must also teach their placement.
+
+        An agent mid-negotiation is not re-reading ``tools/list``, so advertising
+        ``available_modes`` without saying where the fields go is what made all
+        four modes look unreachable.  The envelope must also state that omitting
+        ``mode`` returns the complete dataset — since (Jeremy's ruling) ``full``
+        remains reachable by omission, disclosure is the only guardrail left.
+        """
+        env = _build_probe_envelope({"key": "value" * 100}, "tok123")
+        usage = env["usage"]
+        assert "TOP LEVEL" in usage
+        assert "'params'" in usage
+        assert "COMPLETE" in usage
+        # The concrete byte cost of the full response is named, not just implied.
+        assert str(env["total_size"]) in usage
 
     def test_continuation_token(self) -> None:
         """Probe envelope contains the supplied token."""

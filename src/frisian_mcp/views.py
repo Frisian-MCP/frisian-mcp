@@ -336,6 +336,17 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
         "total_size": len(serialized.encode()),
         "available_modes": ["summary", "paginated", "filtered", "full"],
         "continuation_token": token,
+        # T6: an agent mid-negotiation is not re-reading tools/list, so the
+        # envelope that advertises the modes must also say where the fields go
+        # and what omitting `mode` costs.  Advertising reachable modes without
+        # disclosing their placement is what made all four look unreachable.
+        "usage": (
+            "Re-invoke this same tool with 'continuation_token' and 'mode' at the"
+            " TOP LEVEL of arguments (siblings of 'action'/'params', never inside"
+            " 'params'). Omitting 'mode' returns the COMPLETE dataset"
+            f" ({len(serialized.encode())} bytes); use 'summary' or 'paginated'"
+            " to bound the response."
+        ),
     }
 
 
