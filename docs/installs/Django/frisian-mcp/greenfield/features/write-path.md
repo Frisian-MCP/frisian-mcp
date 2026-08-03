@@ -77,18 +77,37 @@ Read and list operations are unaffected.
 
 ## `verify=True` — per-call full-object override
 
-The `verify` parameter is injected automatically into every write tool's input schema. Passing `verify=True` on a specific call returns the full serialized object directly — no caching, no second call:
+The `verify` parameter is injected automatically into every **flat write tool's** input schema. Passing `verify=True` on a specific call returns the full serialized object directly — no caching, no second call:
+
+```json
+{
+  "name": "edge-01",
+  "site": "hq-1",
+  "verify": true
+}
+```
+
+The object above is the **`arguments`** payload for the tool call — `verify` is a field of the flat write tool and rides alongside that tool's own arguments. In the full JSON-RPC envelope:
+
+```json
+{"method": "tools/call", "params": {"name": "device_create", "arguments": { … }}}
+```
+
+### Writing through a dispatcher
+
+`resource` and `action` are keys of the **dispatcher's** schema, not of the individual flat write tool. When you write through a group dispatcher, the underlying tool's own arguments live under `params` — and `verify` belongs **inside `params`** with them:
 
 ```json
 {
   "resource": "device",
   "action": "create",
-  "params": { "name": "edge-01", "site": "hq-1" },
-  "verify": true
+  "params": { "name": "edge-01", "site": "hq-1", "verify": true }
 }
 ```
 
-The object above is the **`arguments`** payload for the tool call — `verify` rides alongside the tool's normal arguments. For a dispatcher tool it is nested under `params.arguments` in the full JSON-RPC envelope: `{"method": "tools/call", "params": {"name": "<dispatcher>", "arguments": { … }}}`.
+> ⚠️ **On a dispatcher call, `verify` at the top level is silently ignored.** Placed as a sibling of `params`, it is dropped: the call succeeds and returns the lean envelope, byte-identical to a call that never sent `verify` at all. No error is raised. The same applies to the flat form (`{"resource": …, "action": …, "name": "edge-01", "verify": true}`). Put `verify` inside `params`.
+
+`verify` is not honoured on `@mcp_dispatcher` class-based dispatchers in either position — those return the action's own result directly, so no lean envelope is applied and no override is needed. Note that a `verify` key left inside `params` on that path is forwarded to the action rather than stripped, so omit it there.
 
 ---
 
