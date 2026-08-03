@@ -17,6 +17,8 @@ from django.http import HttpRequest
 from django.utils.module_loading import import_string
 from rest_framework.permissions import BasePermission
 
+from frisian_mcp.negotiation import _NEGOTIATION_PROPERTIES
+
 logger = logging.getLogger(__name__)
 
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
@@ -199,11 +201,6 @@ def _without_negotiation_constraints(schema: dict[str, Any]) -> dict[str, Any]:
     The names are derived from ``_NEGOTIATION_PROPERTIES`` rather than restated,
     because a hardcoded copy silently drifts out of sync with the schema.
     """
-    # Local import: decorators imports this module at load time.
-    from frisian_mcp.decorators import (  # pylint: disable=import-outside-toplevel
-        _NEGOTIATION_PROPERTIES,
-    )
-
     props = schema.get("properties", {})
     stripped = {k: v for k, v in props.items() if k not in _NEGOTIATION_PROPERTIES}
     if len(stripped) == len(props):

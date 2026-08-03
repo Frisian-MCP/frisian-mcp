@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 from rest_framework.permissions import BasePermission
 
+from frisian_mcp.negotiation import _merge_negotiation_schema
 from frisian_mcp.registry import tool_registry
 from frisian_mcp.resources import ResourceDefinition, resource_registry
 
@@ -231,74 +232,6 @@ def mcp_resource(
         return fn
 
     return decorator
-
-
-_NEGOTIATION_PROPERTIES: dict[str, Any] = {
-    "continuation_token": {
-        "type": "string",
-        "description": (
-            "Token from a prior probe call, used to fetch the cached result."
-            " Place at the TOP LEVEL of arguments, as a sibling of 'action' and"
-            " 'params' — NOT inside 'params'. Supply 'mode' alongside it to choose"
-            " how much of the response to retrieve; omitting 'mode' returns the"
-            " COMPLETE dataset, which for a large result may be very expensive."
-        ),
-    },
-    "mode": {
-        "type": "string",
-        "enum": ["summary", "paginated", "filtered", "full"],
-        "description": (
-            "How much of the cached result to return on a continuation call."
-            " Only meaningful when sent together with 'continuation_token', and"
-            " must sit at the TOP LEVEL alongside it — not inside 'params'."
-            " Omitting it defaults to 'full' (the complete dataset); use"
-            " 'summary' or 'paginated' to bound the response size."
-        ),
-    },
-    "page": {
-        "type": "integer",
-        "description": "Page number (1-based) for 'paginated' mode. Default: 1.",
-        "default": 1,
-    },
-    "page_size": {
-        "type": "integer",
-        "description": "Items per page for 'paginated' mode. Defaults to FRISIAN_MCP_HEAVY_PAGE_SIZE.",  # noqa: E501  # pylint: disable=line-too-long
-    },
-    "filter_keys": {
-        "type": "array",
-        "items": {"type": "string"},
-        "description": "Top-level keys to retain in 'filtered' mode.",
-    },
-}
-
-#: The protocol key that is *never* a legitimate action parameter, so the
-#: dispatcher can recognise it unambiguously wherever it appears (T6).
-#:
-#: Only ``continuation_token`` qualifies.  The other four negotiation fields
-#: collide with real host data: ``mode`` is a genuine model field on Nautobot's
-#: ``dcim.Interface``, and ``page``/``page_size`` are DRF's own
-#: ``PageNumberPagination`` query parameters.  Those four are protocol fields
-#: only *in the context of a continuation call* — i.e. when accompanied by a
-#: ``continuation_token`` — and must otherwise be passed through to the action
-#: untouched.  See ``_make_dispatcher_invoke``.
-NEGOTIATION_PROTOCOL_ONLY_KEY = "continuation_token"
-
-
-def _merge_negotiation_schema(base: dict[str, Any]) -> dict[str, Any]:
-    """
-    Merge the response-negotiation protocol fields into *base* input schema.
-
-    Only modifies schemas with ``"type": "object"``; returns *base* unchanged
-    otherwise.  Removes ``"additionalProperties": false`` if present, since the
-    merged negotiation fields would violate it.
-    """
-    if base.get("type") != "object":
-        return base
-    merged: dict[str, Any] = {**base}
-    merged["properties"] = {**base.get("properties", {}), **_NEGOTIATION_PROPERTIES}
-    if merged.get("additionalProperties") is False:
-        del merged["additionalProperties"]
-    return merged
 
 
 def mcp_heavy(

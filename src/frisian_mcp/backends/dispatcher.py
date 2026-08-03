@@ -13,7 +13,7 @@ import jsonschema
 import jsonschema.exceptions
 from django.http import HttpRequest
 
-from frisian_mcp.decorators import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
+from frisian_mcp.negotiation import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
 from frisian_mcp.registry import ToolInputError
 
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
@@ -239,7 +239,7 @@ def _reject_misplaced_continuation_token(arguments: dict[str, Any]) -> None:
     Only ``continuation_token`` is checked.  It is the one negotiation field that
     can never be a legitimate filter, so misplacement is unambiguous.  ``mode``,
     ``page``, ``page_size`` and ``filter_keys`` all collide with real host data
-    and are left alone — see :data:`~frisian_mcp.decorators.NEGOTIATION_PROTOCOL_ONLY_KEY`.
+    and are left alone — see :data:`~frisian_mcp.negotiation.NEGOTIATION_PROTOCOL_ONLY_KEY`.
     """
     nested = arguments.get("params")
     if isinstance(nested, dict) and NEGOTIATION_PROTOCOL_ONLY_KEY in nested:
