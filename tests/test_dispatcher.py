@@ -710,10 +710,28 @@ class TestNegotiationFieldContract:
         props = isolated_registry.get_entry("tasks").input_schema["properties"]
         assert set(props["mode"]["enum"]) == {"summary", "paginated", "filtered", "full"}
 
-    def test_params_description_warns_off_nesting(self, isolated_registry: ToolRegistry) -> None:
-        """``params``' own description tells the agent the protocol fields go elsewhere."""
-        props = isolated_registry.get_entry("tasks").input_schema["properties"]
-        assert "top-level" in props["params"]["description"].lower()
+    def test_params_description_qualifies_the_placement_rule(
+        self, isolated_registry: ToolRegistry
+    ) -> None:
+        """
+        ``params``' description must state the rule as the code actually implements it.
+
+        An unqualified "negotiation fields never go in params" would contradict
+        the dispatcher, which deliberately preserves ``mode``/``page``/
+        ``page_size``/``filter_keys`` as action parameters because they collide
+        with real host data.  Worse, an agent that followed the unqualified rule
+        while also sending a non-empty ``params`` would have its top-level copy
+        silently dropped — the flat sweep only runs when ``params`` is absent
+        or empty.  Only ``continuation_token`` is unconditionally top-level.
+        """
+        description = isolated_registry.get_entry("tasks").input_schema["properties"]["params"][
+            "description"
+        ]
+        assert "continuation_token" in description
+        # The qualifier is the load-bearing part — assert it, not just "top-level".
+        assert "continuation call" in description.lower()
+        for field in ("mode", "page", "page_size", "filter_keys"):
+            assert field in description
 
     def test_continuation_token_in_params_names_correct_placement(
         self, isolated_registry: ToolRegistry, rf: RequestFactory
@@ -767,10 +785,35 @@ class TestNegotiationFieldContract:
         and ``page``/``page_size`` are DRF ``PageNumberPagination`` query
         parameters, so treating them as protocol-only would break legitimate
         filtering and pagination.  Only ``continuation_token`` is unambiguous.
+
+        Asserted by echoing ``params`` back, not by checking an unrelated return
+        value: an action that ignores ``mode`` would satisfy the latter whether
+        or not the dispatcher stripped it, so the test would pass for the wrong
+        reason.
         """
+        reg = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("echoes", description="Echo dispatcher.")
+            class EchoDispatcher:
+                """Returns whatever params it was handed."""
+
+                @mcp_action("show", description="Echo params.", params={})
+                def show(self, request: Any, params: dict[str, Any]) -> dict[str, Any]:
+                    """Echo the params dict verbatim."""
+                    return {"received": params}
+
+        _ = EchoDispatcher
         request = rf.post("/mcp/", content_type="application/json")
         request.auth = None
-        result = isolated_registry.dispatch(
-            request, "tasks", {"action": "delete", "params": {"id": "7", "mode": "access"}}
+
+        nested = reg.dispatch(
+            request, "echoes", {"action": "show", "params": {"id": "7", "mode": "access"}}
         )
-        assert result == {"deleted": "7"}
+        assert nested["received"] == {"id": "7", "mode": "access"}, (
+            "the colliding field was stripped before reaching the action — "
+            "mode/page/page_size are host data, not protocol"
+        )
+
+        flat = reg.dispatch(request, "echoes", {"action": "show", "mode": "access"})
+        assert flat["received"] == {"mode": "access"}

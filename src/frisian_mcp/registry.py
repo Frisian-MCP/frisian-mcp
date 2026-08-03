@@ -180,6 +180,37 @@ def _resolve_request_tier(request: Any) -> str:
     return _apply_max_tier_cap(tier, request)
 
 
+def _without_negotiation_constraints(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return *schema* with the response-negotiation properties removed (T7-F5).
+
+    The negotiation fields are DISCLOSED in a dispatcher's published schema
+    (ADR-005 line 73) but must not be ENFORCED when validating the caller's
+    top-level arguments.  They carry an ``enum`` (``mode``) and types
+    (``page``, ``page_size``, ``filter_keys``), so leaving them in re-imposes
+    the very reservation the dispatcher deliberately declines: ``mode`` is a
+    genuine model field on at least one real host application and
+    ``page``/``page_size`` are DRF pagination parameters, all of which reach
+    the flat argument form legitimately.
+
+    A continuation call never reaches dispatch — ``views`` short-circuits it
+    first — so at this point these keys can only be action data.
+
+    The names are derived from ``_NEGOTIATION_PROPERTIES`` rather than restated,
+    because a hardcoded copy silently drifts out of sync with the schema.
+    """
+    # Local import: decorators imports this module at load time.
+    from frisian_mcp.decorators import (  # pylint: disable=import-outside-toplevel
+        _NEGOTIATION_PROPERTIES,
+    )
+
+    props = schema.get("properties", {})
+    stripped = {k: v for k, v in props.items() if k not in _NEGOTIATION_PROPERTIES}
+    if len(stripped) == len(props):
+        return schema
+    return {**schema, "properties": stripped}
+
+
 def _camel_to_snake(name: str) -> str:
     """Convert a camelCase or PascalCase identifier to snake_case."""
     s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
@@ -687,6 +718,8 @@ class ToolRegistry:
                 )
 
         _validation_schema = entry.input_schema
+        if entry.is_dispatcher:
+            _validation_schema = _without_negotiation_constraints(_validation_schema)
         if entry.is_dispatcher and getattr(request, "_mcp_max_tier", None) is not None:
             # V11-20 (F3): the registration-time action enum is the FULL action
             # set, and jsonschema's enum-violation message enumerates every

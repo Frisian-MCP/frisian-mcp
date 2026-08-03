@@ -103,8 +103,11 @@ def _build_dispatcher_input_schema(
     )
     params_description = (
         f"Action-specific parameters. {param_hints}."
-        " Response-negotiation fields (continuation_token, mode, ...) do NOT go"
-        " here — they are top-level siblings of 'action' and 'params'."
+        " 'continuation_token' is never an action parameter — it is always a"
+        " top-level sibling of 'action' and 'params'. 'mode', 'page',"
+        " 'page_size' and 'filter_keys' are top-level ONLY on a continuation"
+        " call (i.e. alongside a 'continuation_token'); otherwise they are"
+        " ordinary action parameters and belong here."
     )
     schema: dict[str, Any] = {
         "type": "object",
