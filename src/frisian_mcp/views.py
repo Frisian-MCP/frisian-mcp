@@ -1439,6 +1439,53 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     "isError": True,
                 },
             )
+        # T7-F2: a negotiation field nested in `params` is invisible to the
+        # top-level read below, so a caller who explicitly asked to bound the
+        # response silently receives the complete dataset instead — the exact
+        # surprise this protocol exists to prevent, and measured at 41x.
+        # Detecting misplacement is safe HERE (and only here): this branch has
+        # already short-circuited before dispatch, so `params` is never
+        # forwarded to a filterset and the host-field collision that keeps
+        # `mode`/`page`/`page_size` unreserved on the dispatch path cannot
+        # arise.  They are protocol fields in continuation context by definition.
+        from frisian_mcp.decorators import (  # pylint: disable=import-outside-toplevel
+            _NEGOTIATION_PROPERTIES,
+        )
+
+        _nested = arguments.get("params")
+        if isinstance(_nested, dict):
+            _misplaced = sorted(set(_nested) & set(_NEGOTIATION_PROPERTIES))
+            if _misplaced:
+                _log_audit_context(
+                    request,
+                    tool_name,
+                    arguments,
+                    decision="deny",
+                    reason="continuation_field_misplaced",
+                )
+                return _jsonrpc_success(
+                    request_id,
+                    {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    {
+                                        "error": (
+                                            f"Response-negotiation field(s) {_misplaced} were sent"
+                                            " inside 'params', where they are ignored — the"
+                                            " continuation would have returned the COMPLETE"
+                                            " dataset instead of the mode you asked for. Send them"
+                                            " at the TOP LEVEL of arguments, as siblings of"
+                                            " 'action' and 'params'."
+                                        )
+                                    }
+                                ),
+                            }
+                        ],
+                        "isError": True,
+                    },
+                )
         _mode: str = arguments.get("mode", "full")
         served = _serve_heavy_mode(cached["result"], _mode, arguments)
         # DOC-7: serving a cached heavy result is an allowed, audit-worthy call.

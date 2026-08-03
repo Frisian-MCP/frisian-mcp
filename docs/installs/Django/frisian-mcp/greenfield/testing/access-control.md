@@ -104,9 +104,15 @@ Call `tools/list` with an admin token.
 
 **Setup:** `FRISIAN_MCP_PERMISSION_CLASSES` is not set (default: `[]`).
 
-**Pass condition:** The empty gateway `permission_classes` list adds no gateway-level DRF check, so requests reach tool-level enforcement. Individual tools with `permission_classes` still gate access correctly. A tool with no `permission_classes` skips only the *tool-level DRF check* — it is **not** open to all callers: gateway authentication, the permission-tier gate (a `read` token still cannot reach a `read_write`/`admin` tool, per Test 3), and any route isolation still apply.
+**Pass condition:** The empty gateway `permission_classes` list adds no gateway-level DRF check, so requests reach tool-level enforcement. Individual tools with `permission_classes` still gate access correctly. A tool with no `permission_classes` skips the tool-level DRF check as well — what remains is the **permission-tier gate** (a `read` caller cannot reach a `read_write`/`admin` tool, per Test 3), the `FRISIAN_MCP_MAX_TIER` endpoint cap, and any route isolation.
 
-This is the default behavior. Verify it is intentional for your deployment before accepting it.
+> ⚠️ **This is not the same as "authenticated callers only."** With no gateway permission class, an **unauthenticated** caller is not rejected — they are assigned `FRISIAN_MCP_UNAUTHENTICATED_TIER`, which defaults to `"read"`. A read-tier tool with no `permission_classes` is therefore reachable anonymously in this configuration.
+>
+> To actually deny anonymous callers you must add a **gateway permission class** (e.g. `FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]`) or a route-level equivalent. Setting `FRISIAN_MCP_UNAUTHENTICATED_TIER` to `"none"`, `None`, or any other unrecognised value does **not** block them — unrecognised tiers rank equal to `read`, so the anonymous caller retains the full read surface. The setting can only *raise* the anonymous tier, never lower it below `read`.
+
+**Additional check — the anonymous path.** Call a **`read`-tier** tool with no credentials at all and record whether it succeeds. Use a read-tier tool specifically: a write-tier tool is denied by the tier gate and returns a clean 403, which makes an absent authentication control look like it is working.
+
+This is the default behavior. Verify it is intentional for your deployment before accepting it. `manage.py mcp_doctor --security` reports the effective anonymous tier.
 
 ---
 

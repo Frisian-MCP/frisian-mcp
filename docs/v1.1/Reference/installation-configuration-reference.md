@@ -235,15 +235,22 @@ An agent sends the **raw** key as `Authorization: Bearer <raw-key>`; the package
 **Type:** `str`  
 **Default:** `'read'`
 
-The maximum permission tier for callers who provide no credentials. Set to `None` to require authentication for all tool access.
+The permission tier granted to callers who provide no credentials.
 
 ```python
 # Public read access (default)
 FRISIAN_MCP_UNAUTHENTICATED_TIER = 'read'
-
-# Require auth for everything
-FRISIAN_MCP_UNAUTHENTICATED_TIER = None
 ```
+
+> ⚠️ **This setting cannot require authentication.** It can only *raise* the anonymous tier, never lower it below `read`. Setting it to `'none'`, `None`, or any other unrecognised value does **not** block anonymous callers — unrecognised tiers rank equal to `read`, so the caller retains the full read surface.
+>
+> To require authentication for all tool access, add a gateway permission class:
+>
+> ```python
+> FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+> ```
+>
+> `manage.py mcp_doctor --security` reports the effective anonymous tier.
 
 ---
 

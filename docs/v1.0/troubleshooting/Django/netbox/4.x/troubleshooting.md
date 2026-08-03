@@ -186,7 +186,7 @@ The `docker-entrypoint.frisian-mcp.sh` script runs this automatically on first c
 
 ### `401 Unauthorized` on all tool calls
 
-**Cause A:** No authentication class is configured and `FRISIAN_MCP_UNAUTHENTICATED_TIER` is not set or is set to `"none"`.
+**Cause A:** A gateway permission class (e.g. `IsAuthenticated`) is configured in `FRISIAN_MCP_PERMISSION_CLASSES` and the request carries no usable credentials. Note that `FRISIAN_MCP_UNAUTHENTICATED_TIER` is not the cause — it cannot produce a 401, and setting it to `"none"` does not block anonymous callers.
 
 **Cause B:** The Bearer token in the request does not match any token in the database or any static API key in settings.
 

@@ -90,7 +90,7 @@ def build_group_input_schema() -> dict[str, Any]:
     how many tools it bundles.  Callers discover the catalogue via
     ``action="help"``.
     """
-    return {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "resource": {
@@ -123,6 +123,25 @@ def build_group_input_schema() -> dict[str, Any]:
             },
         },
     }
+    # T7-F1: group dispatchers issue continuation tokens via the
+    # FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD backstop, so ADR-005 line 73's
+    # disclosure requirement applies to them exactly as it does to
+    # @mcp_dispatcher.  Without this a group tool hands the agent a token for a
+    # protocol its own schema never mentions — the situation that produced the
+    # original report, since grouped tools are what the demo host exposes.
+    #
+    # Safe only because the merged properties are stripped before top-level
+    # argument validation in registry.dispatch (T7-F5).  Merging them here while
+    # that strip is absent would enum-constrain `mode` and type-constrain
+    # `page`/`page_size` on every grouped host's flat-form callers.
+    #
+    # Local import: decorators imports registry, which reaches back into
+    # backends.* — importing at module load closes the cycle.
+    # pylint: disable=import-outside-toplevel
+    from frisian_mcp.decorators import _merge_negotiation_schema
+
+    # pylint: enable=import-outside-toplevel
+    return _merge_negotiation_schema(schema)
 
 
 def build_group_help(  # pylint: disable=too-many-locals

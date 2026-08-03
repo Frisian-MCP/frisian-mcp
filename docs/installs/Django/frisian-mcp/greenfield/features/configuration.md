@@ -105,11 +105,23 @@ The effective tier for an unauthenticated request is controlled by `FRISIAN_MCP_
 # Allow unauthenticated callers to see and call read-tier tools.
 FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 
-# Require authentication for all tools.
-FRISIAN_MCP_UNAUTHENTICATED_TIER = "none"
+# Grant unauthenticated callers a HIGHER tier (rarely appropriate).
+FRISIAN_MCP_UNAUTHENTICATED_TIER = "read_write"
 ```
 
-Setting this to `"none"` makes `tools/list` return an empty array for unauthenticated callers, effectively hiding the entire tool surface.
+> ⚠️ **This setting cannot turn anonymous access off.**
+>
+> To actually deny anonymous callers you must add a **gateway permission class** (e.g. `FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]`) or a route-level equivalent. Setting `FRISIAN_MCP_UNAUTHENTICATED_TIER` to `"none"`, `None`, or any other unrecognised value does **not** block them — unrecognised tiers rank equal to `read`, so the anonymous caller retains the full read surface. The setting can only *raise* the anonymous tier, never lower it below `read`.
+
+To require authentication for every tool:
+
+```python
+# settings.py
+
+FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+```
+
+Run `manage.py mcp_doctor --security` to report the effective anonymous tier for your deployment.
 
 ### Token tiers (contrib.tokens)
 
@@ -155,7 +167,7 @@ All settings are optional. Defaults are shown.
 |---------|---------|-------------|
 | `FRISIAN_MCP_AUTHENTICATION_CLASSES` | DRF default | List of dotted-path strings or class objects. Gateway-level authentication. |
 | `FRISIAN_MCP_PERMISSION_CLASSES` | `[]` | List of dotted-path strings or class objects. Gateway-level permission check. |
-| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests. Set `"none"` to require auth for all tools. |
+| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests. Can only *raise* the anonymous tier — it cannot disable anonymous access. Use `FRISIAN_MCP_PERMISSION_CLASSES` for that. |
 
 ### Tool filtering
 

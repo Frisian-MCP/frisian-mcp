@@ -85,11 +85,20 @@ Tier ranks: `read (0) < read_write (1) < admin (2)`
 | Setting value | Expected listing |
 |--------------|-----------------|
 | `"read"` (default) | Read-tier tools visible |
-| `"none"` | 401 or empty listing |
+| `"read_write"` | Read- and write-tier tools visible |
+| `"none"`, `None`, or any unrecognised value | **Read-tier tools still visible** — unrecognised tiers rank equal to `read` |
 
-> Use the string `"none"` — it is the unambiguous form. Python `None` happens to resolve the same at runtime, but `mcp_doctor` cannot distinguish it from "unset" and will report it as defaulting to `read`.
+> ⚠️ **`"none"` does not hide the tool surface.** An unrecognised tier ranks equal to `read`, so `tools/list` returns the read-tier tools rather than an empty array, and no 401 is raised. This setting can only *raise* the anonymous tier, never lower it below `read`.
+>
+> To make `tools/list` reject unauthenticated callers, add a gateway permission class:
+>
+> ```python
+> FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+> ```
+>
+> Then re-run this test: the call should return 401 regardless of the tier setting.
 
-**Pass condition:** Behavior matches the configured setting.
+**Pass condition:** Behavior matches the table above. If you set `"none"` expecting an empty listing and received read-tier tools, that is the documented behavior — not a bug in your configuration. Confirm the anonymous read surface is acceptable, or add the gateway permission class above.
 
 ---
 

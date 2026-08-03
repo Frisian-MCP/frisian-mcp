@@ -135,7 +135,7 @@ No settings are required to get auto-discovery running. The defaults are:
 |---------|---------|--------|
 | `FRISIAN_MCP_ENABLED` | `True` | Enable/disable the gateway |
 | `FRISIAN_MCP_AUTODISCOVER` | `True` | Auto-register ViewSet actions on startup |
-| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests |
+| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests. Cannot disable anonymous access — see below. |
 | `FRISIAN_MCP_SERVER_NAME` | `"frisian-mcp"` | Server name in the `initialize` handshake |
 
 A common minimum configuration:
@@ -144,12 +144,17 @@ A common minimum configuration:
 # settings.py
 
 # Expose read-tier tools to unauthenticated callers.
-# Set to None or "none" to require authentication for all tools.
 FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 
 # Optional: name your server
 FRISIAN_MCP_SERVER_NAME = "my-app-mcp"
 ```
+
+> ⚠️ `FRISIAN_MCP_UNAUTHENTICATED_TIER` can only *raise* the anonymous tier, never lower it below `read`. Setting it to `"none"` or `None` does **not** require authentication — unrecognised tiers rank equal to `read`, so anonymous callers keep the full read surface. To require authentication for every tool, add a gateway permission class:
+>
+> ```python
+> FRISIAN_MCP_PERMISSION_CLASSES = ["rest_framework.permissions.IsAuthenticated"]
+> ```
 
 For a full settings reference, see `features/configuration.md`.
 

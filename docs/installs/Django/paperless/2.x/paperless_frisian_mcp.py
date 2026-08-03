@@ -28,9 +28,15 @@ INSTALLED_APPS.append("frisian_mcp.contrib.oauth")  # noqa: F405
 # Mount path for the MCP endpoint.
 FRISIAN_MCP_PATH = "mcp"
 
-# Require authentication for all MCP requests.
-# Set to "read" to allow unauthenticated callers read-only access.
-FRISIAN_MCP_UNAUTHENTICATED_TIER = None
+# Tier granted to callers that arrive with no credentials.
+#
+# NOTE: this setting can only RAISE the anonymous tier — it cannot require
+# authentication.  "none"/None are not recognised tiers and rank equal to
+# "read", so they do NOT block anonymous callers.  Authentication is enforced
+# by FRISIAN_MCP_PERMISSION_CLASSES below; that is the control that matters.
+# Left at the "read" default here because the gateway permission class denies
+# unauthenticated requests before the tier is ever consulted.
+FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 
 # ---------------------------------------------------------------------------
 # Authentication
