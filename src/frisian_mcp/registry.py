@@ -17,6 +17,8 @@ from django.http import HttpRequest
 from django.utils.module_loading import import_string
 from rest_framework.permissions import BasePermission
 
+from frisian_mcp.negotiation import _NEGOTIATION_PROPERTIES
+
 logger = logging.getLogger(__name__)
 
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
@@ -178,6 +180,32 @@ def _resolve_request_tier(request: Any) -> str:
     else:
         tier = "read"
     return _apply_max_tier_cap(tier, request)
+
+
+def _without_negotiation_constraints(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return *schema* with the response-negotiation properties removed (T7-F5).
+
+    The negotiation fields are DISCLOSED in a dispatcher's published schema
+    (ADR-005 line 73) but must not be ENFORCED when validating the caller's
+    top-level arguments.  They carry an ``enum`` (``mode``) and types
+    (``page``, ``page_size``, ``filter_keys``), so leaving them in re-imposes
+    the very reservation the dispatcher deliberately declines: ``mode`` is a
+    genuine model field on at least one real host application and
+    ``page``/``page_size`` are DRF pagination parameters, all of which reach
+    the flat argument form legitimately.
+
+    A continuation call never reaches dispatch — ``views`` short-circuits it
+    first — so at this point these keys can only be action data.
+
+    The names are derived from ``_NEGOTIATION_PROPERTIES`` rather than restated,
+    because a hardcoded copy silently drifts out of sync with the schema.
+    """
+    props = schema.get("properties", {})
+    stripped = {k: v for k, v in props.items() if k not in _NEGOTIATION_PROPERTIES}
+    if len(stripped) == len(props):
+        return schema
+    return {**schema, "properties": stripped}
 
 
 def _camel_to_snake(name: str) -> str:
@@ -687,6 +715,8 @@ class ToolRegistry:
                 )
 
         _validation_schema = entry.input_schema
+        if entry.is_dispatcher:
+            _validation_schema = _without_negotiation_constraints(_validation_schema)
         if entry.is_dispatcher and getattr(request, "_mcp_max_tier", None) is not None:
             # V11-20 (F3): the registration-time action enum is the FULL action
             # set, and jsonschema's enum-violation message enumerates every

@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 from rest_framework.permissions import BasePermission
 
+from frisian_mcp.negotiation import _merge_negotiation_schema
 from frisian_mcp.registry import tool_registry
 from frisian_mcp.resources import ResourceDefinition, resource_registry
 
@@ -231,52 +232,6 @@ def mcp_resource(
         return fn
 
     return decorator
-
-
-_NEGOTIATION_PROPERTIES: dict[str, Any] = {
-    "continuation_token": {
-        "type": "string",
-        "description": (
-            "Token from a prior probe call. Supply with 'mode' to fetch the full response."
-        ),
-    },
-    "mode": {
-        "type": "string",
-        "enum": ["summary", "paginated", "filtered", "full"],
-        "description": "Response mode for the continuation call.",
-    },
-    "page": {
-        "type": "integer",
-        "description": "Page number (1-based) for 'paginated' mode. Default: 1.",
-        "default": 1,
-    },
-    "page_size": {
-        "type": "integer",
-        "description": "Items per page for 'paginated' mode. Defaults to FRISIAN_MCP_HEAVY_PAGE_SIZE.",  # noqa: E501  # pylint: disable=line-too-long
-    },
-    "filter_keys": {
-        "type": "array",
-        "items": {"type": "string"},
-        "description": "Top-level keys to retain in 'filtered' mode.",
-    },
-}
-
-
-def _merge_negotiation_schema(base: dict[str, Any]) -> dict[str, Any]:
-    """
-    Merge the response-negotiation protocol fields into *base* input schema.
-
-    Only modifies schemas with ``"type": "object"``; returns *base* unchanged
-    otherwise.  Removes ``"additionalProperties": false`` if present, since the
-    merged negotiation fields would violate it.
-    """
-    if base.get("type") != "object":
-        return base
-    merged: dict[str, Any] = {**base}
-    merged["properties"] = {**base.get("properties", {}), **_NEGOTIATION_PROPERTIES}
-    if merged.get("additionalProperties") is False:
-        del merged["additionalProperties"]
-    return merged
 
 
 def mcp_heavy(

@@ -252,7 +252,8 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
     The owner key composes:
 
     * the originating tool name — refuses replay against a different tool
-    * the auth backend type + primary key — refuses cross-credential replay
+    * the auth backend type + primary key (or, for pk-less static API keys,
+      the matched key's HMAC digest, T5) — refuses cross-credential replay
     * the effective permission tier — refuses replay after a downgrade
     * the user PK if any — refuses cross-user replay
     * the agent connection PK if the request is per-agent scoped (PKG-6)
@@ -280,9 +281,19 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
         if pk is not None:
             auth_id = f"{type(auth_obj).__name__}:{pk}"
         else:
-            # Static API keys (_ApiKeyAuth) have no PK; fall back to the
-            # type + permission tier so two distinct tiers don't collide.
-            auth_id = f"{type(auth_obj).__name__}:tier={getattr(auth_obj, 'permission', 'unknown')}"
+            # Static API keys (_ApiKeyAuth) have no PK. Use the matched
+            # key's HMAC digest (key_id) as a stable per-key identity so
+            # two distinct same-tier keys don't collide (T5) — the digest
+            # is already a one-way hash of the raw secret, safe to reuse
+            # here. Fall back to tier alone for any other pk-less auth
+            # object that doesn't set key_id.
+            key_id = getattr(auth_obj, "key_id", None)
+            if key_id is not None:
+                auth_id = f"{type(auth_obj).__name__}:key={key_id}"
+            else:
+                auth_id = (
+                    f"{type(auth_obj).__name__}:tier={getattr(auth_obj, 'permission', 'unknown')}"
+                )
 
     user = getattr(request, "user", None)
     user_pk = getattr(user, "pk", None) if user is not None else None
@@ -325,6 +336,17 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
         "total_size": len(serialized.encode()),
         "available_modes": ["summary", "paginated", "filtered", "full"],
         "continuation_token": token,
+        # T6: an agent mid-negotiation is not re-reading tools/list, so the
+        # envelope that advertises the modes must also say where the fields go
+        # and what omitting `mode` costs.  Advertising reachable modes without
+        # disclosing their placement is what made all four look unreachable.
+        "usage": (
+            "Re-invoke this same tool with 'continuation_token' and 'mode' at the"
+            " TOP LEVEL of arguments (siblings of 'action'/'params', never inside"
+            " 'params'). Omitting 'mode' returns the COMPLETE dataset"
+            f" ({len(serialized.encode())} bytes); use 'summary' or 'paginated'"
+            " to bound the response."
+        ),
     }
 
 

@@ -84,8 +84,10 @@ Tier ranks: `read (0) < read_write (1) < admin (2)`
 
 | Setting value | Expected listing |
 |--------------|-----------------|
-| `'read'` (default) | Read-tier tools visible |
-| `None` | 401 or empty listing |
+| `"read"` (default) | Read-tier tools visible |
+| `"none"` | 401 or empty listing |
+
+> Use the string `"none"` — it is the unambiguous form. Python `None` happens to resolve the same at runtime, but `mcp_doctor` cannot distinguish it from "unset" and will report it as defaulting to `read`.
 
 **Pass condition:** Behavior matches the configured setting.
 

@@ -74,7 +74,7 @@ class ThrottledMcpView(McpView):
 
 ## Test 3: Unauthenticated Caller Is Throttled by `anon` Rate
 
-**Setup:** Send unauthenticated requests to `/mcp/tools/list` up to the `anon` rate limit.
+**Setup:** Send unauthenticated JSON-RPC `tools/list` requests (POST to `/mcp`) up to the `anon` rate limit.
 
 **Pass condition:** 429 is returned once the `anon` limit is reached. Requests from authenticated users are unaffected.
 
@@ -112,7 +112,7 @@ This matters for agent workflows that call `tools/list` once at startup and then
 Typical agent-scale guidance:
 
 - A 200-device provisioning run with sequential creates needs at minimum 201 calls per session
-- If your `user` rate is 600/min and each create takes ~300ms, you have headroom for ~33 devices/minute before hitting the wall
+- At a 600/min `user` rate, sequential creates are **latency-bound**, not rate-bound: one ~300ms create at a time is ~200/min, well under the 600/min ceiling. A 200-device run takes roughly 60s (plus the initial `tools/list`), limited by round-trip latency rather than the rate cap
 - For bulk operations, use the bulk-create tool (single call, many objects) rather than sequential single creates
 
 ---

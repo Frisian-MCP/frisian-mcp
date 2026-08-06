@@ -104,7 +104,7 @@ Call `tools/list` with an admin token.
 
 **Setup:** `FRISIAN_MCP_PERMISSION_CLASSES` is not set (default: `[]`).
 
-**Pass condition:** Gateway allows all requests through to tool-level permission enforcement. Individual tools with `permission_classes` still gate access correctly. Tools with no `permission_classes` are accessible to all callers.
+**Pass condition:** The empty gateway `permission_classes` list adds no gateway-level DRF check, so requests reach tool-level enforcement. Individual tools with `permission_classes` still gate access correctly. A tool with no `permission_classes` skips only the *tool-level DRF check* — it is **not** open to all callers: gateway authentication, the permission-tier gate (a `read` token still cannot reach a `read_write`/`admin` tool, per Test 3), and any route isolation still apply.
 
 This is the default behavior. Verify it is intentional for your deployment before accepting it.
 

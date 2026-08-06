@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
@@ -204,7 +205,31 @@ class TestBuildProbeEnvelope:
     def test_structure(self) -> None:
         """Probe envelope has all required fields."""
         env = _build_probe_envelope({"key": "value"}, "tok123")
-        assert set(env.keys()) == {"preview", "total_size", "available_modes", "continuation_token"}
+        assert set(env.keys()) == {
+            "preview",
+            "total_size",
+            "available_modes",
+            "continuation_token",
+            "usage",
+        }
+
+    def test_usage_discloses_placement_and_cost_of_omitting_mode(self) -> None:
+        """
+        T6: the envelope that advertises the modes must also teach their placement.
+
+        An agent mid-negotiation is not re-reading ``tools/list``, so advertising
+        ``available_modes`` without saying where the fields go is what made all
+        four modes look unreachable.  The envelope must also state that omitting
+        ``mode`` returns the complete dataset — since (Jeremy's ruling) ``full``
+        remains reachable by omission, disclosure is the only guardrail left.
+        """
+        env = _build_probe_envelope({"key": "value" * 100}, "tok123")
+        usage = env["usage"]
+        assert "TOP LEVEL" in usage
+        assert "'params'" in usage
+        assert "COMPLETE" in usage
+        # The concrete byte cost of the full response is named, not just implied.
+        assert str(env["total_size"]) in usage
 
     def test_continuation_token(self) -> None:
         """Probe envelope contains the supplied token."""
@@ -889,3 +914,448 @@ class TestHeavyOwnerKey:
         key_r = _heavy_owner_key(request, "x.list")
 
         assert key_rw != key_r
+
+
+# ---------------------------------------------------------------------------
+# T2 — Issue 53 acceptance matrix (end-to-end call1->call2 via McpView)
+# ---------------------------------------------------------------------------
+
+
+class TestIssue53AcceptanceMatrix:
+    """
+    End-to-end coverage of the Issue 53 / TUR-16 acceptance criteria.
+
+    Gap-fills what :class:`TestHeavyContinuationOwnerBinding` and
+    :class:`TestHeavyOwnerKey` exercise at the unit level: every
+    ``available_modes`` entry redeeming through the real ``McpView``
+    dispatch, and an explicit DENY per replay dimension (credential, user,
+    tier) rather than only the generic mismatch case.
+    """
+
+    @staticmethod
+    def _isolated_registry_with_heavy(name: str, payload: Any) -> ToolRegistry:
+        """Register a single ``@mcp_heavy`` tool that returns *payload*."""
+        isolated = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
+
+            @mcp_heavy(
+                name=name,
+                description="Issue 53 acceptance matrix test",
+                input_schema={"type": "object", "properties": {}},
+            )
+            def _fn(  # pylint: disable=unused-variable
+                _arguments: dict[str, Any], _request: Any
+            ) -> Any:
+                return payload
+
+        return isolated
+
+    def test_call2_paginated_mode_redeems_with_matching_owner(self, rf: RequestFactory) -> None:
+        """Paginated mode redeems through the SEC-3 owner-key gate, not just in isolation."""
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        stored = list(range(50))
+        reg = self._isolated_registry_with_heavy("matrix.paginated", stored)
+        owner = _heavy_owner_key(
+            _build_call_tool_request(rf, "matrix.paginated", {}), "matrix.paginated"
+        )
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {
+                "result": stored,
+                "owner_key": owner,
+                "tool_name": "matrix.paginated",
+            }
+            response = _call_tool(
+                rf,
+                "matrix.paginated",
+                {"continuation_token": "x", "mode": "paginated", "page": 1, "page_size": 10},
+            )
+
+        result = _tool_result(response)
+        assert result["items"] == list(range(10))
+        assert result["total"] == 50
+
+    def test_call2_filtered_mode_redeems_with_matching_owner(self, rf: RequestFactory) -> None:
+        """Filtered mode redeems through the SEC-3 owner-key gate, not just in isolation."""
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        stored = {"a": 1, "b": 2, "c": 3}
+        reg = self._isolated_registry_with_heavy("matrix.filtered", stored)
+        owner = _heavy_owner_key(
+            _build_call_tool_request(rf, "matrix.filtered", {}), "matrix.filtered"
+        )
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {
+                "result": stored,
+                "owner_key": owner,
+                "tool_name": "matrix.filtered",
+            }
+            response = _call_tool(
+                rf,
+                "matrix.filtered",
+                {"continuation_token": "x", "mode": "filtered", "filter_keys": ["a", "c"]},
+            )
+
+        result = _tool_result(response)
+        assert result == {"a": 1, "c": 3}
+
+    @pytest.mark.parametrize(
+        ("mode", "extra_args"),
+        [
+            ("full", {}),
+            ("summary", {}),
+            ("paginated", {"page": 1, "page_size": 10}),
+            ("filtered", {"filter_keys": ["alpha"]}),
+        ],
+    )
+    def test_call2_every_mode_serves_across_session_id_drift(
+        self, rf: RequestFactory, mode: str, extra_args: dict[str, Any]
+    ) -> None:
+        """TUR-16 + Issue 53: every ``available_modes`` entry survives session-id drift.
+
+        A real MCP client mints a fresh ``Mcp-Session-Id`` per POST, so the
+        probe and redeem legs carry different session headers regardless of
+        which mode the caller ultimately picks for call 2 — not just ``full``.
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        stored = {"alpha": "a" * 10, "beta": "b" * 10}
+        tool_name = f"matrix.drift.{mode}"
+        reg = self._isolated_registry_with_heavy(tool_name, stored)
+
+        write_req = _build_call_tool_request(rf, tool_name, {})
+        write_req.META["HTTP_MCP_SESSION_ID"] = "session-write"
+        owner = _heavy_owner_key(write_req, tool_name)
+
+        redeem_args = {"continuation_token": "x", "mode": mode, **extra_args}
+        redeem_req = _post(
+            rf, _jsonrpc("tools/call", {"name": tool_name, "arguments": redeem_args})
+        )
+        redeem_req.user = AnonymousUser()
+        redeem_req.META["HTTP_MCP_SESSION_ID"] = "session-read-different"
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {
+                "result": stored,
+                "owner_key": owner,
+                "tool_name": tool_name,
+            }
+            response = _view(redeem_req)
+
+        result = _tool_result(response)
+        assert "error" not in result, (
+            f"mode={mode!r} was refused despite session-id drift being the only change: "
+            f"{result.get('error')!r}"
+        )
+
+    def test_anonymous_open_route_round_trip_survives_session_drift(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        Issue 53 regression: the anonymous/open-route flow is unaffected by TUR-16.
+
+        Anonymous callers never had a session segment in their owner key, so
+        removing ``Mcp-Session-Id`` from the key must be a strict no-op here.
+        Covers both "different session id" and "absent session id on redeem".
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        stored = {"open": "data"}
+        reg = self._isolated_registry_with_heavy("matrix.anon", stored)
+
+        probe_req = _build_call_tool_request(rf, "matrix.anon", {})
+        probe_req.META["HTTP_MCP_SESSION_ID"] = "anon-session-1"
+        owner = _heavy_owner_key(probe_req, "matrix.anon")
+        assert "session=" not in owner
+
+        # Redeem carries no Mcp-Session-Id at all (absent, not merely different).
+        redeem_req = _post(
+            rf,
+            _jsonrpc(
+                "tools/call",
+                {
+                    "name": "matrix.anon",
+                    "arguments": {"continuation_token": "x", "mode": "full"},
+                },
+            ),
+        )
+        redeem_req.user = AnonymousUser()
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = {
+                "result": stored,
+                "owner_key": owner,
+                "tool_name": "matrix.anon",
+            }
+            response = _view(redeem_req)
+
+        result = _tool_result(response)
+        assert result == stored
+
+    @staticmethod
+    def _post_with_bearer(
+        rf: RequestFactory, name: str, arguments: dict[str, Any], raw: str
+    ) -> Any:
+        """Build a real POST carrying ``Authorization: Bearer raw`` for DB-token auth tests."""
+        return rf.post(
+            "/mcp/",
+            data=json.dumps(_jsonrpc("tools/call", {"name": name, "arguments": arguments})),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {raw}",
+        )
+
+    def _configure_token_auth(self, settings: Any) -> None:
+        """T7: point McpView at real FrisianMcpTokenAuthentication, no gateway permission gate."""
+        settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
+            "frisian_mcp.contrib.tokens.authentication.FrisianMcpTokenAuthentication",
+        ]
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+
+    @pytest.mark.django_db
+    def test_call2_different_user_denies(self, rf: RequestFactory, settings: Any) -> None:
+        """
+        Issue 53 matrix: different user, real end-to-end -> DENY.
+
+        T7: rewritten from a mocked-request version that DRF's real
+        authentication silently discarded (see room note 13bad783). Two
+        distinct users each hold their own DB token at the SAME tier;
+        probing as user A and redeeming as user B must be refused.
+        """
+        from frisian_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            FrisianMcpToken,
+        )
+
+        user_model = get_user_model()
+        self._configure_token_auth(settings)
+        user_a = user_model.objects.create_user(username="matrix-user-a")
+        user_b = user_model.objects.create_user(username="matrix-user-b")
+        token_a = FrisianMcpToken.objects.create(name="a", user=user_a, permission="read")
+        token_b = FrisianMcpToken.objects.create(name="b", user=user_b, permission="read")
+
+        stored = {"secret": True}
+        reg = self._isolated_registry_with_heavy("matrix.user", stored)
+
+        with patch("frisian_mcp.views.tool_registry", reg):
+            probe = self._post_with_bearer(rf, "matrix.user", {}, token_a.plaintext_token)
+            token = _tool_result(_view(probe))["continuation_token"]
+
+            redeem = self._post_with_bearer(
+                rf,
+                "matrix.user",
+                {"continuation_token": token, "mode": "full"},
+                token_b.plaintext_token,
+            )
+            result = _tool_result(_view(redeem))
+
+        assert "error" in result
+        assert "does not belong to this caller" in result["error"]
+
+    @pytest.mark.django_db
+    def test_call2_different_credential_denies(self, rf: RequestFactory, settings: Any) -> None:
+        """
+        Issue 53 matrix: same user/tier, different credential, real end-to-end -> DENY.
+
+        T7: rewritten per room note 13bad783. Same user holds TWO DB tokens
+        at the same tier -- isolates the credential-pk dimension since the
+        user and tier stay constant across probe and redeem.
+        """
+        from frisian_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            FrisianMcpToken,
+        )
+
+        user_model = get_user_model()
+        self._configure_token_auth(settings)
+        user = user_model.objects.create_user(username="matrix-cred-user")
+        token_a = FrisianMcpToken.objects.create(name="a", user=user, permission="admin")
+        token_b = FrisianMcpToken.objects.create(name="b", user=user, permission="admin")
+
+        stored = {"secret": True}
+        reg = self._isolated_registry_with_heavy("matrix.cred", stored)
+
+        with patch("frisian_mcp.views.tool_registry", reg):
+            probe = self._post_with_bearer(rf, "matrix.cred", {}, token_a.plaintext_token)
+            token = _tool_result(_view(probe))["continuation_token"]
+
+            redeem = self._post_with_bearer(
+                rf,
+                "matrix.cred",
+                {"continuation_token": token, "mode": "full"},
+                token_b.plaintext_token,
+            )
+            result = _tool_result(_view(redeem))
+
+        assert "error" in result
+        assert "does not belong to this caller" in result["error"]
+
+    @pytest.mark.django_db
+    def test_call2_tier_downgrade_denies(self, rf: RequestFactory, settings: Any) -> None:
+        """
+        Issue 53 matrix: same credential/user, tier downgraded, real end-to-end -> DENY.
+
+        T7: rewritten per room note 13bad783. The SAME token is used for both
+        legs; its ``permission`` is downgraded in the DB between probe and
+        redeem, isolating the tier dimension while credential and user PKs
+        stay identical.
+        """
+        from frisian_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            FrisianMcpToken,
+        )
+
+        user_model = get_user_model()
+        self._configure_token_auth(settings)
+        user = user_model.objects.create_user(username="matrix-tier-user")
+        token = FrisianMcpToken.objects.create(name="t", user=user, permission="read_write")
+
+        stored = {"secret": True}
+        reg = self._isolated_registry_with_heavy("matrix.tier", stored)
+
+        with patch("frisian_mcp.views.tool_registry", reg):
+            probe = self._post_with_bearer(rf, "matrix.tier", {}, token.plaintext_token)
+            cont_token = _tool_result(_view(probe))["continuation_token"]
+
+            token.permission = "read"
+            token.save(update_fields=["permission"])
+
+            redeem = self._post_with_bearer(
+                rf,
+                "matrix.tier",
+                {"continuation_token": cont_token, "mode": "full"},
+                token.plaintext_token,
+            )
+            result = _tool_result(_view(redeem))
+
+        assert "error" in result
+        assert "does not belong to this caller" in result["error"]
+
+    def test_call2_different_static_api_key_same_tier_denies(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """
+        T6 / T5 regression: two static API keys at the SAME tier no longer collide.
+
+        Pre-T5, ``_ApiKeyAuth`` carried only the permission tier (no per-key
+        identity), so any two same-tier static keys produced the identical
+        owner key and could redeem each other's continuation tokens (T4
+        finding). Post-T5, ``_ApiKeyAuth.key_id`` (the matched HMAC digest)
+        distinguishes them: probe with key A, redeem with key B -> DENY.
+
+        Drives REAL ``FrisianMcpApiKeyAuthentication`` end to end (real
+        ``Authorization`` headers + real cache) rather than pre-setting
+        ``request.auth`` before calling the view -- DRF's request wrapping
+        re-runs authentication and discards any auth object set on the raw
+        request beforehand, so a mocked ``request.auth`` never reaches
+        ``_heavy_owner_key`` and would silently test nothing.
+        """
+        from frisian_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            _hmac_token,
+        )
+
+        key_a, key_b = "static-key-a", "static-key-b"
+        settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
+            "frisian_mcp.contrib.tokens.authentication.FrisianMcpApiKeyAuthentication",
+        ]
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token(key_a): "read", _hmac_token(key_b): "read"}
+
+        stored = {"secret": True}
+        reg = self._isolated_registry_with_heavy("matrix.apikey.real", stored)
+
+        with patch("frisian_mcp.views.tool_registry", reg):
+            probe_req = rf.post(
+                "/mcp/",
+                data=json.dumps(
+                    _jsonrpc("tools/call", {"name": "matrix.apikey.real", "arguments": {}})
+                ),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {key_a}",
+            )
+            token = _tool_result(_view(probe_req))["continuation_token"]
+
+            redeem_req = rf.post(
+                "/mcp/",
+                data=json.dumps(
+                    _jsonrpc(
+                        "tools/call",
+                        {
+                            "name": "matrix.apikey.real",
+                            "arguments": {"continuation_token": token, "mode": "full"},
+                        },
+                    )
+                ),
+                content_type="application/json",
+                # Different raw secret, same tier.
+                HTTP_AUTHORIZATION=f"Bearer {key_b}",
+            )
+            result = _tool_result(_view(redeem_req))
+
+        assert "error" in result
+        assert "does not belong to this caller" in result["error"]
+
+    def test_call2_same_static_api_key_resumes_successfully(
+        self, rf: RequestFactory, settings: Any
+    ) -> None:
+        """T6 positive control: the SAME static API key still redeems its own token."""
+        from frisian_mcp.contrib.tokens.models import (  # pylint: disable=import-outside-toplevel
+            _hmac_token,
+        )
+
+        key_a = "static-key-a-resume"
+        settings.FRISIAN_MCP_AUTHENTICATION_CLASSES = [
+            "frisian_mcp.contrib.tokens.authentication.FrisianMcpApiKeyAuthentication",
+        ]
+        settings.FRISIAN_MCP_PERMISSION_CLASSES = []
+        settings.FRISIAN_MCP_API_KEYS = {_hmac_token(key_a): "read"}
+
+        stored = {"ok": True}
+        reg = self._isolated_registry_with_heavy("matrix.apikey.real.same", stored)
+
+        with patch("frisian_mcp.views.tool_registry", reg):
+            probe_req = rf.post(
+                "/mcp/",
+                data=json.dumps(
+                    _jsonrpc("tools/call", {"name": "matrix.apikey.real.same", "arguments": {}})
+                ),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {key_a}",
+            )
+            token = _tool_result(_view(probe_req))["continuation_token"]
+
+            redeem_req = rf.post(
+                "/mcp/",
+                data=json.dumps(
+                    _jsonrpc(
+                        "tools/call",
+                        {
+                            "name": "matrix.apikey.real.same",
+                            "arguments": {"continuation_token": token, "mode": "full"},
+                        },
+                    )
+                ),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=f"Bearer {key_a}",
+            )
+            result = _tool_result(_view(redeem_req))
+
+        assert result == stored

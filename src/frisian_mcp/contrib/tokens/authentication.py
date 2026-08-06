@@ -130,10 +130,11 @@ class FrisianMcpTokenAuthentication(BaseAuthentication):
 class _ApiKeyAuth:
     """Lightweight auth object set as ``request.auth`` for API key authentications."""
 
-    __slots__ = ("permission",)
+    __slots__ = ("permission", "key_id")
 
-    def __init__(self, permission: str) -> None:
+    def __init__(self, permission: str, key_id: str | None = None) -> None:
         self.permission = permission
+        self.key_id = key_id
 
     is_authenticated: bool = True
 
@@ -160,7 +161,10 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
     All other requests return ``None`` so that DRF can try the next
     configured authenticator.
 
-    On success, returns ``(AnonymousUser, _ApiKeyAuth(permission=tier))``.
+    On success, returns ``(AnonymousUser, _ApiKeyAuth(permission=tier, key_id=stored_digest))``.
+    The ``key_id`` is the already-stored HMAC digest of the matched key (never
+    the raw secret) and gives ``_heavy_owner_key`` (SEC-3, ``views.py``) a
+    stable per-key identity so two static keys at the same tier don't collide.
     On failure (no matching key), returns ``None`` so subsequent authenticators
     can try.  Never raises ``AuthenticationFailed`` — unrecognised tokens are
     passed through rather than rejected.
@@ -177,8 +181,8 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
         Hashes the incoming Bearer value via :func:`~frisian_mcp.contrib.tokens.models._hmac_token`
         and compares against the stored HMAC digests in ``FRISIAN_MCP_API_KEYS``.
 
-        Returns ``(AnonymousUser, _ApiKeyAuth(permission=tier))`` on a match,
-        or ``None`` when the header is absent or no key matches.
+        Returns ``(AnonymousUser, _ApiKeyAuth(permission=tier, key_id=stored_digest))``
+        on a match, or ``None`` when the header is absent or no key matches.
 
         """
         api_keys: dict[str, str] = getattr(settings, "FRISIAN_MCP_API_KEYS", {})
@@ -194,7 +198,7 @@ class FrisianMcpApiKeyAuthentication(BaseAuthentication):
 
         for stored_digest, tier in api_keys.items():
             if secrets.compare_digest(incoming_digest, stored_digest):
-                return (AnonymousUser(), _ApiKeyAuth(permission=tier))
+                return (AnonymousUser(), _ApiKeyAuth(permission=tier, key_id=stored_digest))
 
         return None
 
