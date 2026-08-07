@@ -278,7 +278,7 @@ class TestDisclosure:
     """
     Every shape that can mint a token must publish where the token goes.
 
-    ADR-005 line 61 defines redemption as re-invoking the same tool with a
+    ADR-005's "Decision" defines redemption as re-invoking the same tool with a
     ``continuation_token`` and a ``mode``.  A shape that advertises
     ``available_modes`` in the probe envelope but omits the fields from its
     published schema mints tokens no conformant client can send back.
@@ -404,17 +404,19 @@ class TestProbeRedeemRoundTrip:
         else:
             assert served == [{"name": item["name"]} for item in _PAYLOAD]
 
-    def test_bare_token_returns_the_complete_dataset(
-        self, rf: RequestFactory, shape: _Shape
-    ) -> None:
+    def test_bare_token_returns_one_bounded_page(self, rf: RequestFactory, shape: _Shape) -> None:
         """
-        A token with no ``mode`` returns the full result, on every shape.
+        A token with no ``mode`` returns ONE PAGE, on every shape.
 
-        Pinned deliberately.  This is amendment item (d) — the one behaviour in
-        this project ruled to need an ADR *decision* rather than conformance —
-        so it must not drift editorially.  If a future change makes bare
-        redemption bounded, that is an ADR outcome and this assertion is the
-        thing that has to be updated on purpose.
+        **Updated on purpose: B2 changed this.**  This cell previously pinned
+        the opposite — bare redemption returning the complete dataset — as
+        amendment item (b), the one behaviour in this project ruled to need an
+        ADR *decision* rather than conformance.  Jeremy ruled B2, so the
+        decision arrived through the ADR process exactly as the pin intended
+        and this assertion is updated deliberately rather than relaxed.
+
+        The point of the pin survives the flip: the default is still asserted
+        explicitly on every shape, so it still cannot drift editorially.
         """
         reg = ToolRegistry()
         name = shape.build(reg)
@@ -427,7 +429,100 @@ class TestProbeRedeemRoundTrip:
             cache.get.return_value = _minted_entry(cache)
             served = _result(_call(rf, name, shape.redeem_args(probe["continuation_token"])))
 
+        # Bounded, not complete: a page envelope rather than the raw payload.
+        assert served != _PAYLOAD, "bare token still returned the complete dataset"
+        assert served["page"] == 1
+        assert served["total"] == len(_PAYLOAD)
+        assert served["has_more"] is True
+        assert served["items"] == _PAYLOAD[: served["page_size"]]
+
+    def test_bare_token_on_a_single_object_returns_it_whole(
+        self, rf: RequestFactory, shape: _Shape
+    ) -> None:
+        """
+        T18: B2's bounded default must not mangle a single-object result.
+
+        ``paginated`` is only coherent for a sequence.  A single object — any
+        ``@mcp_heavy`` ``retrieve``, and every ADR-004 write result — was being
+        sliced into fixed-width pieces of its JSON serialisation, cut at an
+        arbitrary offset and usually mid-token, so the caller received neither
+        the object nor anything parseable as one.
+
+        The object is already bounded, which is why it is returned whole rather
+        than given a page envelope.  Asserted per shape because the redemption
+        path is shared and a fix that only reached one shape would be worse
+        than none.
+        """
+        obj = {"id": "abc-123", "name": "single", "payload": "x" * 4000}
+        reg = ToolRegistry()
+        name = shape.build(reg)
+        # Replace the shape's payload with a single object rather than a list.
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            _result(_call(rf, name, shape.probe_args))
+            entry = _minted_entry(cache)
+            cache.get.return_value = {**entry, "result": obj}
+            served = _result(_call(rf, name, shape.redeem_args("tok")))
+
+        assert "chunk" not in served, "single object was chunked by the bare default"
+        assert served == obj
+
+    def test_explicit_full_still_returns_the_complete_dataset(
+        self, rf: RequestFactory, shape: _Shape
+    ) -> None:
+        """
+        B2 bounds the *default*; it does not remove ``full``.
+
+        The complete dataset stays available on every shape — it just has to be
+        asked for, so an omission or a typo cannot select it by accident.
+        """
+        reg = ToolRegistry()
+        name = shape.build(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            probe = _result(_call(rf, name, shape.probe_args))
+            cache.get.return_value = _minted_entry(cache)
+            served = _result(
+                _call(rf, name, shape.redeem_args(probe["continuation_token"], mode="full"))
+            )
+
         assert served == _PAYLOAD
+
+    def test_unknown_mode_is_rejected_and_names_the_enum(
+        self, rf: RequestFactory, shape: _Shape
+    ) -> None:
+        """
+        B2: an unrecognised mode is a validation error, not a silent fallback.
+
+        Serving *something* for a typo hides the mistake; under the old
+        behaviour a mistyped mode quietly returned the most expensive response
+        available.  The message names the public enum and nothing else — no
+        caller-specific, tool-specific or deploy-state detail — so it cannot
+        become the oracle this project already refused to add elsewhere.
+        """
+        reg = ToolRegistry()
+        name = shape.build(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            probe = _result(_call(rf, name, shape.probe_args))
+            cache.get.return_value = _minted_entry(cache)
+            response = _call(rf, name, shape.redeem_args(probe["continuation_token"], mode="bogus"))
+
+        payload = json.loads(response.content)["result"]
+        assert payload["isError"] is True
+        error = json.loads(payload["content"][0]["text"])["error"]
+        assert "bogus" in error
+        for mode in _MODES:
+            assert mode in error, f"error does not name supported mode {mode!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +888,65 @@ class TestMcpHeavyOnDispatcherShapes:
         assert entry.is_heavy is (shape.id == "flat_heavy")
 
     @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=None)
+    def test_class_dispatcher_foreign_resource_neither_probes_nor_mints(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        T15: a caller-supplied ``resource`` must not reach the global registry.
+
+        A class dispatcher never reads ``resource`` (``backends/dispatcher.py``
+        mentions it only in a comment), so ``{action, params, resource: X}``
+        dispatches normally — and before T15 the heavy branch then resolved
+        ``X_list`` against the **global** registry with no tier, permission or
+        ``_mcp_max_tier`` check between the resolve and the mint.
+
+        Two distinct effects are asserted, because closing only the first
+        leaves the second:
+
+        1. **No forced probe.**  The caller cannot make an unrelated tool's
+           ``@mcp_heavy`` flag shape *their* response.  The probe/normal-result
+           difference is also a one-bit oracle answering "does this name exist
+           and is it heavy?" for any guessed name.
+        2. **Nothing mints.**  This is the part that raised severity above
+           cosmetic: a mint pins a 300s entry in Django's shared default cache
+           for a response of *any* size, bypassing the 25,000-byte threshold
+           that normally gates it.
+
+        The backstop is disabled so a mint here could only come from the heavy
+        branch, and the payload is deliberately tiny — under the real threshold
+        — so a pre-T15 mint is unambiguously the bypass rather than a
+        legitimate over-threshold negotiation.
+        """
+        reg = ToolRegistry()
+        name = _build_class_dispatcher(reg)
+
+        # A registered, genuinely heavy tool that is NOT reachable through this
+        # dispatcher.  `resource="item"` + `action="list"` would resolve it.
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_heavy(
+                name="item_list",
+                description="Heavy tool outside the dispatcher.",
+                input_schema={"type": "object", "properties": {}},
+            )
+            def _fn(_arguments: dict[str, Any], _request: Any) -> Any:
+                return {"small": "payload"}
+
+            _ = _fn
+
+        assert reg.get_entry("item_list").is_heavy, "premise: the foreign tool is heavy"
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            result = _result(_call(rf, name, {"action": "list", "params": {}, "resource": "item"}))
+
+            assert "continuation_token" not in result, "foreign resource forced a probe envelope"
+            assert not cache.set.called, "foreign resource minted a cache entry"
+
+    @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=None)
     def test_group_call_on_heavy_member_negotiates(self, rf: RequestFactory) -> None:
         """
         G1 + G2: a sub-threshold ``@mcp_heavy`` member probes, bound to the group.
@@ -846,8 +1000,20 @@ class TestMcpHeavyOnDispatcherShapes:
             entry = _minted_entry(cache)
 
             cache.get.return_value = entry
+            # B2 (ADR-005 item (b)): `mode="full"` is now explicit. This cell is
+            # about the owner binding being *usable*, not about the default, so
+            # it asks for the whole payload rather than asserting whatever the
+            # default happens to be — that is TestProbeRedeemRoundTrip's job.
             served = _result(
-                _call(rf, "catalog", {**args, "continuation_token": result["continuation_token"]})
+                _call(
+                    rf,
+                    "catalog",
+                    {
+                        **args,
+                        "continuation_token": result["continuation_token"],
+                        "mode": "full",
+                    },
+                )
             )
 
         probe_request = _request(rf, "catalog", args)
@@ -890,12 +1056,19 @@ class TestProbeEnvelopeTeachingText:
         """
         BYTE-IDENTITY GUARD: the bare-token sentence must not drift editorially.
 
-        "Omitting 'mode' returns the COMPLETE dataset" states amendment item
-        (d) — the one behaviour in this project ruled to need an ADR *decision*
-        rather than conformance.  It shares a single string with the shape
-        wording being corrected, so a cleanup of the latter can silently reword
-        the former: a behaviour-contract change made in a string edit, with no
-        ADR and nothing in the diff that looks like a decision.
+        **The guarded text moved once, on purpose.**  This originally pinned
+        "Omitting 'mode' returns the COMPLETE dataset" as amendment item (b) —
+        the one behaviour ruled to need an ADR *decision* rather than
+        conformance — because it shares a single string with the shape wording
+        corrected in T3, so a cleanup of the latter could silently reword the
+        former: a contract change made in a string edit, with no ADR and
+        nothing in the diff that looks like a decision.
+
+        The mechanism worked.  The clause survived four code tasks, two
+        reviewers and a bot review untouched, and the decision arrived through
+        the ADR process as B2.  The guard is **updated, not removed** — it now
+        pins the B2 wording for exactly the same reason.  Whatever this
+        sentence says, changing it must be a ruling, not an edit.
         """
         reg = ToolRegistry()
         name = _SHAPES["flat_heavy"].build(reg)
@@ -906,7 +1079,9 @@ class TestProbeEnvelopeTeachingText:
             cache.get.return_value = None
             usage = _result(_call(rf, name, {}))["usage"]
 
-        assert "Omitting 'mode' returns the COMPLETE dataset" in usage
+        assert "Omitting 'mode' returns ONE PAGE" in usage
+        assert "pass mode='full' explicitly for the complete dataset" in usage
+        assert "COMPLETE dataset" not in usage, "pre-B2 wording resurfaced"
 
     def test_placement_text_is_shape_neutral(self, rf: RequestFactory, shape: _Shape) -> None:
         """

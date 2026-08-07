@@ -564,6 +564,61 @@ class TestContinuationTokenRetrieval:
     _build_heavy_cache_entry infrastructure.  Call 2 is identical to the @mcp_heavy call-2 path.
     """
 
+    def test_bare_token_retrieves_the_whole_object_not_a_chunk(self, rf: RequestFactory) -> None:
+        """
+        T18: a write token redeemed with NO ``mode`` returns the complete object.
+
+        This cell exists because the suite did not have one.  Every other
+        write-path redemption test passes ``mode="full"`` explicitly, which was
+        belt-and-braces while ``full`` was the default and became load-bearing
+        the moment B2 moved it — so 2044 passing tests were structurally
+        incapable of detecting that a bare write-token redemption had started
+        returning a truncated JSON string instead of the created object.
+
+        There is one cache prefix and one redemption path, so a change ruled on
+        ADR-005 read grounds reaches ADR-004 write tokens with nothing to
+        distinguish them.  The object is asserted field-by-field *and* the
+        chunk shape is asserted absent, so this fails loudly rather than
+        subtly if pagination is ever reapplied to a non-list.
+        """
+        full_object = {"id": "uuid-bare", "name": "test-device", "payload": "x" * 4000}
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return full_object
+
+        isolated = _build_write_registry("device.create", _create)
+        cache_store: dict[str, Any] = {}
+
+        def _cache_set(key: str, value: Any, timeout: int) -> None:
+            cache_store[key] = value
+
+        def _cache_get(key: str) -> Any:
+            return cache_store.get(key)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.side_effect = _cache_get
+            mock_cache.set.side_effect = _cache_set
+            resp1 = _call_tool(rf, "device.create", {"name": "test-device"})
+
+        token = _tool_result(resp1)["continuation_token"]
+        assert token is not None
+
+        # Call 2 with NO mode — the case the suite never exercised.
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.side_effect = _cache_get
+            mock_cache.set.side_effect = _cache_set
+            resp2 = _call_tool(rf, "device.create", {"continuation_token": token})
+
+        served = _tool_result(resp2)
+        assert "chunk" not in served, "bare write-token redemption returned a JSON chunk"
+        assert served == full_object
+
     def test_lean_token_retrieves_full_object(self, rf: RequestFactory) -> None:
         """Full result cached by lean write path is retrieved via continuation_token + mode=full."""
         full_object = {"id": "uuid-1", "name": "test-device", "payload": "x" * 200}
@@ -856,6 +911,12 @@ class TestDispatcherGroupWritePath:
             permission_classes=[],
             permission_tier="read",
             is_dispatcher=True,
+            # Matches how the package registers a group dispatcher at startup
+            # (apps.py) and how route_views rebuilds one.  Membership is not
+            # decoration: views.py resolves the routed entry only within it, so
+            # a fixture that omits it is not exercising a production-shaped
+            # dispatcher.
+            group_tool_names=member_tools,
         )
         return isolated
 

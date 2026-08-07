@@ -103,7 +103,7 @@ class TestBuildGroupInputSchema:
         """
         All five negotiation fields are published at the top level.
 
-        ADR-005 line 61 defines redemption as re-invoking the same tool with a
+        ADR-005's "Decision" defines redemption as re-invoking the same tool with a
         ``continuation_token`` and a ``mode``.  For a grouped tool that same
         tool is the dispatcher, so omitting these leaves a caller holding a
         token with no legal slot to send it back in — minted, never redeemable.

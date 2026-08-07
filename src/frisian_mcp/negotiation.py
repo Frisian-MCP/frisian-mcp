@@ -16,6 +16,19 @@ from __future__ import annotations
 
 from typing import Any
 
+#: The response modes ``_serve_heavy_mode`` implements, in advertised order.
+#: Single source of truth: the schema ``enum``, the probe envelope's
+#: ``available_modes`` and the invalid-mode error all derive from this, so a
+#: mode cannot be advertised without being servable, or rejected by an error
+#: that disagrees with the schema the caller was handed.
+NEGOTIATION_MODES: tuple[str, ...] = ("summary", "paginated", "filtered", "full")
+
+#: The mode served when a continuation call omits ``mode`` (ADR-005 item (b),
+#: ruled B2).  Bounded by default: an omission or a typo must not select the
+#: most expensive possible response.  ``full`` is still available and still
+#: complete — it just has to be asked for.
+DEFAULT_NEGOTIATION_MODE = "paginated"
+
 #: The five response-negotiation fields, as JSON Schema properties.  Single
 #: source of truth: consumers derive names from this mapping rather than
 #: restating them, so a field cannot be added to the protocol without every
@@ -36,19 +49,20 @@ _NEGOTIATION_PROPERTIES: dict[str, Any] = {
             "Token from a prior probe call, used to fetch the cached result."
             " Place at the TOP LEVEL of arguments — NOT inside 'params'."
             " Supply 'mode' alongside it to choose how much of the response to"
-            " retrieve; omitting 'mode' returns the COMPLETE dataset, which for"
-            " a large result may be very expensive."
+            " retrieve; omitting 'mode' returns ONE PAGE at the server default"
+            " page size. Pass mode='full' explicitly for the complete dataset."
         ),
     },
     "mode": {
         "type": "string",
-        "enum": ["summary", "paginated", "filtered", "full"],
+        "enum": list(NEGOTIATION_MODES),
         "description": (
             "How much of the cached result to return on a continuation call."
             " Only meaningful when sent together with 'continuation_token', and"
             " must sit at the TOP LEVEL alongside it — not inside 'params'."
-            " Omitting it defaults to 'full' (the complete dataset); use"
-            " 'summary' or 'paginated' to bound the response size."
+            " Omitting it defaults to 'paginated' (one bounded page); pass"
+            " 'full' explicitly for the complete dataset. A value outside the"
+            " enum is rejected, not served."
         ),
     },
     "page": {

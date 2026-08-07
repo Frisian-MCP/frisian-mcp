@@ -187,7 +187,9 @@ def _without_negotiation_constraints(schema: dict[str, Any]) -> dict[str, Any]:
     Return *schema* with the response-negotiation properties removed (T7-F5).
 
     The negotiation fields are DISCLOSED in a dispatcher's published schema
-    (ADR-005 line 73) but must not be ENFORCED when validating the caller's
+    (ADR-005 "Decision": redemption re-invokes *the same tool* with a
+    ``continuation_token`` and a ``mode``) but must not be ENFORCED when
+    validating the caller's
     top-level arguments.  They carry an ``enum`` (``mode``) and types
     (``page``, ``page_size``, ``filter_keys``), so leaving them in re-imposes
     the very reservation the dispatcher deliberately declines: ``mode`` is a

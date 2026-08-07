@@ -15,6 +15,8 @@
 ### Changed
 
 - Default permission-adapter capability resolution moved from `user.get_all_permissions()` to `user.has_perm()`.
+- **A bare `continuation_token` is now bounded by default, wherever bounding is meaningful.** Redeeming a continuation token with no `mode` previously returned the complete cached result. It now returns one bounded page for a collection, and the complete object for a single non-collection result — which is already bounded, and which chunking made unparseable rather than smaller. `full` requires an explicit `mode="full"`, and an unrecognised `mode` is now a validation error naming the supported modes instead of a silent fallback to the complete result. **This governs read-path and write-path continuation tokens alike** — there is one cache and one redemption path, with no token type to discriminate on — so a bare redemption of a write confirmation is affected too. Clients that omit `mode` today and rely on receiving everything must now send `mode="full"` explicitly. See [ADR-005](../ADR/adr-005-read-response-filtering.md).
+- **More tools now mint continuation entries into the shared cache.** With `@mcp_heavy` firing on grouped calls, a sub-threshold heavy tool reached through a group dispatcher now probes where it previously returned a full payload — a change operators should be able to predict rather than discover. Each continuation token holds a copy of the full result in Django's **default** cache for 300 seconds. Size the cache for the number of tools that can now probe concurrently, not for the previously decorated set; on hosts where the default cache also backs session or authorization state, consider giving the package its own cache alias.
 
 ### Deprecated
 
@@ -24,6 +26,21 @@
 
 - Retired the **E002** startup check (unresolved-OAuth-identity gate); unmapped OAuth clients now fall back to service-principal, tier-only discovery.
 - Retired the legacy `FRISIAN_MCP_OAUTH_PKCE_REDIRECT_TIER_MAP` setting; under the hardened authorize path a request's `redirect_uri` cannot influence a client's permission tier.
+
+### Fixed
+
+- **Heavy-response negotiation is usable through group dispatchers.** Group dispatchers now publish the negotiation input surface — `continuation_token`, `mode`, `page`, `page_size`, `filter_keys` — as top-level arguments. Previously the schema exposed only `resource` / `action` / `params` / `lite`, so a probe returned a `continuation_token` the caller had **no legal slot to send back**: nesting it in `params` reached filter validation and failed. Two-call negotiation was unusable through any group dispatcher.
+- **`@mcp_heavy` now fires for grouped calls.** Heaviness was resolved on the outer group tool name, and a dispatcher entry is never itself heavy — so only the size backstop negotiated. Hosts running `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None` got no negotiation at all: the same tool probed when called flat and returned its full payload when called through a group.
+- **A `continuation_token` misplaced inside `params` on a group call is now rejected** instead of silently minting a second token and re-running the query.
+- A continuation token redeemed with `mode="paginated"` on a non-collection result is returned whole rather than as a truncated fragment of its serialization.
+
+### Known issues
+
+- **The size backstop can mint a continuation token for tools whose published schema does not declare the negotiation fields.** `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` (default 25,000 bytes, active unless explicitly set to `None`) applies to any over-threshold read response, including tools registered with `@mcp_tool`, registered imperatively with `register_tool()`, or discovered automatically from the host's API. Clients that send the token back anyway redeem it normally, but a client that validates its calls against the published schema has no legal slot for it and cannot complete the second call; each such probe also holds a cached copy of the full response for 300 seconds with no possibility of redemption. Only `@mcp_heavy` tools and dispatcher tools publish the negotiation fields. Not addressed in this release.
+
+### Documentation
+
+- **[ADR-005](../ADR/adr-005-read-response-filtering.md) amended** (2026-08-07; status remains Accepted). Corrected the cache-layer description, which specified a continuation token derived from query parameters — a caller-predictable locator for another caller's cached result, and the opposite of the shipped design. Added three previously undocumented parts of the mechanism: continuation ownership and its binding dimensions, canonical top-level placement of the negotiation fields, and the default retrieval mode for a bare token. Also corrected the probe-envelope field list, the requirement wording for `mode`, and the auto-negotiate threshold's presentation as opt-in when it ships on. The ADR carries a dated `Amendments` section recording what each passage said before.
 
 ---
 

@@ -680,8 +680,10 @@ class TestNegotiationFieldContract:
     """
     The response-negotiation protocol must be discoverable on the dispatcher path.
 
-    ADR-005 line 73 requires the protocol to be disclosed in the generated
-    schema, but ``_merge_negotiation_schema`` was previously applied only on the
+    ADR-005's "Decision" — redemption re-invokes *the same tool* with a
+    ``continuation_token`` and a ``mode`` — makes the dispatcher the redemption
+    surface, so the protocol must be disclosed in the generated
+    schema.  ``_merge_negotiation_schema`` was previously applied only on the
     ``@mcp_heavy`` path.  Dispatcher tools — and the
     ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` backstop, which reads the same
     schema — advertised ``available_modes`` in the probe envelope while never

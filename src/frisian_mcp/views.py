@@ -60,6 +60,7 @@ from rest_framework.views import APIView
 from frisian_mcp.backends.base import ToolResult
 from frisian_mcp.contrib.permissions.base import _DRF_ACTION_TO_PERM_VERB
 from frisian_mcp.middleware import build_middleware_chain, get_middleware_instances
+from frisian_mcp.negotiation import DEFAULT_NEGOTIATION_MODE, NEGOTIATION_MODES
 from frisian_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -322,9 +323,9 @@ def _build_heavy_cache_entry(result: Any, request: Any, tool_name: str) -> dict[
     }
 
 
-def _dispatcher_target_entry(arguments: dict[str, Any]) -> Any | None:
+def _dispatcher_target_entry(entry: Any, arguments: dict[str, Any]) -> Any | None:
     """
-    Resolve the registry entry a group-dispatcher call routes to.
+    Resolve the entry *entry* routes to, **restricted to its own members**.
 
     A group dispatcher carries ``resource`` + ``action`` at the top level and
     routes to the flat tool ``f"{resource}{sep}{action}"``.  Flags declared on
@@ -332,15 +333,46 @@ def _dispatcher_target_entry(arguments: dict[str, Any]) -> Any | None:
     read from *its* entry: the dispatcher entry itself never carries them,
     because the decorators mark the flat tool.
 
-    Returns ``None`` when the arguments do not name a routable target (a class
-    dispatcher has no ``resource``, so it resolves to nothing here and keeps
-    its existing behaviour) or when no such tool is registered.
+    The membership check is a security boundary, not a tidy-up.  ``resource``
+    is caller-supplied, and a class dispatcher never reads it (see
+    ``backends/dispatcher.py``) — so a call shaped
+    ``{"action": ..., "params": {...}, "resource": <anything>}`` dispatches
+    normally through the class dispatcher and then, without this check, would
+    resolve ``<anything>_<action>`` against the **global** registry and read
+    its flags.  Nothing between that resolve and the heavy mint consults tier,
+    Django permissions, or the per-route ``_mcp_max_tier`` ceiling, so an
+    unrestricted lookup lets a caller force a probe envelope for a tool they
+    never invoked: it mints a 300s entry in the shared default cache for a
+    response of *any* size, bypassing FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD
+    entirely, and the probe-versus-normal-result difference answers "does this
+    name exist and is it @mcp_heavy?" for any name guessed.
+
+    Gate on *presence* of ``group_tool_names``, not merely on membership:
+    class dispatchers never set it at all, so a bare member check would
+    silently no-op on the one path that is actually reachable.  Resolution is
+    the **last** step, after membership, so a non-member name is never looked
+    up rather than looked up and discarded.
+
+    This is a no-op for every legitimate call.  Group dispatchers already
+    resolve only their own members — ``make_group_invoke`` enforces that during
+    dispatch, and the heavy branch runs only on a dispatch that already
+    succeeded — and class dispatchers already resolve nothing for a
+    well-behaved caller.  Only the malformed call changes behaviour.
+
+    Returns ``None`` when *entry* bundles no members (any non-group
+    dispatcher), when the arguments do not name a routable target, when the
+    target is not a member of *entry*, or when no such tool is registered.
     """
+    members: frozenset[str] | None = getattr(entry, "group_tool_names", None)
+    if not members:
+        return None
     resource = arguments.get("resource", "")
     action = arguments.get("action", "")
     sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
     target = f"{resource}{sep}{action}" if resource and action else ""
-    return tool_registry.get_entry(target) if target else None
+    if not target or target not in members:
+        return None
+    return tool_registry.get_entry(target)
 
 
 def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
@@ -355,7 +387,7 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
     return {
         "preview": preview[:200],
         "total_size": len(serialized.encode()),
-        "available_modes": ["summary", "paginated", "filtered", "full"],
+        "available_modes": list(NEGOTIATION_MODES),
         "continuation_token": token,
         # T6: an agent mid-negotiation is not re-reading tools/list, so the
         # envelope that advertises the modes must also say where the fields go
@@ -373,9 +405,8 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
         "usage": (
             "Re-invoke this same tool with 'continuation_token' and 'mode' at the"
             " TOP LEVEL of arguments, not inside 'params'."
-            " Omitting 'mode' returns the COMPLETE dataset"
-            f" ({len(serialized.encode())} bytes); use 'summary' or 'paginated'"
-            " to bound the response."
+            f" Omitting 'mode' returns ONE PAGE of the {len(serialized.encode())}-byte"
+            " result; pass mode='full' explicitly for the complete dataset."
         ),
     }
 
@@ -386,10 +417,19 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
 
     Modes:
     * ``summary``   — first 10 dict keys / 5 list items; values truncated to 100 chars
-    * ``paginated`` — one page of a list or JSON-chunk of a scalar; honours ``page``
-      and ``page_size`` arguments (default page=1, page_size=FRISIAN_MCP_HEAVY_PAGE_SIZE|20)
+    * ``paginated`` — one page of a **list** result; honours ``page`` and
+      ``page_size`` (default page=1, page_size=FRISIAN_MCP_HEAVY_PAGE_SIZE|20).
+      A non-list result is already bounded and is returned whole (T18)
     * ``filtered``  — result filtered to the keys listed in ``filter_keys`` argument
-    * ``full``      — complete cached result (default when mode is absent or unknown)
+    * ``full``      — complete cached result (must be requested explicitly)
+
+    An unrecognised *mode* raises :exc:`ToolInputError` naming the supported
+    enum.  It does **not** fall back to ``full`` (ADR-005 item (b), ruled B2):
+    a typo must not select the most expensive possible response, and silently
+    serving something other than what was asked for hides the mistake from the
+    caller entirely.  The caller never reaches here without a
+    ``continuation_token``, so the absent-mode default is applied by the
+    redemption path rather than here.
     """
     if mode == "full":
         return result
@@ -402,6 +442,27 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
         return {"summary": str(result)[:500]}
 
     if mode == "paginated":
+        # T18: pagination is only coherent for a sequence.  A non-list result —
+        # a created/updated object on the ADR-004 write path, or any single-object
+        # `retrieve` — is returned whole instead.
+        #
+        # This branch previously chunked `json.dumps(result)` into fixed-width
+        # slices, which cuts the serialisation at an arbitrary offset, usually
+        # mid-token.  The caller received neither the object nor anything
+        # parseable as one.  That was tolerable while `paginated` had to be asked
+        # for explicitly; B2 made it the default for a bare continuation_token,
+        # and read and write share one cache prefix and one redemption path
+        # (there is no token type to discriminate on), so a bare write-token
+        # redemption started returning a truncated string for the object that
+        # had just been created.
+        #
+        # Returning it whole is safe because a single object is *already*
+        # bounded — that is why the negotiation fired on size in the first
+        # place.  A caller who genuinely needs a large object bounded still has
+        # `summary` and `filtered`, both of which stay meaningful on a dict;
+        # what is removed is only an option that produced unusable output.
+        if not isinstance(result, list):
+            return result
         page: int = max(1, int(arguments.get("page", 1)))
         _default_page_size: int = getattr(settings, "FRISIAN_MCP_HEAVY_PAGE_SIZE", 20)
         _max_page_size: int = getattr(
@@ -411,21 +472,15 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
             1,
             min(int(arguments.get("page_size", _default_page_size)), _max_page_size),
         )
-        if isinstance(result, list):
-            start = (page - 1) * page_size
-            end = start + page_size
-            return {
-                "items": result[start:end],
-                "page": page,
-                "page_size": page_size,
-                "total": len(result),
-                "has_more": end < len(result),
-            }
-        serialized = json.dumps(result)
-        chunk_size = page_size * 100
-        start = (page - 1) * chunk_size
-        end = start + chunk_size
-        return {"chunk": serialized[start:end], "page": page, "has_more": end < len(serialized)}
+        start = (page - 1) * page_size
+        end = start + page_size
+        return {
+            "items": result[start:end],
+            "page": page,
+            "page_size": page_size,
+            "total": len(result),
+            "has_more": end < len(result),
+        }
 
     if mode == "filtered":
         filter_keys: list[str] = list(arguments.get("filter_keys") or [])
@@ -438,7 +493,14 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
             ]
         return result
 
-    return result  # unknown mode → full
+    # The message names only the public enum — identical for every caller, and
+    # carrying nothing caller-specific, tool-specific or deploy-state-specific.
+    # The redemption path deliberately exposes no caller-varying outcomes.
+    raise ToolInputError(
+        f"Unknown continuation mode {mode!r}."
+        f" Supported modes: {', '.join(NEGOTIATION_MODES)}."
+        f" Omit 'mode' for {DEFAULT_NEGOTIATION_MODE!r} (one bounded page)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1486,8 +1548,24 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     "isError": True,
                 },
             )
-        _mode: str = arguments.get("mode", "full")
-        served = _serve_heavy_mode(cached["result"], _mode, arguments)
+        # ADR-005 item (b), ruled B2: a bare continuation_token is bounded, not
+        # complete.  `full` is still available and still returns everything —
+        # it just has to be asked for, so an omitted or mistyped `mode` cannot
+        # select the most expensive response by accident.
+        _mode: str = arguments.get("mode", DEFAULT_NEGOTIATION_MODE)
+        try:
+            served = _serve_heavy_mode(cached["result"], _mode, arguments)
+        except ToolInputError as exc:
+            _log_audit_context(
+                request, tool_name, arguments, decision="deny", reason="continuation_bad_mode"
+            )
+            return _jsonrpc_success(
+                request_id,
+                {
+                    "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
+                    "isError": True,
+                },
+            )
         # DOC-7: serving a cached heavy result is an allowed, audit-worthy call.
         _log_audit_context(
             request, tool_name, arguments, decision="allow", reason="continuation_served"
@@ -1761,7 +1839,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # the underlying tool ran, so we read it from the original arguments here.
     if _write_entry is not None and _write_entry.is_dispatcher:
         _d_params: dict[str, Any] = arguments.get("params") or {}
-        _d_entry = _dispatcher_target_entry(arguments)
+        _d_entry = _dispatcher_target_entry(_write_entry, arguments)
         if _d_entry is not None and _d_entry.is_write and not _d_entry.is_heavy:
             _d_verify = bool(_d_params.get("verify", False))
             if _d_verify:
@@ -1804,7 +1882,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # entry, mirroring the write path above.
     _entry = tool_registry.get_entry(tool_name)
     _heavy_entry = (
-        _dispatcher_target_entry(arguments)
+        _dispatcher_target_entry(_entry, arguments)
         if _entry is not None and _entry.is_dispatcher
         else _entry
     )

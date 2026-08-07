@@ -12,7 +12,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
 from frisian_mcp.decorators import _merge_negotiation_schema, mcp_heavy
-from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.registry import ToolInputError, ToolRegistry
 from frisian_mcp.views import (
     McpView,
     _build_probe_envelope,
@@ -219,15 +219,21 @@ class TestBuildProbeEnvelope:
 
         An agent mid-negotiation is not re-reading ``tools/list``, so advertising
         ``available_modes`` without saying where the fields go is what made all
-        four modes look unreachable.  The envelope must also state that omitting
-        ``mode`` returns the complete dataset — since (Jeremy's ruling) ``full``
-        remains reachable by omission, disclosure is the only guardrail left.
+        four modes look unreachable.
+
+        **Updated on purpose: B2 changed the default.**  This previously
+        required the envelope to say that omitting ``mode`` returns the
+        complete dataset, on the reasoning that disclosure was the only
+        guardrail while ``full`` stayed reachable by omission.  Under B2 the
+        default is bounded, so the guardrail is the behaviour itself and the
+        envelope must instead teach that ``full`` has to be requested.
         """
         env = _build_probe_envelope({"key": "value" * 100}, "tok123")
         usage = env["usage"]
         assert "TOP LEVEL" in usage
         assert "'params'" in usage
-        assert "COMPLETE" in usage
+        assert "ONE PAGE" in usage
+        assert "mode='full'" in usage
         # The concrete byte cost of the full response is named, not just implied.
         assert str(env["total_size"]) in usage
 
@@ -272,10 +278,22 @@ class TestServeHeavyMode:
         result = {"a": 1, "b": 2}
         assert _serve_heavy_mode(result, "full", {}) == result
 
-    def test_unknown_mode_defaults_to_full(self) -> None:
-        """An unrecognised mode falls back to full."""
+    def test_unknown_mode_is_rejected(self) -> None:
+        """
+        An unrecognised mode raises rather than falling back.
+
+        **Updated on purpose: B2 changed this.**  This previously asserted the
+        opposite — that a bogus mode silently returned the complete result.
+        Serving the most expensive response for a typo hides the mistake from
+        the caller, which is precisely what the ADR-005 item (b) ruling
+        rejected.  The error names the public enum so the caller can correct
+        it, and nothing beyond it.
+        """
         result = {"a": 1}
-        assert _serve_heavy_mode(result, "bogus", {}) == result
+        with pytest.raises(ToolInputError) as exc:
+            _serve_heavy_mode(result, "bogus", {})
+        for mode in ("summary", "paginated", "filtered", "full"):
+            assert mode in str(exc.value)
 
     def test_summary_dict_truncates_values(self) -> None:
         """Summary mode truncates dict values to 100 chars."""
@@ -312,12 +330,30 @@ class TestServeHeavyMode:
         assert served["items"] == list(range(10, 15))
         assert served["has_more"] is False
 
-    def test_paginated_non_list_chunks_json(self) -> None:
-        """Paginated mode chunks a non-list result by JSON string."""
+    def test_paginated_non_list_returns_it_whole(self) -> None:
+        """
+        Paginated mode returns a non-list result whole, chunking nothing.
+
+        **Updated on purpose: T18 changed this.**  This previously asserted the
+        opposite — that a non-list result was sliced into fixed-width pieces of
+        its JSON serialisation.  Those slices cut at an arbitrary offset,
+        usually mid-token, so the caller got neither the object nor anything
+        parseable as one.
+
+        Harmless while ``paginated`` had to be requested explicitly; B2 made it
+        the default for a bare token, and since read and write share one cache
+        prefix and one redemption path, a bare write-token redemption began
+        returning a truncated string for the object just created.  A single
+        object is already bounded, so it is returned whole; ``summary`` and
+        ``filtered`` remain available for bounding a large one.
+
+        Explicit ``mode='paginated'`` on a non-list gets the same treatment as
+        the bare default — deliberately, so the mode means one thing.
+        """
         result = {"data": "x" * 500}
         served = _serve_heavy_mode(result, "paginated", {"page": 1, "page_size": 5})
-        assert "chunk" in served
-        assert "page" in served
+        assert served == result
+        assert "chunk" not in served
 
     def test_paginated_page_size_clamped_to_max(self, settings: Any) -> None:
         """Agent-supplied page_size above FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE is clamped."""

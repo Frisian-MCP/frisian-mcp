@@ -127,11 +127,20 @@ def _build_dispatcher_input_schema(
             },
         },
     }
-    # ADR-005 line 73 requires the negotiation protocol to be disclosed in the
-    # generated schema.  Until T6 this was applied on the @mcp_heavy path only,
-    # so dispatcher tools — and the FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD
-    # backstop, which reads this same schema — advertised `available_modes` in
-    # the probe envelope while never telling the agent where to put the fields.
+    # ADR-005 "Decision" — "Subsequent data is fetched by re-invoking the same
+    # tool with the `continuation_token` and a `mode`" — makes this tool the
+    # redemption surface, so its published schema has to admit those fields.
+    #
+    # Cited by quoted phrase, not line number: ADR-005 carries an Amendments
+    # section and its line numbering shifts whenever it is amended.  This
+    # comment previously cited "line 73", which is the *heaviness hint* clause
+    # about tool selection — a real requirement, but not the authority for the
+    # redemption input surface.
+    #
+    # Until T6 the merge was applied on the @mcp_heavy path only, so dispatcher
+    # tools — and the FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD backstop, which reads
+    # this same schema — advertised `available_modes` in the probe envelope
+    # while never telling the agent where to put the fields.
     return _merge_negotiation_schema(schema)
 
 

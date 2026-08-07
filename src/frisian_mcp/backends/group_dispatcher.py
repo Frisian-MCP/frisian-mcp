@@ -93,8 +93,8 @@ def build_group_input_schema() -> dict[str, Any]:
     how many tools it bundles.  Callers discover the catalogue via
     ``action="help"``.
 
-    The response-negotiation fields are merged in before returning.  ADR-005
-    line 61 defines redemption as re-invoking *the same tool* with a
+    The response-negotiation fields are merged in before returning.  ADR-005's
+    "Decision" defines redemption as re-invoking *the same tool* with a
     ``continuation_token`` and a ``mode``; for a grouped tool that same tool is
     this dispatcher, so the redemption input surface has to be reachable
     through this schema.  Without the merge the probe envelope advertises
