@@ -322,6 +322,27 @@ def _build_heavy_cache_entry(result: Any, request: Any, tool_name: str) -> dict[
     }
 
 
+def _dispatcher_target_entry(arguments: dict[str, Any]) -> Any | None:
+    """
+    Resolve the registry entry a group-dispatcher call routes to.
+
+    A group dispatcher carries ``resource`` + ``action`` at the top level and
+    routes to the flat tool ``f"{resource}{sep}{action}"``.  Flags declared on
+    that underlying tool — ``is_write``, ``is_heavy`` — therefore have to be
+    read from *its* entry: the dispatcher entry itself never carries them,
+    because the decorators mark the flat tool.
+
+    Returns ``None`` when the arguments do not name a routable target (a class
+    dispatcher has no ``resource``, so it resolves to nothing here and keeps
+    its existing behaviour) or when no such tool is registered.
+    """
+    resource = arguments.get("resource", "")
+    action = arguments.get("action", "")
+    sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
+    target = f"{resource}{sep}{action}" if resource and action else ""
+    return tool_registry.get_entry(target) if target else None
+
+
 def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
     """Build the call-1 probe envelope for the two-call response-negotiation protocol."""
     serialized = json.dumps(result)
@@ -340,10 +361,19 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
         # envelope that advertises the modes must also say where the fields go
         # and what omitting `mode` costs.  Advertising reachable modes without
         # disclosing their placement is what made all four look unreachable.
+        #
+        # The placement wording is deliberately shape-neutral.  This is the
+        # single builder for every consumer — flat `@mcp_heavy` (the tool's own
+        # fields, no `action` and no `params`), class dispatcher (`action` +
+        # `params`) and group dispatcher (`resource` + `action` + `params`) —
+        # and neither call site passes shape.  Naming sibling keys here was
+        # therefore wrong for the flat shape, which has none of them.  `params`
+        # is the only key the shapes that have one share, and the only place
+        # the fields must never go, so naming just it is true everywhere.
         "usage": (
             "Re-invoke this same tool with 'continuation_token' and 'mode' at the"
-            " TOP LEVEL of arguments (siblings of 'action'/'params', never inside"
-            " 'params'). Omitting 'mode' returns the COMPLETE dataset"
+            " TOP LEVEL of arguments, not inside 'params'."
+            " Omitting 'mode' returns the COMPLETE dataset"
             f" ({len(serialized.encode())} bytes); use 'summary' or 'paginated'"
             " to bound the response."
         ),
@@ -1376,8 +1406,25 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # during cutover than serving cross-caller data.
         is_bound = isinstance(cached, dict) and "owner_key" in cached and "result" in cached
         if cached is None or not is_bound:
+            # The two denials are operationally different — a genuine miss
+            # (expired or never issued) versus a pre-SEC-3 entry rejected on
+            # cutover — and during an upgrade window the second produces a wave
+            # of denials that would otherwise be indistinguishable from normal
+            # expiry.  The distinction goes in the audit reason, NOT in the
+            # response: the client string stays one message for both.  Redemption
+            # already exposes two outcomes to the caller ("expired or not found"
+            # versus the owner mismatch below), which is a token-validity oracle
+            # — harmless while tokens are 128-bit, but a third outcome would
+            # additionally disclose server deploy state ("this host still holds
+            # pre-SEC-3 entries") to any token holder, anonymous callers on open
+            # mounts included.  Operators get the discrimination from the log;
+            # callers do not get it from the wire.
             _log_audit_context(
-                request, tool_name, arguments, decision="deny", reason="continuation_expired"
+                request,
+                tool_name,
+                arguments,
+                decision="deny",
+                reason="continuation_expired" if cached is None else "continuation_unbound_legacy",
             )
             return _jsonrpc_success(
                 request_id,
@@ -1429,7 +1476,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                                 {
                                     "error": (
                                         "Continuation token does not belong to this"
-                                        " caller / tool / session.  Re-invoke without"
+                                        " caller / tier / tool.  Re-invoke without"
                                         " continuation_token to start a new negotiation."
                                     )
                                 }
@@ -1713,12 +1760,8 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # path.  `verify` was stripped from params by make_group_invoke before
     # the underlying tool ran, so we read it from the original arguments here.
     if _write_entry is not None and _write_entry.is_dispatcher:
-        _d_resource = arguments.get("resource", "")
-        _d_action = arguments.get("action", "")
         _d_params: dict[str, Any] = arguments.get("params") or {}
-        _d_sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
-        _d_target = f"{_d_resource}{_d_sep}{_d_action}" if _d_resource and _d_action else ""
-        _d_entry = tool_registry.get_entry(_d_target) if _d_target else None
+        _d_entry = _dispatcher_target_entry(arguments)
         if _d_entry is not None and _d_entry.is_write and not _d_entry.is_heavy:
             _d_verify = bool(_d_params.get("verify", False))
             if _d_verify:
@@ -1751,11 +1794,34 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
 
     # @mcp_heavy tools: cache the result and return a probe envelope so the agent
     # can choose how much of the response to retrieve on the follow-up call.
+    #
+    # R1: a dispatcher entry is never itself `is_heavy` — `@mcp_heavy` marks the
+    # underlying flat tool — so resolving this flag on the outer name meant
+    # `@mcp_heavy` never fired for a grouped call.  Only the size backstop below
+    # negotiated, and hosts running AUTO_NEGOTIATE_THRESHOLD=None got no
+    # negotiation at all: the same tool probed when called flat and returned its
+    # full payload when called through a group.  Resolve through to the routed
+    # entry, mirroring the write path above.
     _entry = tool_registry.get_entry(tool_name)
-    if _entry is not None and _entry.is_heavy:
+    _heavy_entry = (
+        _dispatcher_target_entry(arguments)
+        if _entry is not None and _entry.is_dispatcher
+        else _entry
+    )
+    if _heavy_entry is not None and _heavy_entry.is_heavy:
         _token = secrets.token_urlsafe(16)
         # SEC-3: bind the cache entry to the current caller so a leaked
         # continuation_token cannot be replayed by a different agent.
+        #
+        # G1: `tool_name` here is the OUTER tool — deliberately, and it must
+        # stay that way.  The line above changes which entry *decides* whether
+        # to negotiate; it must not change which *name* is bound.  Redemption
+        # (`_heavy_owner_key(request, tool_name)` on the continuation path)
+        # knows only the outer name — it never sees `resource`/`action` — so
+        # passing the resolved inner name here "for consistency" would bind
+        # mint to the inner name while redeem stays outer, and every grouped
+        # redemption would fail owner-mismatch.  That is the unredeemable-token
+        # bug this change exists to fix, reintroduced from the other side.
         django_cache.set(
             f"{_HEAVY_CACHE_PREFIX}{_token}",
             _build_heavy_cache_entry(result, request, tool_name),

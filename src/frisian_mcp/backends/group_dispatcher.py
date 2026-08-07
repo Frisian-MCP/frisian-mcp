@@ -30,6 +30,9 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from django.conf import settings
 from django.http import HttpRequest
 
+from frisian_mcp.backends.dispatcher import _reject_misplaced_continuation_token
+from frisian_mcp.negotiation import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
+
 if TYPE_CHECKING:
     from frisian_mcp.registry import ToolRegistry
 
@@ -89,8 +92,17 @@ def build_group_input_schema() -> dict[str, Any]:
     a group dispatcher is precisely that the schema stays small regardless of
     how many tools it bundles.  Callers discover the catalogue via
     ``action="help"``.
+
+    The response-negotiation fields are merged in before returning.  ADR-005
+    line 61 defines redemption as re-invoking *the same tool* with a
+    ``continuation_token`` and a ``mode``; for a grouped tool that same tool is
+    this dispatcher, so the redemption input surface has to be reachable
+    through this schema.  Without the merge the probe envelope advertises
+    ``available_modes`` while the published schema gives the caller no legal
+    slot to send the token back — the token is minted and can never be
+    redeemed.
     """
-    return {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "resource": {
@@ -110,7 +122,15 @@ def build_group_input_schema() -> dict[str, Any]:
             "params": {
                 "type": "object",
                 "additionalProperties": True,
-                "description": "Parameters forwarded to the underlying tool.",
+                "description": (
+                    "Parameters forwarded to the underlying tool."
+                    " 'continuation_token' is never an action parameter — it is"
+                    " always a top-level sibling of 'resource', 'action' and"
+                    " 'params'. 'mode', 'page', 'page_size' and 'filter_keys'"
+                    " are top-level ONLY on a continuation call (i.e. alongside"
+                    " a 'continuation_token'); otherwise they are ordinary"
+                    " action parameters and belong here."
+                ),
             },
             "lite": {
                 "type": "boolean",
@@ -123,6 +143,7 @@ def build_group_input_schema() -> dict[str, Any]:
             },
         },
     }
+    return _merge_negotiation_schema(schema)
 
 
 def build_group_help(  # pylint: disable=too-many-locals
@@ -290,11 +311,22 @@ def make_group_invoke(  # pylint: disable=too-many-locals
         sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
         action: str | None = arguments.get("action")
         resource: str | None = arguments.get("resource")
+        _reject_misplaced_continuation_token(arguments)
         # Accept both nested {action, resource, params: {...}} and flat
         # {action, resource, key: val} forms — same convention as
         # @mcp_dispatcher's invoke (see backends/dispatcher.py).
+        #
+        # continuation_token is excluded from the flat sweep because it is never
+        # a legitimate action parameter (T6).  Note the exclusion set is NOT the
+        # class dispatcher's: a group call also carries `resource`, which must
+        # stay out of params or every flat-form group call breaks.  The other
+        # negotiation fields are deliberately NOT excluded — they collide with
+        # real host data (a model field named `mode`; DRF's own page/page_size)
+        # and must reach the action untouched.
         params: dict[str, Any] = arguments.get("params") or {
-            k: v for k, v in arguments.items() if k not in ("action", "resource")
+            k: v
+            for k, v in arguments.items()
+            if k not in ("action", "resource", NEGOTIATION_PROTOCOL_ONLY_KEY)
         }
 
         if action is None or action == "help":

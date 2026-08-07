@@ -15,7 +15,7 @@ from frisian_mcp.backends.group_dispatcher import (
     build_group_input_schema,
     make_group_invoke,
 )
-from frisian_mcp.registry import ToolRegistry
+from frisian_mcp.registry import ToolInputError, ToolRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -78,7 +78,13 @@ def _request(rf: RequestFactory, *, permission: str | None = None) -> Any:
 
 
 class TestBuildGroupInputSchema:
-    """The dispatcher schema is intentionally tiny — keep it that way."""
+    """
+    The dispatcher schema stays small — no resource/action enumeration.
+
+    "Small" means it does not grow with the number of bundled tools.  The fixed
+    response-negotiation fields are exempt: they are a constant five regardless
+    of group size, and without them a continuation token cannot be redeemed.
+    """
 
     def test_schema_top_level_is_object(self) -> None:
         """Schema is a JSON object with the documented properties."""
@@ -92,6 +98,37 @@ class TestBuildGroupInputSchema:
         schema = build_group_input_schema()
         assert "enum" not in schema["properties"]["resource"]
         assert "enum" not in schema["properties"]["action"]
+
+    def test_schema_discloses_negotiation_protocol(self) -> None:
+        """
+        All five negotiation fields are published at the top level.
+
+        ADR-005 line 61 defines redemption as re-invoking the same tool with a
+        ``continuation_token`` and a ``mode``.  For a grouped tool that same
+        tool is the dispatcher, so omitting these leaves a caller holding a
+        token with no legal slot to send it back in — minted, never redeemable.
+        """
+        props = build_group_input_schema()["properties"]
+        for key in ("continuation_token", "mode", "page", "page_size", "filter_keys"):
+            assert key in props, f"{key!r} missing from group dispatcher schema"
+
+    def test_schema_mode_enum_matches_served_modes(self) -> None:
+        """The advertised modes are exactly the ones _serve_heavy_mode implements."""
+        mode = build_group_input_schema()["properties"]["mode"]
+        assert mode["enum"] == ["summary", "paginated", "filtered", "full"]
+
+    def test_negotiation_placement_text_is_shape_neutral(self) -> None:
+        """
+        The token's placement text must not enumerate sibling argument names.
+
+        The same description is merged into three argument shapes — flat
+        ``@mcp_heavy`` (no ``action``, no ``params``), class dispatcher
+        (``action`` + ``params``) and group dispatcher (``resource`` +
+        ``action`` + ``params``) — so naming siblings is wrong for at least one.
+        """
+        desc = build_group_input_schema()["properties"]["continuation_token"]["description"]
+        assert "sibling" not in desc.lower()
+        assert "params" in desc
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +203,116 @@ class TestMakeGroupInvoke:
             _request(rf, permission="read"),
         )
         assert result["called"] == "item.list"
+
+    def test_params_nested_continuation_token_is_rejected(
+        self, populated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """
+        A token nested in ``params`` is rejected loudly, not forwarded.
+
+        Without the guard the token reaches the underlying action as a filter
+        field.  A strict host rejects it as an unknown filter; a lenient host
+        runs the query and mints a *second* token, so retrying the "failed"
+        redemption loops.  Either way the caller is never told the key is real
+        and merely misplaced.
+        """
+        invoke = make_group_invoke(
+            "svc",
+            frozenset({"item_list"}),
+            populated_registry,
+        )
+        with pytest.raises(ToolInputError) as exc:
+            invoke(
+                {
+                    "resource": "item",
+                    "action": "list",
+                    "params": {"continuation_token": "abc123"},
+                },
+                _request(rf, permission="read"),
+            )
+        assert "top level" in str(exc.value).lower()
+
+    def test_flat_form_keeps_resource_out_of_params(
+        self, populated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """
+        The flat-form sweep excludes ``resource`` as well as ``action``.
+
+        The class dispatcher's exclusion tuple has no ``resource`` because it
+        has no such concept; copying it here would sweep the routing key into
+        params and break every flat-form group call.
+        """
+        invoke = make_group_invoke(
+            "svc",
+            frozenset({"item_list"}),
+            populated_registry,
+        )
+        result = invoke(
+            {"resource": "item", "action": "list", "name": "widget"},
+            _request(rf, permission="read"),
+        )
+        assert result["arguments"] == {"name": "widget"}
+
+    def test_flat_form_keeps_continuation_token_out_of_params(
+        self, populated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """
+        A top-level token is never reclassified as an action filter (T6).
+
+        ``views.py`` short-circuits a valid top-level token before dispatch, so
+        this is belt-and-braces — it matters for an expired or foreign token,
+        where the caller must get the expiry/owner error rather than a filter
+        error naming a key they placed correctly.
+        """
+        invoke = make_group_invoke(
+            "svc",
+            frozenset({"item_list"}),
+            populated_registry,
+        )
+        result = invoke(
+            {
+                "resource": "item",
+                "action": "list",
+                "continuation_token": "abc123",
+                "name": "widget",
+            },
+            _request(rf, permission="read"),
+        )
+        assert result["arguments"] == {"name": "widget"}
+
+    def test_flat_form_passes_through_colliding_negotiation_fields(
+        self, populated_registry: ToolRegistry, rf: RequestFactory
+    ) -> None:
+        """
+        ``mode``/``page``/``page_size``/``filter_keys`` reach the action untouched.
+
+        Only ``continuation_token`` can never be a legitimate filter.  The other
+        four collide with real host data — a model field named ``mode``, DRF's
+        own ``page``/``page_size`` — so excluding them "for symmetry" would
+        silently drop real query parameters.
+        """
+        invoke = make_group_invoke(
+            "svc",
+            frozenset({"item_list"}),
+            populated_registry,
+        )
+        result = invoke(
+            {
+                "resource": "item",
+                "action": "list",
+                "mode": "access",
+                "page": 2,
+                "page_size": 50,
+                "filter_keys": ["a"],
+            },
+            _request(rf, permission="read"),
+        )
+        assert result["arguments"] == {
+            "mode": "access",
+            "page": 2,
+            "page_size": 50,
+            "filter_keys": ["a"],
+        }
 
     def test_help_response_when_action_missing(
         self, populated_registry: ToolRegistry, rf: RequestFactory

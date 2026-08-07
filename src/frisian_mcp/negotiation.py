@@ -20,15 +20,24 @@ from typing import Any
 #: source of truth: consumers derive names from this mapping rather than
 #: restating them, so a field cannot be added to the protocol without every
 #: placement/validation rule seeing it.
+#:
+#: Placement wording here is deliberately **shape-neutral**.  These descriptions
+#: are merged into three different argument shapes — a flat ``@mcp_heavy`` tool
+#: (the tool's own fields, no ``action`` and no ``params``), a class dispatcher
+#: (``action`` + ``params``), and a group dispatcher (``resource`` + ``action``
+#: + ``params``).  Naming the sibling keys would therefore be wrong for at least
+#: one consumer.  ``params`` is the only key common to the shapes that have one,
+#: and it is the only place the protocol fields must never go, so "top level,
+#: not inside 'params'" is both sufficient and true everywhere.
 _NEGOTIATION_PROPERTIES: dict[str, Any] = {
     "continuation_token": {
         "type": "string",
         "description": (
             "Token from a prior probe call, used to fetch the cached result."
-            " Place at the TOP LEVEL of arguments, as a sibling of 'action' and"
-            " 'params' — NOT inside 'params'. Supply 'mode' alongside it to choose"
-            " how much of the response to retrieve; omitting 'mode' returns the"
-            " COMPLETE dataset, which for a large result may be very expensive."
+            " Place at the TOP LEVEL of arguments — NOT inside 'params'."
+            " Supply 'mode' alongside it to choose how much of the response to"
+            " retrieve; omitting 'mode' returns the COMPLETE dataset, which for"
+            " a large result may be very expensive."
         ),
     },
     "mode": {

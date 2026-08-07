@@ -576,7 +576,7 @@ class TestMcpHeavyIntegration:
 
 
 # ---------------------------------------------------------------------------
-# SEC-3 — continuation tokens bound to caller / tool / session
+# SEC-3 — continuation tokens bound to caller / tier / tool
 # ---------------------------------------------------------------------------
 
 
