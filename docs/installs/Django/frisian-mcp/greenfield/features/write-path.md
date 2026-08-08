@@ -94,7 +94,9 @@ The object above is the **`arguments`** payload for the tool call — `verify` r
 
 ## Continuation token — retrieve full object without re-executing the write
 
-The `continuation_token` in the lean envelope reuses the `@mcp_heavy` cache infrastructure. Pass it back to retrieve the complete serialized object; `mode` defaults to `full` when a `continuation_token` is present, so `mode=full` is optional but may be sent explicitly. The write is not re-run.
+The `continuation_token` in the lean envelope reuses the `@mcp_heavy` cache infrastructure. Pass it back to retrieve the complete serialized object; a write result is a single object, and a single object is already bounded, so it is returned whole. `mode=full` may be sent explicitly and returns the same thing. The write is not re-run.
+
+Note that `mode` does **not** default to `full`. Omitting it selects `paginated`, which returns one bounded page for a *list* result and the whole object for a non-list result — which is why a write-path redemption returns the complete object either way. Sending `mode=paginated` on a write result is therefore also equivalent.
 
 ---
 

@@ -758,6 +758,21 @@ class TestNegotiationFieldContract:
         assert "continuation_token" in msg
         # Distinguishable from a genuine unknown-filter rejection.
         assert "filter" in msg.lower()
+        # T20: the corrective message must describe the CURRENT bare-token
+        # contract.  It shipped in 1419150 still asserting the pre-B2 default
+        # ("Omitting 'mode' returns the complete dataset") while the ADR
+        # amended in that same commit said the opposite — and no assertion
+        # here noticed, because this test checked placement wording only.
+        #
+        # This is the guard's *corrective* text: it is read by an agent who has
+        # already got the call shape wrong. Correcting them with a stale
+        # contract is the same defect class as the A5 gap, so the sentence is
+        # pinned rather than left to drift a second time.
+        assert "Omitting 'mode' returns one bounded page" in msg
+        assert "pass 'full' explicitly for the complete dataset" in msg
+        assert (
+            "Omitting 'mode' returns the complete dataset" not in msg
+        ), "pre-B2 bare-token wording resurfaced in the misplaced-token guard"
 
     def test_flat_form_still_sweeps_ordinary_params(
         self, isolated_registry: ToolRegistry, rf: RequestFactory

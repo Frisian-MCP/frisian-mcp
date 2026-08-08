@@ -266,7 +266,8 @@ def _reject_misplaced_continuation_token(arguments: dict[str, Any]) -> None:
             " Re-send the call exactly as before, but move 'continuation_token' out of"
             " 'params' to the top level and add 'mode' beside it"
             " ('summary'|'paginated'|'filtered'|'full')."
-            " Omitting 'mode' returns the complete dataset."
+            " Omitting 'mode' returns one bounded page; pass 'full' explicitly"
+            " for the complete dataset."
         )
 
 
