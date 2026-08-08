@@ -127,7 +127,15 @@ class TestBuildGroupInputSchema:
         ``action`` + ``params``) — so naming siblings is wrong for at least one.
         """
         desc = build_group_input_schema()["properties"]["continuation_token"]["description"]
+        # Assert the shape-specific KEY NAMES are absent, not merely the word
+        # "sibling".  Wording that named 'action' or 'resource' without using
+        # that word would pass a "sibling" check while still being wrong for
+        # the flat and class shapes — the exact defect this test exists for.
+        assert "'action'" not in desc
+        assert "'resource'" not in desc
         assert "sibling" not in desc.lower()
+        # 'params' is the one key common to every shape that has one, and the
+        # only place the token must never go, so naming it is correct.
         assert "params" in desc
 
 

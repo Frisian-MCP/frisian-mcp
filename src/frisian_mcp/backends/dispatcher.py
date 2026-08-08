@@ -264,10 +264,11 @@ def _reject_misplaced_continuation_token(arguments: dict[str, Any]) -> None:
             " treated as an action filter and rejected. It is a response-negotiation"
             " field and belongs at the TOP LEVEL of arguments, not inside 'params'."
             " Re-send the call exactly as before, but move 'continuation_token' out of"
-            " 'params' to the top level and add 'mode' beside it"
+            " 'params' to the top level. 'mode' is optional and may be added beside it"
             " ('summary'|'paginated'|'filtered'|'full')."
-            " Omitting 'mode' returns one bounded page; pass 'full' explicitly"
-            " for the complete dataset."
+            " Omitting 'mode' returns one bounded page of a list result, or the whole"
+            " object for a non-list result; pass 'full' explicitly for the complete"
+            " dataset."
         )
 
 

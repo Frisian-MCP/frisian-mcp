@@ -48,9 +48,11 @@ _NEGOTIATION_PROPERTIES: dict[str, Any] = {
         "description": (
             "Token from a prior probe call, used to fetch the cached result."
             " Place at the TOP LEVEL of arguments — NOT inside 'params'."
-            " Supply 'mode' alongside it to choose how much of the response to"
-            " retrieve; omitting 'mode' returns ONE PAGE at the server default"
-            " page size. Pass mode='full' explicitly for the complete dataset."
+            " 'mode' is OPTIONAL: supply it alongside to choose how much of the"
+            " response to retrieve. Omitting 'mode' returns ONE PAGE at the"
+            " server default page size when the result is a list, or the whole"
+            " object when it is not (a single object is already bounded)."
+            " Pass mode='full' explicitly for the complete dataset."
         ),
     },
     "mode": {
@@ -58,11 +60,13 @@ _NEGOTIATION_PROPERTIES: dict[str, Any] = {
         "enum": list(NEGOTIATION_MODES),
         "description": (
             "How much of the cached result to return on a continuation call."
-            " Only meaningful when sent together with 'continuation_token', and"
-            " must sit at the TOP LEVEL alongside it — not inside 'params'."
-            " Omitting it defaults to 'paginated' (one bounded page); pass"
-            " 'full' explicitly for the complete dataset. A value outside the"
-            " enum is rejected, not served."
+            " OPTIONAL. Only meaningful when sent together with"
+            " 'continuation_token', and must sit at the TOP LEVEL alongside it"
+            " — not inside 'params'. Omitting it defaults to 'paginated', which"
+            " returns one bounded page of a list result, or the whole object"
+            " for a non-list result (already bounded, so nothing is chunked)."
+            " Pass 'full' explicitly for the complete dataset. A value outside"
+            " the enum is rejected, not served."
         ),
     },
     "page": {

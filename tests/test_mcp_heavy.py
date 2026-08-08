@@ -234,6 +234,13 @@ class TestBuildProbeEnvelope:
         assert "'params'" in usage
         assert "ONE PAGE" in usage
         assert "mode='full'" in usage
+        # Positive assertions alone would pass on an envelope containing BOTH
+        # the current text and the obsolete pre-B2 default — a self-
+        # contradicting envelope is worse than a stale one, because the caller
+        # cannot tell which sentence to believe mid-negotiation.  The matrix
+        # carries this negative guard; this file did not, so it is added here
+        # rather than left to the other file to catch.
+        assert "COMPLETE dataset" not in usage, "pre-B2 wording resurfaced"
         # The concrete byte cost of the full response is named, not just implied.
         assert str(env["total_size"]) in usage
 

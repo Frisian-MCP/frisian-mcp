@@ -403,10 +403,12 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
         # is the only key the shapes that have one share, and the only place
         # the fields must never go, so naming just it is true everywhere.
         "usage": (
-            "Re-invoke this same tool with 'continuation_token' and 'mode' at the"
-            " TOP LEVEL of arguments, not inside 'params'."
+            "Re-invoke this same tool with 'continuation_token' at the TOP LEVEL"
+            " of arguments, not inside 'params'. 'mode' is optional and goes"
+            " beside it."
             f" Omitting 'mode' returns ONE PAGE of the {len(serialized.encode())}-byte"
-            " result; pass mode='full' explicitly for the complete dataset."
+            " result if it is a list, or the whole object if it is not;"
+            " pass mode='full' explicitly for the complete dataset."
         ),
     }
 
