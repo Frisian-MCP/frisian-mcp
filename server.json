@@ -8,7 +8,7 @@
     "url": "https://github.com/Frisian-MCP/frisian-mcp",
     "source": "github"
   },
-  "version": "1.0.12",
+  "version": "1.1.0",
   "remotes": [
     {
       "type": "streamable-http",

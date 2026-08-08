@@ -680,8 +680,10 @@ class TestNegotiationFieldContract:
     """
     The response-negotiation protocol must be discoverable on the dispatcher path.
 
-    ADR-005 line 73 requires the protocol to be disclosed in the generated
-    schema, but ``_merge_negotiation_schema`` was previously applied only on the
+    ADR-005's "Decision" — redemption re-invokes *the same tool* with a
+    ``continuation_token`` and a ``mode`` — makes the dispatcher the redemption
+    surface, so the protocol must be disclosed in the generated
+    schema.  ``_merge_negotiation_schema`` was previously applied only on the
     ``@mcp_heavy`` path.  Dispatcher tools — and the
     ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` backstop, which reads the same
     schema — advertised ``available_modes`` in the probe envelope while never
@@ -756,6 +758,21 @@ class TestNegotiationFieldContract:
         assert "continuation_token" in msg
         # Distinguishable from a genuine unknown-filter rejection.
         assert "filter" in msg.lower()
+        # T20: the corrective message must describe the CURRENT bare-token
+        # contract.  It shipped in 1419150 still asserting the pre-B2 default
+        # ("Omitting 'mode' returns the complete dataset") while the ADR
+        # amended in that same commit said the opposite — and no assertion
+        # here noticed, because this test checked placement wording only.
+        #
+        # This is the guard's *corrective* text: it is read by an agent who has
+        # already got the call shape wrong. Correcting them with a stale
+        # contract is the same defect class as the A5 gap, so the sentence is
+        # pinned rather than left to drift a second time.
+        assert "Omitting 'mode' returns one bounded page" in msg
+        assert "pass 'full' explicitly for the complete dataset" in msg
+        assert (
+            "Omitting 'mode' returns the complete dataset" not in msg
+        ), "pre-B2 bare-token wording resurfaced in the misplaced-token guard"
 
     def test_flat_form_still_sweeps_ordinary_params(
         self, isolated_registry: ToolRegistry, rf: RequestFactory

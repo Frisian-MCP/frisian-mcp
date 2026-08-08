@@ -16,30 +16,57 @@ from __future__ import annotations
 
 from typing import Any
 
+#: The response modes ``_serve_heavy_mode`` implements, in advertised order.
+#: Single source of truth: the schema ``enum``, the probe envelope's
+#: ``available_modes`` and the invalid-mode error all derive from this, so a
+#: mode cannot be advertised without being servable, or rejected by an error
+#: that disagrees with the schema the caller was handed.
+NEGOTIATION_MODES: tuple[str, ...] = ("summary", "paginated", "filtered", "full")
+
+#: The mode served when a continuation call omits ``mode`` (ADR-005 item (b),
+#: ruled B2).  Bounded by default: an omission or a typo must not select the
+#: most expensive possible response.  ``full`` is still available and still
+#: complete — it just has to be asked for.
+DEFAULT_NEGOTIATION_MODE = "paginated"
+
 #: The five response-negotiation fields, as JSON Schema properties.  Single
 #: source of truth: consumers derive names from this mapping rather than
 #: restating them, so a field cannot be added to the protocol without every
 #: placement/validation rule seeing it.
+#:
+#: Placement wording here is deliberately **shape-neutral**.  These descriptions
+#: are merged into three different argument shapes — a flat ``@mcp_heavy`` tool
+#: (the tool's own fields, no ``action`` and no ``params``), a class dispatcher
+#: (``action`` + ``params``), and a group dispatcher (``resource`` + ``action``
+#: + ``params``).  Naming the sibling keys would therefore be wrong for at least
+#: one consumer.  ``params`` is the only key common to the shapes that have one,
+#: and it is the only place the protocol fields must never go, so "top level,
+#: not inside 'params'" is both sufficient and true everywhere.
 _NEGOTIATION_PROPERTIES: dict[str, Any] = {
     "continuation_token": {
         "type": "string",
         "description": (
             "Token from a prior probe call, used to fetch the cached result."
-            " Place at the TOP LEVEL of arguments, as a sibling of 'action' and"
-            " 'params' — NOT inside 'params'. Supply 'mode' alongside it to choose"
-            " how much of the response to retrieve; omitting 'mode' returns the"
-            " COMPLETE dataset, which for a large result may be very expensive."
+            " Place at the TOP LEVEL of arguments — NOT inside 'params'."
+            " 'mode' is OPTIONAL: supply it alongside to choose how much of the"
+            " response to retrieve. Omitting 'mode' returns ONE PAGE at the"
+            " server default page size when the result is a list, or the whole"
+            " object when it is not (a single object is already bounded)."
+            " Pass mode='full' explicitly for the complete dataset."
         ),
     },
     "mode": {
         "type": "string",
-        "enum": ["summary", "paginated", "filtered", "full"],
+        "enum": list(NEGOTIATION_MODES),
         "description": (
             "How much of the cached result to return on a continuation call."
-            " Only meaningful when sent together with 'continuation_token', and"
-            " must sit at the TOP LEVEL alongside it — not inside 'params'."
-            " Omitting it defaults to 'full' (the complete dataset); use"
-            " 'summary' or 'paginated' to bound the response size."
+            " OPTIONAL. Only meaningful when sent together with"
+            " 'continuation_token', and must sit at the TOP LEVEL alongside it"
+            " — not inside 'params'. Omitting it defaults to 'paginated', which"
+            " returns one bounded page of a list result, or the whole object"
+            " for a non-list result (already bounded, so nothing is chunked)."
+            " Pass 'full' explicitly for the complete dataset. A value outside"
+            " the enum is rejected, not served."
         ),
     },
     "page": {

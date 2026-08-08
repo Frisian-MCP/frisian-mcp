@@ -55,26 +55,71 @@ When a heavy tool (or an auto-discovered action over the negotiation threshold) 
 - `total_size` — full serialized response size in bytes
 - `available_modes` — the retrieval modes (`summary`, `paginated`, `filtered`, `full`) the agent may request
 - `continuation_token` — opaque token that fetches the cached result in a chosen mode
+- `usage` — how to redeem the token: where the negotiation fields go, and what omitting `mode` returns. An agent mid-negotiation is not re-reading `tools/list`, so the envelope that advertises the modes must also say how to reach them. Advertising reachable modes without disclosing their placement is what made all of them look unreachable.
 
 The agent receives the metadata it needs to make a decision. If `total_size` is small, it fetches the full result; if large, it applies additional filters or fetches deliberately in `paginated` mode. The context window is not pre-filled with records the agent may never use.
 
-Subsequent data is fetched by re-invoking the same tool with the `continuation_token` and a `mode`, continuing as needed.
+Subsequent data is fetched by re-invoking the same tool with the `continuation_token`, optionally selecting a `mode`, and continuing as needed. The tool must therefore **accept** both fields as inputs; see **Negotiation argument placement** and **Default retrieval mode** below for where they go and what omitting `mode` means.
 
 **Automatic threshold negotiation:**
 
-The `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` setting (in bytes) triggers automatic `@mcp_heavy` behavior on any ViewSet action — even those not explicitly decorated — when the estimated response size exceeds the threshold. This provides a safety net for large Django applications where not every ViewSet has been individually reviewed.
+The `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` setting (in bytes) triggers automatic `@mcp_heavy` behavior on any ViewSet action — even those not explicitly decorated — when the response size exceeds the threshold. This provides a safety net for large Django applications where not every ViewSet has been individually reviewed.
+
+**The backstop is on by default.** With no setting present it applies at a built-in default of 25,000 bytes; the setting raises or lowers that threshold, and an explicit `None` **disables** the backstop entirely. It is not opt-in — an operator who adds the setting believing they are switching the backstop on is confirming a default that was already active, and one who sets `None` believing it is the default is switching it off.
 
 ```python
-FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50000  # bytes
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50000  # bytes — raise the built-in default
+FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None   # disable the backstop entirely
 ```
+
+Disabling it is a deliberate act with a consequence worth stating: on a host with the backstop off, a tool that negotiates only via the backstop returns its full payload unbounded. The built-in default is deliberately conservative so that undecorated high-cardinality endpoints probe first without per-host configuration.
 
 **Relationship to the discovery backend:**
 
 The discovery backend marks `@mcp_heavy` tools in their generated schema so agents can see — in `tools/list` — that a tool returns paginated metadata rather than a complete dataset. This hint improves tool selection: an agent reading tool descriptions knows which operations require pagination planning and which return complete results.
 
-**Cache layer:**
+**Cache layer and continuation-token capability:**
 
-Probe results are cached server-side keyed by `_HEAVY_CACHE_PREFIX` + a token derived from the query parameters. The continuation token returned in the probe response encodes this cache key. When the agent re-invokes the tool with the `continuation_token` and a `mode`, frisian-mcp resolves the cached query context and returns the requested slice without re-executing the probe. This same cache layer is reused by the write-path continuation token mechanism introduced in ADR-004.
+Probe and lean-write results are cached server-side under `_HEAVY_CACHE_PREFIX` plus a cryptographically random, opaque server-issued continuation token. The token is not derived from query parameters and does not encode query state or caller identity. The cache entry stores the result together with server-side ownership metadata. On continuation, frisian-mcp resolves the opaque token, verifies that the current caller is authorized to resume that cached result, and only then serves the selected response mode. The same cache/ownership mechanism is shared by the read-path negotiation described here and the write-path continuation mechanism described in ADR-004.
+
+Rationale: an accepted ADR must not tell future implementations to derive a bearer-like cache locator from caller-controlled query parameters. The shipped design correctly uses an unpredictable opaque capability plus independent server-side authorization binding.
+
+**Negotiation argument placement:**
+
+Response-negotiation controls are MCP protocol arguments belonging to the outer tool invocation. `continuation_token`, and when applicable `mode`, `page`, `page_size`, and `filter_keys`, are placed at the **top level** of the tool argument object. They MUST NOT be nested inside `params`.
+
+The rule is stated without reference to the tool's shape, because it must hold for all of them. A flat `@mcp_heavy` tool carries its own fields and has neither `action` nor `params`; a class dispatcher carries `action` and `params`; a group dispatcher carries `resource`, `action`, and `params`. Top level is the only description true of all three — for the dispatcher shapes the negotiation fields are siblings of those keys, and for the flat shape there are no siblings to name. Describing placement by naming sibling keys is wrong for at least one shape whichever set is chosen.
+
+`params` remains the host/action-specific passthrough namespace. Protocol controls MUST be consumed by the MCP negotiation/dispatcher layer before host action validation and MUST NOT be taught to host serializers, filtersets, ViewSets, or other Django application code as synthetic application parameters.
+
+Because `mode`, `page`, `page_size`, and `filter_keys` can also be legitimate host-domain parameter names, their presence alone MUST NOT cause them to be stripped from an ordinary first call. They become negotiation controls in continuation context. `continuation_token` is the only unambiguous protocol-only key.
+
+Rationale: this preserves a generic installable Django/DRF package boundary. Host applications do not need to know about the MCP continuation protocol, and legitimate application fields named `mode`, `page`, `page_size`, or `filter_keys` remain usable.
+
+**Default retrieval mode:**
+
+A continuation token redeemed **without** a `mode` returns a bounded response wherever bounding is meaningful:
+
+| Redemption | Result |
+|---|---|
+| bare token, collection result | one bounded page at the server default page size |
+| bare token, non-collection result | the complete object — it is already bounded |
+| explicit `mode="full"` | the complete cached result, always |
+| unrecognised `mode` | a validation error naming the supported modes |
+
+The complete result therefore requires an explicit `mode="full"`, and an omitted or mistyped `mode` cannot silently select the most expensive response. Pagination applies to collections; a single object is returned whole because chunking its serialization is strictly worse than returning it, at every page size. Stating the default as "one page" without that qualification would be false for every single-object read and every write confirmation.
+
+This rule governs **both** the read-path continuation tokens described here and the write-path continuation tokens of ADR-004. There is one cache and one redemption path, with no token type to discriminate on; a change to the default reaches both. ADR-004's write-path mechanism inherits this default and does not define its own.
+
+**Continuation ownership:**
+
+A continuation token is a cache locator, not sufficient authorization to read the cached result. Every cached continuation entry is bound server-side to the caller/security context that created it. Redemption MUST verify the binding before serving cached data. The binding includes the originating MCP tool identity, authentication credential identity, effective permission tier, authenticated user identity when present, and agent-connection identity when the route is agent-scoped. For a grouped dispatcher, the originating tool identity is the **outer MCP dispatcher tool**, not the inner host resource/action selected through `resource` / `action` / `params`.
+
+Client-supplied transport/session identifiers such as `Mcp-Session-Id` MUST NOT be an ownership dimension. They are not authorization credentials, can legitimately drift between probe and redemption calls, and binding continuation ownership to them can make a token issued to an otherwise unchanged authorized caller unredeemable. Excluding transport-session identity does not relax the credential/user/tier/tool/agent-connection replay boundaries.
+
+Where the caller presents no authenticating credential, the binding degenerates to the tool and tier dimensions alone and provides no isolation *between* anonymous callers. Continuation tokens issued on unauthenticated routes MUST therefore be treated as bearer capabilities with the same exposure as the data they return.
+
+The exact serialized owner-key representation is implementation detail and need not be stable across releases; the security dimensions and redemption invariant are the architectural contract.
 
 ## Why Not DRF Default Pagination Alone
 
@@ -109,6 +154,36 @@ The cost of an extra round-trip on large list operations is far smaller than the
 The `@mcp_heavy` pattern was validated against a large open-source Django application with production data. Without the decorator, a list call returning a full dataset would produce response payloads that scale linearly with record count, quickly overwhelming any practical context window. With the decorator in place, the first response is bounded to a predictable metadata envelope and a single page of results, giving the agent the total count and pagination cursor needed to proceed.
 
 The same cache infrastructure introduced for `@mcp_heavy` was subsequently reused for the write-path continuation token (ADR-004), confirming the design is general enough to serve both read and write response filtering needs.
+
+## Amendments
+
+### 2026-08-07 — negotiation contract, cache-token semantics, and continuation ownership
+
+Carried by branch `bug/Heavy-response-continuation-unredeemable` (code changes in commit `0011e3c` and its successors; this amendment is documentation only and changes no behaviour). Status remains **Accepted** — this is an amendment, not a supersession.
+
+Anyone who implemented against the previous text should read item (c) first: the superseded wording specified a cache key derived from query parameters, which is a deterministic, caller-predictable locator for another caller's cached result. That guidance stood accepted from 2026-06-02 until this amendment. The shipped implementation never followed it.
+
+**(c) Cache layer — corrected.** Under **Cache layer**, previously:
+
+> "Probe results are cached server-side keyed by `_HEAVY_CACHE_PREFIX` + a token derived from the query parameters. The continuation token returned in the probe response encodes this cache key."
+
+Now: the token is cryptographically random, opaque, and server-issued; it is not derived from query parameters and encodes neither query state nor caller identity; the entry carries server-side ownership metadata and redemption verifies authorization before serving. The heading is now **Cache layer and continuation-token capability**.
+
+This was an editing slip rather than an outgrown design: the probe-envelope field list in the same document already described `continuation_token` as an "opaque token", so the ADR contradicted itself from the day it was accepted.
+
+**(d) Continuation ownership — new.** The ADR previously said nothing about ownership of a cached continuation; the constraint existed only in the implementation. Now recorded: the binding dimensions, the requirement to verify before serving, that grouped dispatchers bind the **outer** tool identity, that client-supplied transport/session identifiers MUST NOT bind, and that on unauthenticated routes the binding degenerates and tokens must be treated as bearer capabilities.
+
+**(a) Negotiation argument placement — new.** Previously unspecified in any ADR. Now recorded as a decision of this ADR — not derived from ADR-002 or ADR-007, neither of which specified the composition rule. Stated shape-neutrally (top level, never inside `params`) because the three tool shapes do not share a sibling key set. Also records that four of the five fields may collide with legitimate host-domain parameter names and so are protocol controls only in continuation context.
+
+**(b) Default retrieval mode — changed contract.** Previously the document did not state what a bare `continuation_token` returns; the implementation returned the complete result, and an unrecognised mode silently fell back to it. Now recorded, matching the shipped behaviour as of this release: bare redemption is bounded where bounding is meaningful, `full` requires an explicit `mode="full"`, and an unrecognised mode is a validation error. This is a behaviour change, ruled and implemented in the same release as this amendment so the ADR and the code state the same contract. It governs ADR-004's write-path tokens equally, since both share one cache and one redemption path.
+
+**Sweep — three further corrections in the same pass.**
+
+- The two-call paragraph previously read "re-invoking the same tool with the `continuation_token` **and a `mode`**", which under the amended (b) would imply `mode` is required. It now states that `mode` is optional and that the tool must accept both fields as inputs.
+- The probe-envelope field list documented four fields; the envelope returns five. `usage` — which carries the placement instruction and the cost of omitting `mode` — was missing.
+- The auto-negotiate threshold was presented as a setting to add, implying the backstop is opt-in. It ships **on** at a 25,000-byte default; the setting adjusts the threshold and an explicit `None` disables it. The previous framing could lead an operator to disable the backstop while believing they were confirming the default.
+
+**Not changed.** The Context, the three considered approaches, "Why Not DRF Default Pagination Alone", Consequences, and Validation are untouched. No section was restructured, retitled, or restyled beyond the one heading named above.
 
 ---
 

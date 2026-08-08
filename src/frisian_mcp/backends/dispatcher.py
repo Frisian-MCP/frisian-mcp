@@ -127,11 +127,20 @@ def _build_dispatcher_input_schema(
             },
         },
     }
-    # ADR-005 line 73 requires the negotiation protocol to be disclosed in the
-    # generated schema.  Until T6 this was applied on the @mcp_heavy path only,
-    # so dispatcher tools — and the FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD
-    # backstop, which reads this same schema — advertised `available_modes` in
-    # the probe envelope while never telling the agent where to put the fields.
+    # ADR-005 "Decision" — "Subsequent data is fetched by re-invoking the same
+    # tool with the `continuation_token` and a `mode`" — makes this tool the
+    # redemption surface, so its published schema has to admit those fields.
+    #
+    # Cited by quoted phrase, not line number: ADR-005 carries an Amendments
+    # section and its line numbering shifts whenever it is amended.  This
+    # comment previously cited "line 73", which is the *heaviness hint* clause
+    # about tool selection — a real requirement, but not the authority for the
+    # redemption input surface.
+    #
+    # Until T6 the merge was applied on the @mcp_heavy path only, so dispatcher
+    # tools — and the FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD backstop, which reads
+    # this same schema — advertised `available_modes` in the probe envelope
+    # while never telling the agent where to put the fields.
     return _merge_negotiation_schema(schema)
 
 
@@ -240,17 +249,26 @@ def _reject_misplaced_continuation_token(arguments: dict[str, Any]) -> None:
     can never be a legitimate filter, so misplacement is unambiguous.  ``mode``,
     ``page``, ``page_size`` and ``filter_keys`` all collide with real host data
     and are left alone — see :data:`~frisian_mcp.negotiation.NEGOTIATION_PROTOCOL_ONLY_KEY`.
+
+    Shared by the class dispatcher and the group dispatcher, whose top-level
+    argument sets differ (``action``/``params`` vs ``resource``/``action``/
+    ``params``).  The message therefore names only ``params`` — the one place
+    the token must not be, and the one key common to both shapes — and tells the
+    caller to move it out rather than restating a full argument list that would
+    be wrong for one of them.
     """
     nested = arguments.get("params")
     if isinstance(nested, dict) and NEGOTIATION_PROTOCOL_ONLY_KEY in nested:
         raise ToolInputError(
             f"{NEGOTIATION_PROTOCOL_ONLY_KEY!r} was sent inside 'params', where it is"
             " treated as an action filter and rejected. It is a response-negotiation"
-            " field and belongs at the TOP LEVEL of arguments, as a sibling of"
-            " 'action' and 'params'. Re-send as"
-            " {'action': ..., 'continuation_token': ...,"
-            " 'mode': 'summary'|'paginated'|'filtered'|'full'}."
-            " Omitting 'mode' returns the complete dataset."
+            " field and belongs at the TOP LEVEL of arguments, not inside 'params'."
+            " Re-send the call exactly as before, but move 'continuation_token' out of"
+            " 'params' to the top level. 'mode' is optional and may be added beside it"
+            " ('summary'|'paginated'|'filtered'|'full')."
+            " Omitting 'mode' returns one bounded page of a list result, or the whole"
+            " object for a non-list result; pass 'full' explicitly for the complete"
+            " dataset."
         )
 
 
