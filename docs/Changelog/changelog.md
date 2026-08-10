@@ -5,6 +5,21 @@
 
 ---
 
+## Unreleased
+
+> Version number to be assigned at release. Under this project's convention a contract change on a security setting is a MINOR bump.
+
+### Changed
+
+- **`FRISIAN_MCP_UNAUTHENTICATED_TIER` now fails closed, and a documented control that did not work now works.** Previous releases ranked any unrecognised tier value equal to `read`. Both `None` and `"none"` were unrecognised, so the documented lockdown was a no-op: the setting was present, spelled plausibly, and anonymous callers kept the full read surface. Three cases are now distinguished — **absent** uses the `read` default so hosts that never configured it are unaffected; **`None` or `"none"`** denies below `read`, meaning no tool is listed and none can be invoked; **any other value** denies *and* raises a startup error naming the setting, so a misspelled tier is reported rather than silently applied.
+- **This is a behaviour change on a security setting, in the direction of denying.** A deployment that set `None` or `"none"` and has been serving anonymous read traffic will stop serving it on upgrade. That is the intended outcome — the configuration always asked for it — but it will look like a regression to anyone who did not know the setting was inert. A deployment that genuinely wants anonymous read access must set `"read"` explicitly.
+
+### Fixed — documentation
+
+- **Corrected a false claim that a configuration requires authentication for all tools.** The claim appeared in the configuration reference, the greenfield install and configuration guides, and **two install configurations distributed as production examples**. It was not true in any released version: operators who followed those files believed they had a control they did not have. The affected pages now describe what the setting actually does, and carry an explicit correction rather than a silent edit, because deployment decisions were made on the old text. Operators who deployed against it should confirm what was mounted and reachable on those routes. The reference page for the earlier release carries the same correction, since the behaviour cannot be fixed retroactively for hosts still running it.
+
+---
+
 ## v1.1.0 — 2026-07
 
 ### Added

@@ -269,10 +269,81 @@ class TestMcpDoctorUnauthTier:
         assert "FRISIAN_MCP_UNAUTHENTICATED_TIER='admin'" in out
 
     @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="superuser")
-    def test_warn_when_unrecognised(self) -> None:
-        """Warning emitted when FRISIAN_MCP_UNAUTHENTICATED_TIER is an unknown value."""
+    def test_error_when_unrecognised(self) -> None:
+        """
+        An unrecognised value is an ERROR that says DENIED, not a warning.
+
+        **Updated on purpose: H13 changed this.**  It previously asserted a
+        warning reading "defaulting to 'read' at runtime".  H7 made an
+        unrecognised value DENY, so that sentence became false — and the same
+        boot emitted E007 saying it denies, leaving an operator reading both
+        with no way to tell which was true.  A diagnostic that contradicts the
+        runtime is worse than no diagnostic, because it is the tool you reach
+        for to check.
+        """
+        with pytest.raises(SystemExit):
+            _run()
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="superuser")
+    def test_unrecognised_message_says_denied_and_points_at_e007(self) -> None:
+        """The message must state the consequence and name the startup check."""
+        out = StringIO()
+        cmd = Command(stdout=out, stderr=StringIO())
+        with pytest.raises(SystemExit):
+            cmd.handle()
+        text = out.getvalue()
+        assert "is not a recognised tier" in text
+        assert "DENIED" in text
+        assert "frisian_mcp.E007" in text
+        assert "defaulting to 'read'" not in text, "pre-H7 wording resurfaced"
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER=None)
+    def test_explicit_none_reported_as_deliberate_lockdown(self) -> None:
+        """
+        \U0001f534 The reported defect: an explicit None was reported as "not set".
+
+        ``getattr(settings, NAME, None)`` cannot distinguish an absent setting
+        from one explicitly set to ``None``, so a host deliberately locked down
+        got a green tick reading "not set — anonymous callers see only read-tier
+        tools" while the server denied everything.  The diagnostic told the
+        operator the opposite of what was happening.
+        """
         out, _ = _run()
-        assert "is not a recognised tier" in out
+        assert "DENIED all access" in out
+        assert "deliberate lockdown" in out
+        # Scope to the tier line: "not set" legitimately appears in unrelated
+        # findings (e.g. the HMAC-key warning), so a whole-output check would
+        # pass or fail for the wrong reason.
+        tier_line = next(
+            line for line in out.splitlines() if "FRISIAN_MCP_UNAUTHENTICATED_TIER" in line
+        )
+        assert "not set" not in tier_line, "an explicit lockdown was reported as absent"
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="none")
+    def test_canonical_none_string_matches_explicit_none(self) -> None:
+        """The canonical string reports identically to ``None`` — one classifier."""
+        out, _ = _run()
+        assert "DENIED all access" in out
+        assert "deliberate lockdown" in out
+
+    def test_doctor_and_runtime_cannot_disagree(self) -> None:
+        """
+        The doctor reads the SAME classifier the runtime and E007 read.
+
+        Asserted structurally rather than by comparing message strings: three
+        consumers previously derived this independently and the doctor's copy
+        drifted.  If a fourth consumer appears, it inherits the answer instead
+        of inventing one.
+        """
+        from frisian_mcp.registry import classify_unauthenticated_tier
+
+        for value, expected_case in (
+            ("read", "valid"),
+            ("none", "explicit_none"),
+            ("readwrite", "invalid"),
+        ):
+            with override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER=value):
+                assert classify_unauthenticated_tier()[0] == expected_case
 
 
 class TestMcpDoctorOAuthAuthorizeUrl:

@@ -98,6 +98,98 @@ _NEGOTIATION_PROPERTIES: dict[str, Any] = {
 NEGOTIATION_PROTOCOL_ONLY_KEY = "continuation_token"
 
 
+def schema_discloses_continuation(schema: Any) -> bool:
+    """
+    Return ``True`` when *schema* publishes the continuation-call shape.
+
+    This is the **single source of truth for negotiation eligibility**.  The
+    mint path asks this question of the same ``input_schema`` object the caller
+    was handed in ``tools/list``; nothing may mint a continuation token for a
+    schema this returns ``False`` for.
+
+    Deriving eligibility from the published schema — rather than recording it
+    beside the schema as a registration flag — is deliberate.  A flag is a
+    *claim about* the artifact, stored separately and updated by different code,
+    so disclosure and behaviour can drift apart the moment one is edited without
+    the other.  That drift is exactly how continuation tokens came to be minted
+    for shapes no schema-validating caller could legally return.  A derivation
+    cannot drift: there is only one artifact, read twice.
+
+    Recognises both disclosure shapes, since both put the one unambiguous
+    protocol key in ``properties`` — the flat merge used by ``@mcp_heavy`` and
+    the dispatchers (:func:`_merge_negotiation_schema`) and the conditional
+    branch used by ordinary read tools (:func:`merge_continuation_branch`).
+    """
+    if not isinstance(schema, dict):
+        return False
+    properties = schema.get("properties")
+    return isinstance(properties, dict) and NEGOTIATION_PROTOCOL_ONLY_KEY in properties
+
+
+def merge_continuation_branch(base: dict[str, Any]) -> dict[str, Any]:
+    """
+    Disclose the continuation call on *base* without altering its first call.
+
+    Used for tools that are eligible for the size backstop but are not
+    ``@mcp_heavy`` — hand-registered ``@mcp_tool`` tools and, more importantly,
+    auto-discovered ViewSet actions, which have no decorator to annotate and are
+    the population the backstop exists to protect.
+
+    Differs from :func:`_merge_negotiation_schema`, which flattens all five
+    fields into ``properties``.  That is right for ``@mcp_heavy`` and the
+    dispatchers, whose argument shapes are ours.  It is wrong here: ``mode``,
+    ``page``, ``page_size`` and ``filter_keys`` collide with real host data (see
+    :data:`NEGOTIATION_PROTOCOL_ONLY_KEY`), so declaring them unconditionally on
+    an arbitrary host tool would corrupt a signature that already means
+    something else.
+
+    Instead only ``continuation_token`` — the one key that is never a legitimate
+    application parameter — joins ``properties``.  The other four are declared
+    in a conditional branch that applies **only** when a ``continuation_token``
+    is present, so an ordinary first call validates exactly as it did before.
+
+    The branch is appended to ``allOf`` rather than written to a top-level
+    ``if``/``then``, so it composes with any conditional logic the host's own
+    schema already uses instead of silently replacing it.
+
+    Idempotent: a schema that already discloses is returned unchanged, so this
+    can be applied on a registration path without checking whether some other
+    path got there first.
+    """
+    if base.get("type") != "object":
+        return base
+    if schema_discloses_continuation(base):
+        return base
+
+    merged: dict[str, Any] = {**base}
+    merged["properties"] = {
+        **base.get("properties", {}),
+        NEGOTIATION_PROTOCOL_ONLY_KEY: _NEGOTIATION_PROPERTIES[NEGOTIATION_PROTOCOL_ONLY_KEY],
+    }
+    # A closed schema cannot express a continuation call at all: the four
+    # branch fields would be rejected as additional properties, leaving a token
+    # that is minted and unredeemable — the defect this function exists to
+    # prevent.  The alternative, leaving it closed and refusing to negotiate,
+    # hands back the unbounded payload the backstop was added to stop.  Opening
+    # it is the same trade `_merge_negotiation_schema` already makes.
+    if merged.get("additionalProperties") is False:
+        del merged["additionalProperties"]
+    merged["allOf"] = [
+        *base.get("allOf", []),
+        {
+            "if": {"required": [NEGOTIATION_PROTOCOL_ONLY_KEY]},
+            "then": {
+                "properties": {
+                    name: prop
+                    for name, prop in _NEGOTIATION_PROPERTIES.items()
+                    if name != NEGOTIATION_PROTOCOL_ONLY_KEY
+                }
+            },
+        },
+    ]
+    return merged
+
+
 def _merge_negotiation_schema(base: dict[str, Any]) -> dict[str, Any]:
     """
     Merge the response-negotiation protocol fields into *base* input schema.

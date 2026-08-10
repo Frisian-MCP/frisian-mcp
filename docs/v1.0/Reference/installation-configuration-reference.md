@@ -213,13 +213,16 @@ An agent sends the **raw** key as `Authorization: Bearer <raw-key>`; the package
 **Type:** `str`  
 **Default:** `'read'`
 
-The maximum permission tier for callers who provide no credentials. Set to `None` to require authentication for all tool access.
+The maximum permission tier for callers who provide no credentials.
+
+> ⚠️ **This page describes a released version, and the claim below is wrong for it.** `None` did **not** require authentication in this version: an unrecognised tier value ranked equal to `read`, so anonymous callers kept the full read surface. The setting was present and had no effect. This is corrected in a later release, where deny values deny and an unrecognised value additionally raises a startup error. On a deployment running this version, the only controls that actually restrict an anonymous caller are a gateway permission class and the route surface — not this setting. Treat the read surface of such a deployment as having been reachable without credentials.
 
 ```python
 # Public read access (default)
 FRISIAN_MCP_UNAUTHENTICATED_TIER = 'read'
 
-# Require auth for everything
+# Intended to require auth for everything — but see the warning above: in this
+# version this value has no effect and anonymous callers keep read access.
 FRISIAN_MCP_UNAUTHENTICATED_TIER = None
 ```
 

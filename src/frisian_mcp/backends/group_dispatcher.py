@@ -32,13 +32,12 @@ from django.http import HttpRequest
 
 from frisian_mcp.backends.dispatcher import _reject_misplaced_continuation_token
 from frisian_mcp.negotiation import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
+from frisian_mcp.registry import _TIER_RANK, _caller_rank
 
 if TYPE_CHECKING:
     from frisian_mcp.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
-
-_TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
 
 
 def _parse_tool_name(
@@ -217,7 +216,12 @@ def build_group_help(  # pylint: disable=too-many-locals
 
     """
     sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
-    max_rank = _TIER_RANK.get(max_tier, 2) if max_tier is not None else 2
+    # H7: an unrecognised caller tier previously defaulted to rank 2 (admin)
+    # here, so a garbled or denied tier listed the ENTIRE group in help — the
+    # opposite of every other gate in the package.  ``_caller_rank`` ranks an
+    # unknown value below read, so it now hides everything.  ``max_tier=None``
+    # still means "no cap".
+    max_rank = _caller_rank(max_tier) if max_tier is not None else 2
     resources_map: dict[str, list[str]] = {}
     for tool_name in tool_names:
         parsed = _parse_tool_name(tool_name, sep, resource_prefixes)
@@ -352,13 +356,80 @@ def make_group_invoke(  # pylint: disable=too-many-locals
         target_name = f"{resource}{sep}{action}"
 
         def _raise_unknown_tool() -> NoReturn:
-            available_resources = sorted(
-                resource_prefixes
-                if resource_prefixes is not None
-                else {t.split(sep, 1)[0] for t in tool_names}
-            )
-            matches = difflib.get_close_matches(resource, available_resources, n=1)
-            hint = f" Did you mean resource={matches[0]!r}?" if matches else ""
+            # H3: the suggestion candidates pass the same capability lens as
+            # tools/list.  They did not, and the consequence was measurable: a
+            # caller holding nothing saw an empty tools/list and still got
+            # "Did you mean resource='secret'?" — discovery removed the
+            # resource, the error surface handed it back with the correct
+            # spelling.
+            #
+            # H9 adds the TIER lens beside it, because the capability lens alone
+            # left the same hole open one dimension over.  This function is
+            # reached two ways: the `target_name not in tool_names` branch below,
+            # which runs BEFORE the `_mcp_max_tier` check, and that check itself,
+            # which calls here deliberately so an above-ceiling tool raises "the
+            # exact error a never-registered action gets".  Filtering on
+            # capability only, that promise did not survive the hint:
+            #
+            #     never registered   ->  Unknown tool 'widget_list' in group 'svc'.
+            #     above the ceiling  ->  Unknown tool 'secret_list' in group 'svc'.
+            #                            Did you mean resource='secret'?
+            #
+            # The absence error named the resource it was hiding, so the two
+            # cases were trivially distinguishable — a tier oracle inside the
+            # error written to prevent one (V11-20/F3).
+            #
+            # Both lenses are skipped when they do not apply: `caps is None`
+            # means permission-aware discovery is off or the caller is
+            # unrestricted, and `_mcp_max_tier is None` is an uncapped legacy
+            # mount, which keeps `registry.dispatch`'s tier-error behaviour
+            # unchanged rather than acquiring a new one here.
+            caps = getattr(request, "_mcp_capabilities", None)
+            max_tier = getattr(request, "_mcp_max_tier", None)
+            visible_names = tool_names
+            if caps is not None or max_tier is not None:
+                # pylint: disable=import-outside-toplevel
+                from frisian_mcp.contrib.permissions.base import entry_is_visible
+
+                caller_rank = _caller_rank(_resolve_request_tier(request))
+
+                def _is_visible(name: str) -> bool:
+                    entry = registry.get_entry(name)
+                    if entry is None:
+                        return False
+                    if caps is not None and not entry_is_visible(entry, caps):
+                        return False
+                    if max_tier is not None and caller_rank < _TIER_RANK.get(
+                        entry.permission_tier, 0
+                    ):
+                        return False
+                    return True
+
+                visible_names = frozenset(name for name in tool_names if _is_visible(name))
+
+            visible_prefixes = {t.split(sep, 1)[0] for t in visible_names}
+            if resource_prefixes is not None:
+                # Configured prefixes are the display vocabulary, but only those
+                # still backed by a visible member may be named.
+                visible_prefixes &= set(resource_prefixes)
+
+            # H9 (axis): this fires whenever the COMPOSED name misses, which
+            # includes a correct resource paired with a wrong action.  Matching
+            # on the resource in that case returns it as its own best match, so
+            # the hint named back the half the caller got right and said nothing
+            # about the half they got wrong — "Did you mean resource='item'?" in
+            # answer to resource='item', action='lst'.  Pick the axis the caller
+            # actually missed.
+            if resource in visible_prefixes:
+                prefix = f"{resource}{sep}"
+                candidates = sorted(
+                    name[len(prefix) :] for name in visible_names if name.startswith(prefix)
+                )
+                matches = difflib.get_close_matches(action, candidates, n=1)
+                hint = f" Did you mean action={matches[0]!r}?" if matches else ""
+            else:
+                matches = difflib.get_close_matches(resource, sorted(visible_prefixes), n=1)
+                hint = f" Did you mean resource={matches[0]!r}?" if matches else ""
             raise LookupError(f"Unknown tool {target_name!r} in group {group_name!r}.{hint}")
 
         if target_name not in tool_names:
@@ -377,7 +448,7 @@ def make_group_invoke(  # pylint: disable=too-many-locals
         if (
             _target_entry is not None
             and getattr(request, "_mcp_max_tier", None) is not None
-            and _TIER_RANK.get(_resolve_request_tier(request), 0)
+            and _caller_rank(_resolve_request_tier(request))
             < _TIER_RANK.get(_target_entry.permission_tier, 0)
         ):
             _raise_unknown_tool()

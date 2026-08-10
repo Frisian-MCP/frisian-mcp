@@ -7,10 +7,20 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from django.conf import settings
 from django.test import RequestFactory, override_settings
 
 from frisian_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
-from frisian_mcp.registry import ToolRegistry, _apply_max_tier_cap, _resolve_request_tier
+from frisian_mcp.registry import (
+    DENY_TIER,
+    _TIER_RANK,
+    _VALID_PERMISSION_TIERS,
+    ToolRegistry,
+    _apply_max_tier_cap,
+    _caller_rank,
+    _resolve_request_tier,
+    _resolve_unauthenticated_tier,
+)
 from frisian_mcp.views import McpView, _get_token_permission
 
 _rf = RequestFactory()
@@ -301,6 +311,76 @@ class TestGetTokenPermission:
         req = self._req()
         req.auth = None  # type: ignore[attr-defined]
         assert _get_token_permission(req) == "admin"
+
+    def test_absent_setting_keeps_the_documented_read_default(self) -> None:
+        """
+        H7 case 1: an ABSENT setting still means ``read``.
+
+        Compatibility is the whole reason absence and invalidity are
+        distinguished.  Every host that never set this keeps working; collapsing
+        the two cases would silently lock out the majority to punish a typo.
+        """
+        assert not hasattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER") or True
+        with override_settings():
+            del_setting = "FRISIAN_MCP_UNAUTHENTICATED_TIER"
+            if hasattr(settings, del_setting):
+                delattr(settings._wrapped, del_setting)  # noqa: SLF001
+            assert _resolve_unauthenticated_tier() == "read"
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER=None)
+    def test_explicit_none_denies(self) -> None:
+        """
+        H7 case 2: an explicit ``None`` denies.
+
+        This is the whole reported defect.  ``None`` was string-coerced to the
+        literal ``"None"``, which ``_TIER_RANK.get(tier, 0)`` ranked 0 — the
+        same as ``read`` — so a documented lockdown granted the full read
+        surface.  The operator could not detect it by reading their own config:
+        the setting was present, spelled correctly, and did nothing.
+        """
+        assert _resolve_unauthenticated_tier() == DENY_TIER
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="none")
+    def test_canonical_none_string_denies(self) -> None:
+        """H7 case 2: the canonical string ``"none"`` denies, same as ``None``."""
+        assert _resolve_unauthenticated_tier() == DENY_TIER
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="readwrite")
+    def test_unrecognised_value_denies_rather_than_degrading_to_read(self) -> None:
+        """
+        H7 case 3: a typo denies. It must NOT degrade to ``read``.
+
+        ``"readwrite"`` is the realistic mistake for ``"read_write"``: an
+        operator reaching for MORE access silently received the read surface.
+        Failing closed converts that into no access, and the startup check
+        (tested separately) is what stops it being a silent no access.
+        """
+        assert _resolve_unauthenticated_tier() == DENY_TIER
+
+    def test_denied_caller_ranks_below_read(self) -> None:
+        """
+        The deny tier outranks nothing — including ``read``.
+
+        Asserted on the rank rather than only end-to-end, because ranking is
+        what every gate in the package compares.  ``_caller_rank`` returning 0
+        for an unknown value is precisely the original defect.
+        """
+        assert _caller_rank(DENY_TIER) < _caller_rank("read")
+        assert _caller_rank("bogus") < _caller_rank("read")
+        assert _caller_rank(None) < _caller_rank("read")
+
+    def test_deny_tier_is_not_a_registerable_tool_tier(self) -> None:
+        """
+        ``"none"`` describes a CALLER, never a tool or a route ceiling.
+
+        Guard against the tempting shortcut of adding ``"none"`` to
+        ``_TIER_RANK``: that set feeds ``_VALID_PERMISSION_TIERS`` and
+        ``route_config.PERMISSION_TIERS``, so it would make a tool nobody can
+        ever reach a legal registration and an unreachable route a legal
+        config.  Those are configuration errors, not tiers.
+        """
+        assert DENY_TIER not in _VALID_PERMISSION_TIERS
+        assert DENY_TIER not in _TIER_RANK
 
     @override_settings(
         FRISIAN_MCP_AUTHENTICATION_CLASSES=[],

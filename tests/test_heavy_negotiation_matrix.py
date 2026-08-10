@@ -9,25 +9,40 @@ dispatcher, and neither mentioned the other — so a third path could be added
 with no disclosure at all and nothing turned red.
 
 The defence is structural, not additive: **shape is a parameter here, never a
-copy.**  A fourth consumer is one entry in :data:`_SHAPE_IDS` away from being
-held to the same contract, and a consumer that cannot satisfy the contract
-fails at collection rather than being quietly omitted.
+copy.**  A new consumer is one entry in :data:`_SHAPES` away from being held to
+the same contract, and a consumer that cannot satisfy the contract fails at
+collection rather than being quietly omitted.
 
-``negotiation.py`` currently has four consumers, and the matrix covers all four:
+``negotiation.py`` has **five** consumers, and the matrix covers all five:
 
-===================  ===========================  ==============================
-Shape                Merged at                    Top-level arguments
-===================  ===========================  ==============================
-flat ``@mcp_heavy``  ``decorators.py:316``        the tool's own fields
-class dispatcher     ``dispatcher.py:135``        ``action`` + ``params``
-group dispatcher     ``group_dispatcher.py:146``  ``resource``/``action``/``params``
-plain ``@mcp_tool``  **nowhere**                  the tool's own fields
-===================  ===========================  ==============================
+==================  ==============================  ============================
+Shape               Merged by                       Top-level arguments
+==================  ==============================  ============================
+flat ``@mcp_heavy`` ``_merge_negotiation_schema``   the tool's own fields
+plain ``@mcp_tool`` ``merge_continuation_branch``   the tool's own fields
+auto-discovered     ``merge_continuation_branch``   the action's own fields
+class dispatcher    ``_merge_negotiation_schema``   ``action`` + ``params``
+group dispatcher    ``_merge_negotiation_schema``   ``resource``/``action``/``params``
+==================  ==============================  ============================
 
-The fourth row is not a typo.  ``@mcp_tool`` (``decorators.py:65``) registers
-its ``input_schema`` verbatim, but the ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD``
-backstop mints continuation tokens for *any* over-threshold read response.  See
-:class:`TestBackstopMintsOnUndisclosedShapes`.
+**Two disclosure styles, both correct.**  The flat merge declares all five
+negotiation fields in ``properties``.  The conditional branch declares only
+``continuation_token`` there and the other four behind ``allOf`` → ``if``/
+``then``, because ``mode``, ``page``, ``page_size`` and ``filter_keys`` collide
+with real host field names and must not be injected into every tool's
+signature.  The disclosure assertions therefore test **reachability** rather
+than placement — see :func:`_reachable_negotiation_fields`.
+
+The last two rows are the ones this matrix originally missed.  H2 gave
+``@mcp_tool`` and auto-discovered ViewSet actions a disclosure they did not
+have, and neither became a parameter here; the meta-test meant to catch that
+counted entries in :data:`_SHAPES` rather than call sites in the package, so
+nothing drifted when the change landed in ``decorators.py``.  See
+:meth:`TestDisclosure.test_disclosure_survives_a_new_shape`, which now counts
+from the source.
+
+Cited by quoted phrase rather than line number throughout: the numbers this
+docstring previously carried had all moved by the time anyone read them.
 
 Host-agnostic throughout: synthetic ``item``/``container``/``catalog`` fixtures,
 no host-application schema as identifiers or data.
@@ -39,6 +54,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -46,9 +62,10 @@ import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
+import frisian_mcp
 from frisian_mcp.backends.group_dispatcher import build_group_input_schema, make_group_invoke
 from frisian_mcp.decorators import mcp_action, mcp_dispatcher, mcp_heavy, mcp_tool
-from frisian_mcp.negotiation import _NEGOTIATION_PROPERTIES
+from frisian_mcp.negotiation import _NEGOTIATION_PROPERTIES, merge_continuation_branch
 from frisian_mcp.registry import ToolInputError, ToolRegistry
 from frisian_mcp.views import McpView, _heavy_owner_key
 
@@ -95,8 +112,6 @@ class _Shape:
     #: ``False`` for the flat shapes, which have no nested ``params`` object and
     #: therefore no misplacement to guard against.
     has_params: bool = True
-    #: ``True`` when the shape publishes the negotiation fields in its schema.
-    discloses: bool = True
 
     def redeem_args(self, token: str, mode: str | None = None, **extra: Any) -> dict[str, Any]:
         """Return call-2 arguments: routing + token + optional mode."""
@@ -105,6 +120,42 @@ class _Shape:
             args["mode"] = mode
         args.update(extra)
         return args
+
+
+def _reachable_negotiation_fields(schema: dict[str, Any]) -> set[str]:
+    """
+    Return the negotiation fields a caller may legally send against *schema*.
+
+    Resolves **both** disclosure styles, because both are correct:
+
+    * the flat merge (``_merge_negotiation_schema``) declares all five in
+      ``properties``;
+    * the conditional branch (``merge_continuation_branch``) declares only
+      ``continuation_token`` there and the other four inside an
+      ``allOf`` → ``if``/``then``, so an ordinary first call keeps the tool's own
+      signature.
+
+    Placement differs on purpose; reachability is the contract every consumer
+    owes the caller, so the matrix asserts that instead.
+    """
+    fields = set(schema.get("properties", {})) & set(_NEGOTIATION_PROPERTIES)
+    for branch in schema.get("allOf", []):
+        then = branch.get("then", {}) if isinstance(branch, dict) else {}
+        fields |= set(then.get("properties", {})) & set(_NEGOTIATION_PROPERTIES)
+    return fields
+
+
+def _negotiation_property(schema: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """Return the JSON Schema for negotiation field *name*, from either disclosure style."""
+    prop = schema.get("properties", {}).get(name)
+    if prop is not None:
+        return prop  # type: ignore[no-any-return]
+    for branch in schema.get("allOf", []):
+        then = branch.get("then", {}) if isinstance(branch, dict) else {}
+        prop = then.get("properties", {}).get(name)
+        if prop is not None:
+            return prop  # type: ignore[no-any-return]
+    return None
 
 
 def _payload_fn(payload: Any) -> Callable[[dict[str, Any], Any], Any]:
@@ -131,6 +182,61 @@ def _build_flat_heavy(reg: ToolRegistry) -> str:
             return _PAYLOAD
 
         _ = _fn
+    return "item_list"
+
+
+def _build_plain_tool(reg: ToolRegistry) -> str:
+    """
+    Register a plain ``@mcp_tool`` — the shape H2 added and this matrix missed.
+
+    Discloses through the conditional branch rather than the flat merge, so it
+    is the reason the disclosure assertions test reachability.
+    """
+    with patch("frisian_mcp.decorators.tool_registry", reg):
+
+        @mcp_tool(
+            name="item_list",
+            description="Plain tool.",
+            input_schema={"type": "object", "properties": {}},
+        )
+        def _fn(_arguments: dict[str, Any], _request: Any) -> Any:
+            return _PAYLOAD
+
+        _ = _fn
+    return "item_list"
+
+
+def _build_auto_discovered(reg: ToolRegistry) -> str:
+    """
+    Register an auto-discovered ViewSet action — the fifth consumer.
+
+    This population has no decorator to annotate and is precisely what the size
+    backstop exists to protect, so it is the shape whose disclosure matters
+    most.  Built from real discovery output rather than a hand-written schema,
+    so the test exercises ``discovery``'s own merge call and would notice it
+    being removed.
+    """
+    from frisian_mcp.backends.discovery import (  # pylint: disable=import-outside-toplevel
+        DRFSyncDiscovery,
+    )
+
+    # Discovery walks the URL resolver, so it needs the test URLconf.  Scoped to
+    # the discovery call rather than the whole module so no other shape's
+    # environment changes.
+    with override_settings(ROOT_URLCONF="tests.urls"):
+        discovered = {t.name: t for t in DRFSyncDiscovery().discover_tools()}
+
+    definition = discovered["users_list"]
+    reg.register(
+        # Registered under the matrix's usual name so the shared call helpers,
+        # owner-key assertions and probe args need no special case.  The schema
+        # is the real discovered one — that is the part under test.
+        name="item_list",
+        fn=_payload_fn(_PAYLOAD),
+        description=definition.description,
+        input_schema=definition.input_schema,
+        permission_tier="read",
+    )
     return "item_list"
 
 
@@ -187,6 +293,20 @@ _SHAPES: dict[str, _Shape] = {
         routing_args={},
         has_params=False,
     ),
+    "plain_tool": _Shape(
+        id="plain_tool",
+        build=_build_plain_tool,
+        probe_args={},
+        routing_args={},
+        has_params=False,
+    ),
+    "auto_discovered": _Shape(
+        id="auto_discovered",
+        build=_build_auto_discovered,
+        probe_args={},
+        routing_args={},
+        has_params=False,
+    ),
     "class_dispatcher": _Shape(
         id="class_dispatcher",
         build=_build_class_dispatcher,
@@ -202,6 +322,55 @@ _SHAPES: dict[str, _Shape] = {
 }
 
 _SHAPE_IDS = tuple(_SHAPES)
+
+#: Where each disclosing consumer in ``src/`` lives, mapped to the shape that
+#: holds it to the contract.  Keys are module paths relative to the package
+#: root; :func:`_discover_disclosing_call_sites` recomputes the left-hand side
+#: from the source so this mapping cannot silently fall behind.
+_CONSUMER_TO_SHAPE: dict[str, str] = {
+    "decorators.py": "flat_heavy",  # also @mcp_tool -> plain_tool, see below
+    "backends/dispatcher.py": "class_dispatcher",
+    "backends/group_dispatcher.py": "group_dispatcher",
+    "backends/discovery.py": "auto_discovered",
+}
+
+#: ``decorators.py`` hosts two consumers — ``@mcp_heavy`` (flat merge) and
+#: ``@mcp_tool`` (conditional branch) — so module granularity alone would let
+#: one of them be dropped without the guard noticing.  Both are named here and
+#: both have shapes.
+_DECORATORS_SHAPES = ("flat_heavy", "plain_tool")
+
+#: The two helpers that publish the negotiation protocol.  A consumer is any
+#: call site of either, outside their defining module.
+_MERGE_HELPERS = ("_merge_negotiation_schema", "merge_continuation_branch")
+
+
+def _discover_disclosing_call_sites() -> dict[str, int]:
+    """
+    Return ``{module path relative to src/frisian_mcp: call-site count}``.
+
+    Scans the shipped source rather than trusting a hand-maintained list, so
+    that "a consumer was added" is answered by the package itself.  The
+    defining module is excluded: it declares the helpers, it does not consume
+    them.
+    """
+    package_root = Path(frisian_mcp.__file__).parent
+    found: dict[str, int] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        if path.name == "negotiation.py":
+            continue
+        # Import lines name the helpers without calling them, so they are
+        # skipped outright rather than discounted — a discount miscounts any
+        # module whose import happens not to look like a call.
+        hits = sum(
+            line.count(f"{helper}(")
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith(("from ", "import "))
+            for helper in _MERGE_HELPERS
+        )
+        if hits > 0:
+            found[path.relative_to(package_root).as_posix()] = hits
+    return found
 
 
 @pytest.fixture(params=_SHAPE_IDS)
@@ -285,12 +454,25 @@ class TestDisclosure:
     """
 
     def test_all_five_fields_published(self, shape: _Shape) -> None:
-        """The five negotiation fields appear in the shape's published schema."""
+        """
+        The five negotiation fields are REACHABLE on the shape's published schema.
+
+        Reachability, not placement, is the contract.  Two disclosure styles are
+        both correct: the flat merge puts all five in ``properties``, while the
+        conditional branch publishes only ``continuation_token`` there and the
+        other four behind ``if``/``then`` — deliberately, because ``mode``,
+        ``page``, ``page_size`` and ``filter_keys`` collide with real host field
+        names and must not be injected into every tool's signature.
+
+        Asserting ``field in properties`` would therefore fail a shape that is
+        behaving exactly as ruled.  Asserting reachability holds both styles to
+        the same contract without privileging either.
+        """
         reg = ToolRegistry()
         name = shape.build(reg)
-        props = reg.get_entry(name).input_schema["properties"]
-        for field_name in _NEGOTIATION_PROPERTIES:
-            assert field_name in props, f"{field_name!r} undisclosed on the {shape.id} path"
+        reachable = _reachable_negotiation_fields(reg.get_entry(name).input_schema)
+        missing = set(_NEGOTIATION_PROPERTIES) - reachable
+        assert not missing, f"{sorted(missing)} unreachable on the {shape.id} path"
 
     def test_mode_enum_matches_what_is_served(self, shape: _Shape) -> None:
         """
@@ -302,8 +484,9 @@ class TestDisclosure:
         """
         reg = ToolRegistry()
         name = shape.build(reg)
-        props = reg.get_entry(name).input_schema["properties"]
-        assert set(props["mode"]["enum"]) == set(_MODES)
+        mode = _negotiation_property(reg.get_entry(name).input_schema, "mode")
+        assert mode is not None, f"'mode' unreachable on the {shape.id} path"
+        assert set(mode["enum"]) == set(_MODES)
 
     def test_placement_text_is_shape_neutral(self, shape: _Shape) -> None:
         """
@@ -324,16 +507,37 @@ class TestDisclosure:
 
     def test_disclosure_survives_a_new_shape(self) -> None:
         """
-        META: the matrix must cover every shape, not merely several.
+        META: every consumer in ``src/`` is covered, counted FROM ``src/``.
 
-        This is the assertion the original bug needed and did not have.  If a
-        consumer is added to ``negotiation.py`` without an entry here, the count
-        drifts and this fails — rather than the new shape being silently exempt.
+        The previous version asserted ``len(_SHAPE_IDS) == 3`` and **did not
+        fire when H2 added a consumer**, because it counted entries in
+        ``_SHAPES`` while the change happened in ``decorators.py``.  Nothing
+        drifted: the thing that changed was not the thing being counted.  A
+        guard that can only detect the edit you remembered to make is not a
+        guard, and bumping the literal to ``4`` would have reproduced the blind
+        spot with a bigger number.
+
+        So the source of truth is the source: every call site of either merge
+        helper is discovered by scanning ``src/``, and each must be claimed by a
+        shape here.  Adding a consumer anywhere now turns this red until it is
+        either parameterised or explicitly recorded as covered.
         """
-        assert len(_SHAPE_IDS) == 3, (
-            "a negotiation consumer was added or removed; add it to _SHAPES so it"
-            " is held to the same disclosure contract, then update this count"
+        found = _discover_disclosing_call_sites()
+        unclaimed = sorted(set(found) - set(_CONSUMER_TO_SHAPE))
+        assert not unclaimed, (
+            f"negotiation consumer(s) {unclaimed} exist in src/ but no shape covers them;"
+            " add one to _SHAPES and map it in _CONSUMER_TO_SHAPE rather than"
+            " exempting the new construction path"
         )
+
+        stale = sorted(set(_CONSUMER_TO_SHAPE) - set(found))
+        assert not stale, (
+            f"_CONSUMER_TO_SHAPE claims {stale}, which no longer merges the"
+            " negotiation fields; drop the mapping or restore the disclosure"
+        )
+
+        uncovered = sorted(set(_CONSUMER_TO_SHAPE.values()) - set(_SHAPE_IDS))
+        assert not uncovered, f"mapped shape ids {uncovered} are not in _SHAPES"
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +826,13 @@ class TestRedemptionShortCircuits:
             name="item_list",
             fn=fn,
             description="Counting tool.",
-            input_schema={"type": "object", "properties": {}},
+            # H2: registering straight through the registry bypasses the
+            # decorator's merge, so a bare schema here would be unfaithful to
+            # production — where every backstop-reachable tool arrives via
+            # @mcp_tool or auto-discovery and therefore discloses.  Without
+            # this the backstop correctly refuses to mint and the test fails
+            # for a reason that has nothing to do with re-dispatch.
+            input_schema=merge_continuation_branch({"type": "object", "properties": {}}),
             permission_tier="read",
         )
         with (
@@ -1111,19 +1321,23 @@ class TestProbeEnvelopeTeachingText:
 
 class TestBackstopMintsOnUndisclosedShapes:
     """
-    The same defect class as the group gap, on a fourth consumer.
+    H2 CLOSED THE FOURTH SHAPE.  These now assert disclosure, as intended.
 
-    ``@mcp_tool`` (``decorators.py:65``) registers ``input_schema`` verbatim —
-    no ``_merge_negotiation_schema``.  But the backstop mints a continuation
-    token for *any* over-threshold read response, so a plain flat tool can issue
-    a token its own published schema gives the caller no legal slot to send
-    back.  Redemption works at runtime (``views.py:1371`` reads the token before
-    schema validation), which is exactly why this stays invisible in-process and
-    only bites through a real client that validates against the schema.
+    Previously ``@mcp_tool`` registered ``input_schema`` verbatim while the
+    backstop minted a continuation token for *any* over-threshold read, so a
+    plain flat tool issued a token its own published schema gave the caller no
+    legal slot to send back.  Redemption worked in-process (the token is read
+    before schema validation), which is why the defect stayed invisible to the
+    suite and only bit through a real client that validates against the schema.
 
-    Asserted as the current shipped behaviour, not as a desired one.  If the
-    merge is later extended to cover the backstop, these turn red and should be
-    rewritten to assert disclosure.
+    The old tests asserted that as shipped behaviour and recorded that they
+    should be "rewritten to assert disclosure" once the merge covered the
+    backstop.  H2 did that, so this is that rewrite.
+
+    Both halves are now checked, because either alone permits the defect to
+    return: the tool **discloses** the continuation call, and the backstop only
+    mints where the published schema discloses it.  Disclosure and mint
+    eligibility derive from the one schema, so they cannot drift apart again.
     """
 
     @pytest.fixture(autouse=True)
@@ -1154,13 +1368,13 @@ class TestBackstopMintsOnUndisclosedShapes:
 
         assert "continuation_token" in result
 
-    def test_plain_tool_does_not_disclose_where_the_token_goes(self) -> None:
+    def test_plain_tool_discloses_where_the_token_goes(self) -> None:
         """
-        DEFECT WITNESS: the minting tool publishes no redemption surface.
+        H2: the minting tool publishes a redemption surface.
 
-        This is the group-dispatcher bug on a different consumer.  A conformant
-        client reading this schema has nowhere to put the token it was just
-        handed.
+        A conformant client reading this schema now has a legal slot for the
+        token it was just handed — the inverse of the defect this class used to
+        witness.
         """
         reg = ToolRegistry()
         with patch("frisian_mcp.decorators.tool_registry", reg):
@@ -1175,6 +1389,167 @@ class TestBackstopMintsOnUndisclosedShapes:
 
             _ = _fn
 
-        props = reg.get_entry("item_list").input_schema["properties"]
-        assert "continuation_token" not in props
-        assert "mode" not in props
+        schema = reg.get_entry("item_list").input_schema
+        assert "continuation_token" in schema["properties"]
+
+        # The other four stay OUT of `properties` and live in the conditional
+        # branch: `mode`, `page`, `page_size` and `filter_keys` collide with
+        # real host field names, so declaring them unconditionally would
+        # corrupt the signature of any tool that already uses one.
+        assert "mode" not in schema["properties"]
+        branch = schema["allOf"][-1]
+        assert branch["if"] == {"required": ["continuation_token"]}
+        assert set(branch["then"]["properties"]) == {"mode", "page", "page_size", "filter_keys"}
+
+    def test_host_field_collision_still_leaves_the_token_redeemable(self) -> None:
+        """
+        KNOWN LIMIT, pinned deliberately: a host field named ``mode`` narrows
+        mode *selection* but never makes the token unredeemable.
+
+        ``mode``/``page``/``page_size``/``filter_keys`` can be genuine host
+        field names, which is why they are declared in the conditional branch
+        rather than at the top level.  JSON Schema constraints are additive:
+        the branch cannot relax an enum the host already declared, so on such a
+        tool a strictly-validating client cannot send ``mode="full"``.
+
+        What matters is that this degrades selection, not redemption.  A bare
+        ``continuation_token`` still validates, and since B2 a bare redemption
+        is ``paginated`` — the bounded outcome the backstop wanted anyway.  So
+        the H2 invariant holds: the caller can always legally return the token.
+
+        If this ever needs to become full selection, the fix is namespacing the
+        protocol fields, which is a contract change and needs its own ruling.
+        """
+        jsonschema = pytest.importorskip("jsonschema")
+
+        schema = merge_continuation_branch(
+            {
+                "type": "object",
+                "properties": {"mode": {"type": "string", "enum": ["fast", "slow"]}},
+            }
+        )
+        validator = jsonschema.Draft7Validator(schema)
+
+        def _valid(payload: dict[str, Any]) -> bool:
+            return not list(validator.iter_errors(payload))
+
+        # The host's own field keeps its meaning on an ordinary call.
+        assert _valid({"mode": "fast"})
+        assert not _valid({"mode": "nope"})
+
+        # The token is redeemable — that is the invariant.
+        assert _valid({"continuation_token": "t"})
+        assert _valid({"continuation_token": "t", "page": 2, "page_size": 10})
+
+        # ...but the host's enum still constrains `mode`, so selection narrows.
+        assert not _valid({"continuation_token": "t", "mode": "full"})
+
+    def test_backstop_does_not_mint_for_an_undisclosed_schema(self, rf: RequestFactory) -> None:
+        """
+        The invariant, from the other side: no disclosure, no mint.
+
+        Registering straight through ``tool_registry`` bypasses the decorator's
+        merge, standing in for any future registration path that forgets to
+        disclose.  The backstop must refuse to mint rather than issue a token
+        the caller cannot legally return — otherwise a new path silently
+        re-opens the fourth shape.
+        """
+        reg = ToolRegistry()
+        reg.register(
+            name="item_list",
+            fn=lambda _arguments, _request: _PAYLOAD,
+            description="Undisclosed tool.",
+            input_schema={"type": "object", "properties": {}},
+        )
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            result = _result(_call(rf, "item_list", {}))
+
+        assert "continuation_token" not in result
+        assert not cache.set.called, "minted a token for a schema that cannot return it"
+
+
+class TestH6HeavyCacheIsolation:
+    """
+    H6: continuation entries land in their own eviction domain when one is configured.
+
+    The W016 check reports a *misconfiguration*; these assert the *behaviour*.
+    Both are needed — a check that warns correctly while the code still writes
+    everything to ``default`` would leave the exposure untouched and look fixed.
+    """
+
+    def test_continuation_entries_land_on_the_configured_alias_not_default(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        The isolation itself: a mint must reach the heavy alias and MISS ``default``.
+
+        Asserted in both directions deliberately.  Checking only that the heavy
+        cache received the entry would still pass if the code wrote to *both*,
+        which is not isolation.
+        """
+        from django.core.cache import caches
+
+        from frisian_mcp.views import _HEAVY_CACHE_PREFIX
+
+        two_domains = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "h6-default",
+            },
+            "h6_heavy": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "h6-heavy",
+            },
+        }
+
+        reg = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_heavy(
+                name="item_list",
+                description="Heavy tool.",
+                input_schema={"type": "object", "properties": {}},
+            )
+            def _fn(_arguments: dict[str, Any], _request: Any) -> Any:
+                return _PAYLOAD
+
+            _ = _fn
+
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            override_settings(CACHES=two_domains, FRISIAN_MCP_HEAVY_CACHE_ALIAS="h6_heavy"),
+        ):
+            heavy_cache = caches["h6_heavy"]
+            default_cache = caches["default"]
+            heavy_cache.clear()
+            default_cache.clear()
+
+            result = _result(_call(rf, "item_list", {}))
+
+            token = result["continuation_token"]
+            key = f"{_HEAVY_CACHE_PREFIX}{token}"
+
+            assert (
+                heavy_cache.get(key) is not None
+            ), "continuation entry did not reach the heavy alias"
+            assert default_cache.get(key) is None, (
+                "continuation entry also landed on 'default' — the security "
+                "state's cache — so nothing was isolated"
+            )
+
+    def test_ttl_is_settings_driven(self) -> None:
+        """
+        H6 decision 4: TTL is a setting, not a constant.
+
+        A blast-radius control only — a caller can mint many short-lived
+        entries — but it cannot be tuned at all while it is hardcoded.
+        """
+        from frisian_mcp.views import _heavy_cache_ttl
+
+        with override_settings(FRISIAN_MCP_HEAVY_CACHE_TTL=42):
+            assert _heavy_cache_ttl() == 42

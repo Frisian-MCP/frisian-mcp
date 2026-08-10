@@ -11,11 +11,17 @@ W012 — FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False while contrib.oauth is install
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+from django.core.checks import Error
 from django.test import modify_settings, override_settings
 
 from frisian_mcp.checks import (
+    W016_HEAVY_CACHE_NOT_ISOLATED,
+    check_heavy_cache_isolation,
+    E007_INVALID_UNAUTHENTICATED_TIER,
+    E008_DISPATCHER_WITHOUT_MEMBERSHIP,
     W001_NO_PERMISSION_CLASSES,
     W002_PLAINTEXT_API_KEYS,
     W003_PRIVILEGED_SERVICE_ACCOUNT,
@@ -26,6 +32,8 @@ from frisian_mcp.checks import (
     check_oauth_token_rate_limit_format,
     check_permission_classes_in_production,
     check_service_account_user,
+    check_dispatcher_membership,
+    check_unauthenticated_tier_value,
 )
 
 # ---------------------------------------------------------------------------
@@ -390,3 +398,281 @@ class TestMalformedRateLimit:
         assert parse_rate_limit("0/minute") is None
         assert parse_rate_limit("-1/hour") is None
         assert parse_rate_limit("1/minute") == (1, 60)
+
+
+# ---------------------------------------------------------------------------
+# H7 — E004: an unrecognised FRISIAN_MCP_UNAUTHENTICATED_TIER must be loud
+# ---------------------------------------------------------------------------
+
+
+class TestUnauthenticatedTierCheck:
+    """
+    The runtime already denies on an unrecognised value; this check is for the
+    operator.
+
+    Denying silently is its own trap: a host that meant ``read_write`` and typed
+    ``readwrite`` would lose anonymous access with nothing explaining why.  The
+    original defect was undetectable by reading the config — the setting was
+    present and spelled plausibly — so the fix has to be detectable by reading
+    the startup output.
+    """
+
+    def test_absent_setting_is_silent(self, settings: Any) -> None:
+        """Absence is the documented default, not a misconfiguration."""
+        if hasattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER"):
+            del settings.FRISIAN_MCP_UNAUTHENTICATED_TIER
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER=None)
+    def test_explicit_none_is_silent(self) -> None:
+        """An explicit ``None`` is a deliberate lockdown, not an error."""
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="none")
+    def test_canonical_none_string_is_silent(self) -> None:
+        """The canonical ``"none"`` is a deliberate lockdown, not an error."""
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="read_write")
+    def test_valid_tier_is_silent(self) -> None:
+        """A recognised tier raises nothing."""
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="readwrite")
+    def test_typo_raises_error_not_warning(self) -> None:
+        """
+        A typo is an ``Error``, deliberately, not a ``Warning``.
+
+        Warnings are routinely ignored; this one changes whether anonymous
+        callers can reach the server at all, so it fails ``manage.py check``
+        and CI rather than scrolling past in a log stream.
+        """
+        errors = check_unauthenticated_tier_value()
+        assert len(errors) == 1
+        assert errors[0].id == E007_INVALID_UNAUTHENTICATED_TIER
+        assert isinstance(errors[0], Error)
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="readwrite")
+    def test_error_names_the_value_and_the_accepted_set(self) -> None:
+        """
+        The message must let the operator fix it without reading the source.
+
+        It names what they typed, states that anonymous access is now DENIED
+        (the consequence they will otherwise be debugging), and lists every
+        accepted value including how to deny deliberately.
+        """
+        msg = check_unauthenticated_tier_value()[0]
+        assert "readwrite" in msg.msg
+        assert "DENIED" in msg.msg
+        for accepted in ("read", "read_write", "admin", "none"):
+            assert accepted in msg.hint
+
+    def test_check_is_registered_with_django(self) -> None:
+        """Registered under the security tag, so ``check --deploy`` runs it."""
+        from django.core.checks import registry as checks_registry
+
+        assert any(
+            c is check_unauthenticated_tier_value for c in checks_registry.registry.get_checks()
+        )
+
+
+# ---------------------------------------------------------------------------
+# H5 — E008: a group dispatcher registered without membership is an Error
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherMembershipCheck:
+    """
+    ``group_tool_names`` is a security-mechanism input, not a negotiation hint.
+
+    Both consumers in ``views.py`` fail closed on a falsy membership set, so a
+    host in this state is safe — it is simply never told that ``@mcp_heavy``
+    negotiation and the dispatcher-routed lean write envelope have gone inert.
+    The runtime is deliberately unchanged here; this check exists so the
+    operator learns.
+    """
+
+    def _group(self, reg: Any, *, members: Any) -> None:
+        """Register a group dispatcher the way ``apps.py`` does."""
+        reg.register(
+            name="catalog",
+            fn=lambda a, r: {},
+            description="Group dispatcher.",
+            input_schema={"type": "object"},
+            permission_classes=[],
+            permission_tier="read",
+            is_dispatcher=True,
+            **({} if members is None else {"group_tool_names": members}),
+        )
+
+    def test_membership_less_group_raises_error(self) -> None:
+        """The reported defect: a hand-registered group with no membership."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        self._group(reg, members=None)
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            errors = check_dispatcher_membership()
+        assert len(errors) == 1
+        assert errors[0].id == E008_DISPATCHER_WITHOUT_MEMBERSHIP
+        assert isinstance(errors[0], Error)
+
+    def test_empty_membership_also_raises(self) -> None:
+        """An empty frozenset is as unroutable as an absent one."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        self._group(reg, members=frozenset())
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert len(check_dispatcher_membership()) == 1
+
+    def test_populated_group_is_silent(self) -> None:
+        """A package-constructed group never fires — apps.py always sets it."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        reg.register("item_list", lambda a, r: {}, "member", {"type": "object"})
+        self._group(reg, members=frozenset({"item_list"}))
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert check_dispatcher_membership() == []
+
+    def test_class_dispatcher_never_fires(self) -> None:
+        """
+        ⚠️ The blast-radius guard. A ``@mcp_dispatcher`` class legitimately has
+        no membership set — its actions are methods, not registry entries — so
+        firing on it would break startup for every correctly-configured host.
+
+        The two kinds are mutually exclusive at registration: ``decorators.py``
+        sets ``dispatcher_meta`` and never ``group_tool_names``; ``apps.py``
+        and ``route_views.py`` do the reverse.  This asserts the discriminator,
+        not merely that the happy path is quiet.
+        """
+        from frisian_mcp.decorators import mcp_action, mcp_dispatcher
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("tasks", description="Class dispatcher.")
+            class _Tasks:
+                """Synthetic class dispatcher."""
+
+                @mcp_action("list", description="List.", params={})
+                def list(self, request: Any, params: dict[str, Any]) -> Any:
+                    """Return nothing."""
+                    return {}
+
+            _ = _Tasks
+
+        entry = reg.get_entry("tasks")
+        assert entry.is_dispatcher and entry.dispatcher_meta is not None
+        assert not entry.group_tool_names, "premise: a class dispatcher has no membership"
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert check_dispatcher_membership() == []
+
+    def test_flat_tool_never_fires(self) -> None:
+        """Non-dispatcher entries are out of scope entirely."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        reg.register("item_list", lambda a, r: {}, "flat", {"type": "object"})
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert check_dispatcher_membership() == []
+
+    def test_message_names_what_is_lost_and_how_to_silence(self) -> None:
+        """
+        The message must say what the host LOSES, not that something is odd.
+
+        An operator hitting a startup failure needs the consequence (negotiation
+        and the lean write envelope are inert, the membership gate has nothing
+        to check) and both exits: supply the field, or silence the ID.
+        """
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        self._group(reg, members=None)
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            err = check_dispatcher_membership()[0]
+        assert "group_tool_names" in err.msg
+        assert "@mcp_heavy" in err.msg
+        assert "global registry" in err.msg
+        assert "SILENCED_SYSTEM_CHECKS" in err.hint
+        assert E008_DISPATCHER_WITHOUT_MEMBERSHIP in err.hint
+
+    def test_check_is_registered_with_django(self) -> None:
+        """Registered under the security tag, so ``manage.py check`` runs it."""
+        from django.core.checks import registry as checks_registry
+
+        assert any(c is check_dispatcher_membership for c in checks_registry.registry.get_checks())
+
+
+class TestW016HeavyCacheIsolation:
+    """
+    H6: continuation state must not share an eviction domain with security state.
+
+    The check reports the two unseparated arrangements it can see from settings.
+    It deliberately cannot prove the converse — see
+    ``test_distinct_location_is_silent_even_though_it_may_still_share_an_instance``.
+    """
+
+    _DEFAULT_ONLY = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "redis://cache:6379/1",
+        }
+    }
+
+    def test_unset_alias_warns_because_nothing_was_separated(self) -> None:
+        """The pre-H6 arrangement every host already runs: one pool, everything in it."""
+        with override_settings(CACHES=self._DEFAULT_ONLY):
+            results = check_heavy_cache_isolation()
+        assert len(results) == 1
+        assert results[0].id == W016_HEAVY_CACHE_NOT_ISOLATED
+        # The operator needs to know the exposure is reachable from outside.
+        assert "unauthenticated" in results[0].msg
+        assert "fails OPEN" in results[0].msg
+
+    def test_alias_pointing_at_the_same_location_warns(self) -> None:
+        """
+        The exact mistake the ruling names: renaming the pool instead of dividing it.
+
+        An alias alone is not a boundary, so a config that merely *looks*
+        separated must not read as compliant.
+        """
+        caches_setting = dict(self._DEFAULT_ONLY)
+        caches_setting["heavy"] = {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "redis://cache:6379/1",  # identical to default
+        }
+        with override_settings(CACHES=caches_setting, FRISIAN_MCP_HEAVY_CACHE_ALIAS="heavy"):
+            results = check_heavy_cache_isolation()
+        assert len(results) == 1
+        assert results[0].id == W016_HEAVY_CACHE_NOT_ISOLATED
+        assert "renames the pool" in results[0].msg
+
+    def test_distinct_location_is_silent_even_though_it_may_still_share_an_instance(
+        self,
+    ) -> None:
+        """
+        Silence is NOT proof of isolation, and this test exists to say so.
+
+        Two logical Redis DBs on one instance have distinct ``LOCATION`` strings
+        and still share that instance's memory, so exhausting one takes the
+        other down.  The check cannot see that from settings; the independent
+        *budget* is an operator obligation.  Pinned so nobody later reads a
+        silent check as a verified boundary.
+        """
+        caches_setting = dict(self._DEFAULT_ONLY)
+        caches_setting["heavy"] = {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "redis://cache:6379/2",  # same instance, different DB
+        }
+        with override_settings(CACHES=caches_setting, FRISIAN_MCP_HEAVY_CACHE_ALIAS="heavy"):
+            results = check_heavy_cache_isolation()
+        assert results == []
+
+    def test_check_is_registered_with_django(self) -> None:
+        """Registered under the security tag, so ``manage.py check`` runs it."""
+        from django.core.checks import registry as checks_registry
+
+        assert any(c is check_heavy_cache_isolation for c in checks_registry.registry.get_checks())

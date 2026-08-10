@@ -105,11 +105,15 @@ The effective tier for an unauthenticated request is controlled by `FRISIAN_MCP_
 # Allow unauthenticated callers to see and call read-tier tools.
 FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 
-# Require authentication for all tools.
+# Deny unauthenticated callers entirely: every tool requires credentials.
 FRISIAN_MCP_UNAUTHENTICATED_TIER = "none"
 ```
 
-Setting this to `"none"` makes `tools/list` return an empty array for unauthenticated callers, effectively hiding the entire tool surface.
+Setting this to `"none"` (or `None`) ranks an unauthenticated caller below every tool: `tools/list` returns an empty array and no tool can be invoked. Hiding and refusal are separate gates and both apply — a caller who already knows a tool's name gains nothing.
+
+Any **unrecognised** value denies in the same way and additionally raises a startup error naming the setting, so a misspelled tier is reported rather than silently applied. Omitting the setting entirely is the one case that does not deny: it uses the documented `"read"` default, so hosts that never configured it keep working.
+
+> **Correction — this did not work in releases before this one.** Earlier text here and in two install configurations distributed as production examples stated that `"none"` / `None` requires authentication for all tools. It did not: an unrecognised tier ranked equal to `read`, so anonymous callers kept the full read surface. If you configured a deployment on that basis, treat its read surface as having been reachable without credentials.
 
 ### Token tiers (contrib.tokens)
 
@@ -155,7 +159,7 @@ All settings are optional. Defaults are shown.
 |---------|---------|-------------|
 | `FRISIAN_MCP_AUTHENTICATION_CLASSES` | DRF default | List of dotted-path strings or class objects. Gateway-level authentication. |
 | `FRISIAN_MCP_PERMISSION_CLASSES` | `[]` | List of dotted-path strings or class objects. Gateway-level permission check. |
-| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests. Set `"none"` to require auth for all tools. |
+| `FRISIAN_MCP_UNAUTHENTICATED_TIER` | `"read"` | Permission tier for unauthenticated requests. `"none"` / `None` denies them entirely; an unrecognised value denies **and** raises a startup error. Did not deny in releases before this one — see *Unauthenticated callers* above. |
 
 ### Tool filtering
 

@@ -3,6 +3,7 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -30,8 +31,17 @@ class TestMcpTool:
     """Tests for the @mcp_tool decorator."""
 
     def test_registers_into_global_registry(self) -> None:
-        """@mcp_tool registers the decorated function in the global tool_registry."""
-        schema: dict[str, Any] = {"type": "object"}
+        """
+        @mcp_tool registers the decorated function in the global tool_registry.
+
+        H2 changed the ``input_schema`` argument: it is no longer passed
+        verbatim.  Any tool reachable by the size backstop must publish the
+        continuation call, because the backstop now mints only where the
+        published schema discloses it.  The schema is therefore checked by
+        shape rather than by identity — the caller's own declarations must
+        survive untouched, and only the disclosure is added.
+        """
+        schema: dict[str, Any] = {"type": "object", "properties": {"q": {"type": "string"}}}
 
         with patch.object(tool_registry, "register") as mock_register:
 
@@ -39,14 +49,44 @@ class TestMcpTool:
             def _decorated(_arguments: dict[str, Any], _request: Any) -> None:
                 """Decorated test tool placeholder."""
 
-            mock_register.assert_called_once_with(
-                name="test.decorated",
-                fn=_decorated,
-                description="Test",
-                input_schema=schema,
-                permission_classes=None,
-                permission_tier="read",
-            )
+            assert mock_register.call_count == 1
+            kwargs = mock_register.call_args.kwargs
+            assert kwargs["name"] == "test.decorated"
+            assert kwargs["fn"] is _decorated
+            assert kwargs["description"] == "Test"
+            assert kwargs["permission_classes"] is None
+            assert kwargs["permission_tier"] == "read"
+
+            registered = kwargs["input_schema"]
+            # The author's own field is preserved verbatim...
+            assert registered["properties"]["q"] == {"type": "string"}
+            # ...and the continuation call is now reachable.
+            assert "continuation_token" in registered["properties"]
+            # The first call is unchanged: the four colliding fields are
+            # declared only in the continuation branch, never at the top level.
+            assert "mode" not in registered["properties"]
+
+    def test_does_not_mutate_the_callers_schema(self) -> None:
+        """
+        H2's merge is non-destructive.
+
+        Host code commonly builds one schema dict and reuses it.  Mutating it
+        in place would leak the continuation fields into unrelated tools and
+        make registration order significant.
+        """
+        schema: dict[str, Any] = {"type": "object", "properties": {}}
+        original = deepcopy(schema)
+
+        isolated = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", isolated):
+
+            @mcp_tool(name="nomutate.test", description="Test", input_schema=schema)
+            def _fn(_arguments: dict[str, Any], _request: Any) -> None:
+                """Decorated test tool placeholder."""
+
+            _ = _fn
+
+        assert schema == original
 
     def test_returns_original_callable(self) -> None:
         """@mcp_tool returns the original function unmodified."""
@@ -90,7 +130,8 @@ class TestMcpTool:
                 """Return a fixed result."""
                 return {"ok": True}
 
-        req = MagicMock()
+        # H7: pin the MCP tier attributes; a bare MagicMock fabricates a tier.
+        req = MagicMock(_mcp_effective_tier=None, _mcp_max_tier=None, auth=None)
         result = isolated.dispatch(req, "dispatch.test", {})
         assert result == {"ok": True}
 

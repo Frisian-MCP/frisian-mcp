@@ -258,8 +258,15 @@ class TestListToolsEntryFilter:
 class TestPermEntryFilter:
     """Unit tests for the ``_make_perm_entry_filter`` helper in ``views.py``."""
 
-    def test_tool_without_perm_metadata_always_passes(self) -> None:
-        """Tools without perm metadata are always visible regardless of capabilities."""
+    def test_tool_without_perm_metadata_is_hidden(self) -> None:
+        """
+        H3 INVERTED: indeterminate capability now HIDES the tool.
+
+        This previously asserted that a tool with no perm metadata was "always
+        visible regardless of capabilities" — a discovery control failing open
+        the moment metadata was absent.  Absence of evidence is not evidence of
+        permission, so the entry is hidden until someone states otherwise.
+        """
         from frisian_mcp.views import _make_perm_entry_filter
 
         reg = ToolRegistry()
@@ -272,10 +279,57 @@ class TestPermEntryFilter:
         entry = reg.get_entry("custom")
         assert entry is not None
         filt = _make_perm_entry_filter(frozenset())
-        assert filt(entry) is True
+        assert filt(entry) is False
 
-    def test_dispatcher_tool_always_passes(self) -> None:
-        """Dispatcher tools are always visible; per-action filtering happens at call time."""
+    def test_declared_capability_makes_a_perm_less_tool_filterable(self) -> None:
+        """A decorator tool can declare its capability and be filtered on it."""
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        reg = ToolRegistry()
+        reg.register(
+            name="custom",
+            fn=_noop,
+            description="declares its capability",
+            input_schema={"type": "object"},
+            capability="orders.view_order",
+        )
+        entry = reg.get_entry("custom")
+        assert entry is not None
+
+        assert _make_perm_entry_filter(frozenset({"orders.view_order"}))(entry) is True
+        assert _make_perm_entry_filter(frozenset({"orders.add_order"}))(entry) is False
+
+    def test_universal_discovery_is_the_explicit_opt_in(self) -> None:
+        """
+        Universal visibility is reachable, but only by stating it.
+
+        This is the replacement for the old fail-open behaviour: the same
+        outcome, now a deliberate declaration rather than the accidental result
+        of missing metadata.
+        """
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        reg = ToolRegistry()
+        reg.register(
+            name="healthcheck",
+            fn=_noop,
+            description="intentionally universal",
+            input_schema={"type": "object"},
+            universal_discovery=True,
+        )
+        entry = reg.get_entry("healthcheck")
+        assert entry is not None
+        assert _make_perm_entry_filter(frozenset())(entry) is True
+
+    def test_dispatcher_is_not_blanket_visible(self) -> None:
+        """
+        H3 INVERTED: a dispatcher earns visibility like anything else.
+
+        Previously dispatchers returned ``True`` unconditionally on the
+        rationale that "per-action filtering happens at call time" — but
+        tools/list is precisely where the caller learns the tool exists, so
+        deferring to call time disclosed every dispatcher to everyone.
+        """
         from frisian_mcp.views import _make_perm_entry_filter
 
         reg = ToolRegistry()
@@ -291,8 +345,8 @@ class TestPermEntryFilter:
         )
         entry = reg.get_entry("dcim")
         assert entry is not None
-        filt = _make_perm_entry_filter(frozenset())
-        assert filt(entry) is True
+        assert _make_perm_entry_filter(frozenset())(entry) is False
+        assert _make_perm_entry_filter(frozenset({"dcim.view_device"}))(entry) is True
 
     def test_tool_included_when_capability_present(self) -> None:
         """Tool is included when user has the required capability."""
@@ -818,6 +872,12 @@ def _make_dispatcher_entry(
     entry.is_dispatcher = True
     entry.perm_app_label = app_label
     entry.perm_model = model
+    # H3: a real _ToolEntry defaults these to None/False.  MagicMock would
+    # auto-create them as truthy mocks, so the entry would read as "declares
+    # universal discovery" and the factory would skip filtering entirely — the
+    # fixture, not the code, deciding the outcome.
+    entry.capability = None
+    entry.universal_discovery = False
     entry.dispatcher_meta = DispatcherMeta(
         name=f"{app_label}_{model}",
         description="test dispatcher",
@@ -861,8 +921,18 @@ class TestPermActionFilterFactory:
         entry = MagicMock()
         entry.perm_app_label = None
         entry.perm_model = None
+        entry.capability = None
+        entry.universal_discovery = False
         factory = _make_perm_action_filter_factory(frozenset({"dcim.view_device"}))
-        assert factory(entry) is None
+
+        # H3 INVERTED: this used to return None, meaning "no filtering", which
+        # published the dispatcher's FULL action enum — every write and admin
+        # action name — to a caller whose capabilities were unknown.  An
+        # indeterminate dispatcher now hides every action, and list_tools then
+        # drops the dispatcher as an empty navigation shell.
+        action_filter = factory(entry)
+        assert action_filter is not None
+        assert action_filter("list", MagicMock(backend_action=None)) is False
 
     def test_factory_returns_callable_when_perm_metadata_present(self) -> None:
         """Factory returns a callable when perm_app_label and perm_model are set."""
@@ -1322,7 +1392,9 @@ class TestHelpBypassFix:
             reg,
         )
 
-        req = MagicMock()
+        # H7: pin the MCP tier attributes so this reaches the permission
+        # filter under test rather than being denied by the tier gate first.
+        req = MagicMock(_mcp_effective_tier=None, _mcp_max_tier=None, auth=None)
         req.user = MagicMock()
         req.user.is_superuser = False
         req._mcp_perm_entry_filter = filt
@@ -1486,3 +1558,429 @@ class TestServicePrincipalBypass:
         names = {t["name"] for t in tools}
         assert "device_list" in names
         assert "prefix_list" in names
+
+
+class TestH3FailClosedGaps:
+    """
+    The three gaps H3 names, each previously fail-open.
+
+    The branch that already worked — a group dispatcher with perm-aware
+    children — is covered by ``TestGroupDispatcherVisibility`` and is
+    deliberately not re-tested here.
+    """
+
+    def test_group_of_only_perm_less_tools_is_hidden(self) -> None:
+        """
+        GAP: a group whose children all lack perm metadata was universally visible.
+
+        ``list_tools`` used to consider only children with perm_app_label AND
+        perm_model.  A group assembled entirely from perm-less tools had none,
+        so the guard never fired and the group was advertised to every caller
+        no matter what its children required.
+        """
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        reg = ToolRegistry()
+        reg.register(
+            name="permless_child",
+            fn=_noop,
+            description="no perm metadata",
+            input_schema={"type": "object"},
+            hidden=True,
+        )
+        reg.register(
+            name="permless_group",
+            fn=_noop,
+            description="group of perm-less tools",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            group_tool_names=frozenset({"permless_child"}),
+        )
+
+        tools = reg.list_tools(entry_filter=_make_perm_entry_filter(frozenset()))
+        assert "permless_group" not in {t["name"] for t in tools}
+
+    def test_group_visible_when_a_perm_less_child_declares_itself(self) -> None:
+        """A declared child is a legitimate reason to show the group."""
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        reg = ToolRegistry()
+        reg.register(
+            name="permless_child",
+            fn=_noop,
+            description="declares a capability",
+            input_schema={"type": "object"},
+            capability="catalog.view_item",
+            hidden=True,
+        )
+        reg.register(
+            name="permless_group",
+            fn=_noop,
+            description="group of perm-less tools",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            group_tool_names=frozenset({"permless_child"}),
+        )
+
+        holder = _make_perm_entry_filter(frozenset({"catalog.view_item"}))
+        assert "permless_group" in {t["name"] for t in reg.list_tools(entry_filter=holder)}
+
+        nonholder = _make_perm_entry_filter(frozenset({"catalog.add_item"}))
+        assert "permless_group" not in {t["name"] for t in reg.list_tools(entry_filter=nonholder)}
+
+    def _class_dispatcher_registry(self, **register_kwargs: Any) -> ToolRegistry:
+        from frisian_mcp.backends.dispatcher import DispatcherMeta
+
+        reg = ToolRegistry()
+        meta = DispatcherMeta(
+            name="items",
+            description="class dispatcher",
+            actions=_crud_actions(),
+        )
+        reg.register(
+            name="items",
+            fn=_noop,
+            description="class dispatcher",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            dispatcher_meta=meta,
+            **register_kwargs,
+        )
+        return reg
+
+    def test_indeterminate_class_dispatcher_is_dropped_not_published_unfiltered(self) -> None:
+        """
+        GAP: a class dispatcher with no perm metadata published its FULL action enum.
+
+        The action-filter factory returned ``None`` — "no filtering" — so a
+        caller whose capabilities were unknown was handed the names of every
+        write and admin action on the resource.  Now every action is hidden and
+        the dispatcher is dropped as the empty navigation shell it would be.
+        """
+        from frisian_mcp.views import _make_perm_action_filter_factory, _make_perm_entry_filter
+
+        reg = self._class_dispatcher_registry()
+        tools = reg.list_tools(
+            entry_filter=_make_perm_entry_filter(frozenset()),
+            action_filter_factory=_make_perm_action_filter_factory(frozenset()),
+        )
+        assert "items" not in {t["name"] for t in tools}
+
+    def test_declared_class_dispatcher_filters_its_action_enum(self) -> None:
+        """A declared capability base resolves per-action verbs, so the enum narrows."""
+        from frisian_mcp.views import _make_perm_action_filter_factory, _make_perm_entry_filter
+
+        reg = self._class_dispatcher_registry(capability="catalog.item")
+        caps = frozenset({"catalog.view_item"})
+        tools = reg.list_tools(
+            entry_filter=_make_perm_entry_filter(caps),
+            action_filter_factory=_make_perm_action_filter_factory(caps),
+        )
+
+        listed = {t["name"]: t for t in tools}
+        assert "items" in listed
+        actions = set(listed["items"]["inputSchema"]["properties"]["action"]["enum"])
+        # view-only: the read actions survive, the write ones do not.
+        assert {"list", "retrieve"} <= actions
+        assert not actions & {"create", "update", "destroy"}
+
+    def test_universal_class_dispatcher_publishes_every_action(self) -> None:
+        """Declaring universal discovery is what publishing the full enum now requires."""
+        from frisian_mcp.views import _make_perm_action_filter_factory, _make_perm_entry_filter
+
+        reg = self._class_dispatcher_registry(universal_discovery=True)
+        tools = reg.list_tools(
+            entry_filter=_make_perm_entry_filter(frozenset()),
+            action_filter_factory=_make_perm_action_filter_factory(frozenset()),
+        )
+
+        listed = {t["name"]: t for t in tools}
+        assert "items" in listed
+        actions = set(listed["items"]["inputSchema"]["properties"]["action"]["enum"])
+        assert {"list", "retrieve", "create", "update", "destroy"} <= actions
+
+
+class TestW015IndeterminateCapability:
+    """
+    H3 item 5: hiding must be loud.
+
+    Fail-closed turns a misconfiguration into a tool that silently stops
+    appearing in ``tools/list``.  That is the safe direction but a miserable one
+    to debug from the outside, so the operator is told at startup.
+    """
+
+    _NAME = "_w015_probe_tool"
+
+    def _register(self, **kwargs: Any) -> None:
+        from frisian_mcp.registry import tool_registry
+
+        tool_registry.register(
+            name=self._NAME,
+            fn=_noop,
+            description="probe",
+            input_schema={"type": "object"},
+            **kwargs,
+        )
+
+    def _unregister(self) -> None:
+        from frisian_mcp.registry import tool_registry
+
+        tool_registry._tools.pop(self._NAME, None)  # pylint: disable=protected-access
+
+    def _w015(self) -> list[Any]:
+        from frisian_mcp.checks import (
+            W015_INDETERMINATE_CAPABILITY,
+            check_permission_aware_discovery,
+        )
+
+        return [
+            e for e in check_permission_aware_discovery() if e.id == W015_INDETERMINATE_CAPABILITY
+        ]
+
+    @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True)
+    def test_indeterminate_entry_is_reported(self) -> None:
+        """A tool with no derivable and no declared capability is named."""
+        self._register()
+        try:
+            warnings = self._w015()
+            assert len(warnings) == 1
+            assert self._NAME in warnings[0].msg
+            assert "HIDDEN" in warnings[0].msg
+        finally:
+            self._unregister()
+
+    @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True)
+    def test_declared_capability_clears_the_warning(self) -> None:
+        """Declaring the capability is one of the two ways to resolve it."""
+        self._register(capability="catalog.view_item")
+        try:
+            assert not [w for w in self._w015() if self._NAME in w.msg]
+        finally:
+            self._unregister()
+
+    @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=True)
+    def test_universal_discovery_clears_the_warning(self) -> None:
+        """So is stating that the tool is meant to be universally visible."""
+        self._register(universal_discovery=True)
+        try:
+            assert not [w for w in self._w015() if self._NAME in w.msg]
+        finally:
+            self._unregister()
+
+    @override_settings(FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY=False)
+    def test_silent_when_the_feature_is_off(self) -> None:
+        """Nothing is hidden when the filter never runs, so nothing is reported."""
+        self._register()
+        try:
+            assert self._w015() == []
+        finally:
+            self._unregister()
+
+
+class TestH3OneLensAllConsumers:
+    """
+    H3 REOPENED: every consumer of "what can this caller see" gives ONE answer.
+
+    The first H3 pass fixed only ``tools/list`` and left three consumers on a
+    sibling helper whose indeterminate branch returned ``None`` — meaning *no
+    filtering*.  On the same indeterminate dispatcher ``tools/list`` denied
+    every action while ``action="help"`` published every action: not a gap, the
+    exact inverse of the ruling, reachable on one request.
+
+    These tests pin agreement rather than each consumer's behaviour in
+    isolation, because four independently-correct copies is how the defect
+    recurred in the first place.
+    """
+
+    def _dispatcher(self, **register_kwargs: Any) -> tuple[ToolRegistry, Any]:
+        from frisian_mcp.backends.dispatcher import DispatcherMeta
+
+        reg = ToolRegistry()
+        meta = DispatcherMeta(name="items", description="class dispatcher", actions=_crud_actions())
+        reg.register(
+            name="items",
+            fn=_noop,
+            description="class dispatcher",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            dispatcher_meta=meta,
+            **register_kwargs,
+        )
+        return reg, meta
+
+    def _tools_list_actions(self, reg: ToolRegistry, caps: frozenset[str]) -> set[str] | None:
+        """Return the action enum tools/list publishes, or None when it drops the tool."""
+        from frisian_mcp.views import _make_perm_action_filter_factory, _make_perm_entry_filter
+
+        listed = {
+            t["name"]: t
+            for t in reg.list_tools(
+                entry_filter=_make_perm_entry_filter(caps),
+                action_filter_factory=_make_perm_action_filter_factory(caps),
+            )
+        }
+        if "items" not in listed:
+            return None
+        return set(listed["items"]["inputSchema"]["properties"]["action"]["enum"])
+
+    def _help_actions(self, reg: ToolRegistry, caps: frozenset[str]) -> set[str]:
+        """Return the action set `action="help"` discloses."""
+        from frisian_mcp.backends.dispatcher import (
+            _build_perm_action_filter_from_request,
+            _visible_actions,
+        )
+
+        request = MagicMock()
+        request._mcp_capabilities = caps
+        request._mcp_max_tier = None
+        with patch("frisian_mcp.registry.tool_registry", reg):
+            entry = reg.get_entry("items")
+            assert entry is not None
+            return set(
+                _visible_actions(
+                    entry.dispatcher_meta,
+                    None,
+                    action_filter=_build_perm_action_filter_from_request(request, "items"),
+                )
+            )
+
+    def test_indeterminate_dispatcher_agrees_across_consumers(self) -> None:
+        """
+        THE INVERSION: tools/list denied everything, help published everything.
+
+        Both must now deny.  ``tools/list`` expresses that by dropping the
+        dispatcher (an enum of nothing is an empty navigation shell); help
+        expresses it as an empty action set. Same verdict, two shapes.
+        """
+        reg, _ = self._dispatcher()
+        caps: frozenset[str] = frozenset()
+
+        assert self._tools_list_actions(reg, caps) is None
+        assert self._help_actions(reg, caps) == set()
+
+    def test_declared_capability_agrees_across_consumers(self) -> None:
+        """
+        W015's own remedy must not produce divergence.
+
+        The old helper checked only ``perm_app_label``/``perm_model``, so a
+        dispatcher that followed W015 and declared ``capability`` got a
+        filtered tools/list and an unfiltered help on the same request.
+        """
+        reg, _ = self._dispatcher(capability="catalog.item")
+        caps = frozenset({"catalog.view_item"})
+
+        listed = self._tools_list_actions(reg, caps)
+        assert listed == self._help_actions(reg, caps)
+        assert listed is not None
+        assert {"list", "retrieve"} <= listed
+        assert not listed & {"create", "update", "destroy"}
+
+    def test_universal_dispatcher_agrees_across_consumers(self) -> None:
+        """An explicit universal declaration publishes everything, everywhere."""
+        reg, _ = self._dispatcher(universal_discovery=True)
+        caps: frozenset[str] = frozenset()
+
+        listed = self._tools_list_actions(reg, caps)
+        assert listed == self._help_actions(reg, caps)
+        assert listed is not None
+        assert {"list", "retrieve", "create", "update", "destroy"} <= listed
+
+    def test_derived_metadata_agrees_across_consumers(self) -> None:
+        """The path that already worked keeps working, and still agrees."""
+        reg, _ = self._dispatcher(perm_app_label="catalog", perm_model="item")
+        caps = frozenset({"catalog.view_item"})
+
+        listed = self._tools_list_actions(reg, caps)
+        assert listed == self._help_actions(reg, caps)
+        assert listed is not None
+        assert {"list", "retrieve"} <= listed
+        assert not listed & {"create", "update", "destroy"}
+
+    def test_unknown_action_hint_is_capability_filtered_on_an_uncapped_mount(self) -> None:
+        """
+        The did-you-mean candidates apply the lens even with no tier cap.
+
+        The suggestion existed to stop an error naming a hidden action back to
+        the caller, but the capability half was gated on ``_mcp_max_tier``, so
+        an uncapped perm-aware host still suggested from the full action map.
+        """
+        from frisian_mcp.backends.dispatcher import _build_perm_action_filter_from_request
+
+        reg, meta = self._dispatcher(capability="catalog.item")
+        request = MagicMock()
+        request._mcp_capabilities = frozenset({"catalog.view_item"})
+        request._mcp_max_tier = None  # uncapped
+
+        with patch("frisian_mcp.registry.tool_registry", reg):
+            action_filter = _build_perm_action_filter_from_request(request, "items")
+            assert action_filter is not None
+            # 'destroy' is a real action the caller cannot see, so it must not
+            # be a suggestion candidate for a near-miss like 'destro'.
+            assert action_filter("retrieve", meta.actions["retrieve"]) is True
+            assert action_filter("destroy", meta.actions["destroy"]) is False
+
+    def test_group_404_hint_does_not_name_a_hidden_resource(self) -> None:
+        """
+        The fourth consumer: discovery hid the resource, the error named it back.
+
+        Measured before the fix, with a caller holding nothing:
+        tools/list was empty and the near-miss still answered
+        "Did you mean resource='secret'?" — with the correct spelling.
+        """
+        from frisian_mcp.backends.group_dispatcher import make_group_invoke
+        from frisian_mcp.views import _make_perm_entry_filter
+
+        reg = ToolRegistry()
+        reg.register(
+            name="secret_list",
+            fn=_noop,
+            description="hidden by H3",
+            input_schema={"type": "object"},
+            hidden=True,
+        )
+        reg.register(
+            name="svc",
+            fn=_noop,
+            description="group",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            group_tool_names=frozenset({"secret_list"}),
+        )
+
+        caps: frozenset[str] = frozenset()
+        assert not {t["name"] for t in reg.list_tools(entry_filter=_make_perm_entry_filter(caps))}
+
+        invoke = make_group_invoke(
+            "svc", frozenset({"secret_list"}), reg, resource_prefixes=frozenset({"secret"})
+        )
+        request = MagicMock()
+        request._mcp_capabilities = caps
+        request._mcp_max_tier = None
+
+        with pytest.raises(LookupError) as exc:
+            invoke({"resource": "secre", "action": "list", "params": {}}, request)
+        assert "secret" not in str(exc.value)
+
+    def test_group_404_hint_still_helps_a_caller_who_can_see_the_resource(self) -> None:
+        """Filtering the candidates must not make the hint useless to a legitimate caller."""
+        from frisian_mcp.backends.group_dispatcher import make_group_invoke
+
+        reg = ToolRegistry()
+        reg.register(
+            name="secret_list",
+            fn=_noop,
+            description="visible to a holder",
+            input_schema={"type": "object"},
+            capability="catalog.view_item",
+            hidden=True,
+        )
+        invoke = make_group_invoke(
+            "svc", frozenset({"secret_list"}), reg, resource_prefixes=frozenset({"secret"})
+        )
+        request = MagicMock()
+        request._mcp_capabilities = frozenset({"catalog.view_item"})
+        request._mcp_max_tier = None
+
+        with pytest.raises(LookupError) as exc:
+            invoke({"resource": "secre", "action": "list", "params": {}}, request)
+        assert "Did you mean resource='secret'?" in str(exc.value)

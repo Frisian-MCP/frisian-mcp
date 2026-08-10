@@ -7,7 +7,7 @@ from typing import Any, TypeVar
 
 from rest_framework.permissions import BasePermission
 
-from frisian_mcp.negotiation import _merge_negotiation_schema
+from frisian_mcp.negotiation import _merge_negotiation_schema, merge_continuation_branch
 from frisian_mcp.registry import tool_registry
 from frisian_mcp.resources import ResourceDefinition, resource_registry
 
@@ -23,6 +23,8 @@ def mcp_tool(
     permission_classes: list[type[BasePermission]] | None = None,
     write: bool = False,
     admin: bool = False,
+    capability: str | None = None,
+    universal_discovery: bool = False,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Register the decorated callable as a named MCP tool.
@@ -55,6 +57,17 @@ def mcp_tool(
             Pass ``None`` or ``[]`` for unrestricted access.
         write: Set ``True`` to assign ``permission_tier="read_write"``.
         admin: Set ``True`` to assign ``permission_tier="admin"``.
+        capability: The Django permission string a caller must hold for this
+            tool to appear in ``tools/list`` under
+            ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` (e.g.
+            ``"orders.view_order"``).  Decorator tools have no ViewSet queryset
+            for discovery to derive this from, so declaring it is the only way
+            they participate in capability filtering.
+        universal_discovery: Declare this tool intentionally visible to every
+            caller.  Without either this or *capability*, the tool's capability
+            is indeterminate and it is **hidden** when permission-aware
+            discovery is on — visibility to everyone must be stated, never
+            inherited from missing metadata.
 
     Returns:
         The original callable, unchanged, registered as a side-effect.
@@ -66,7 +79,13 @@ def mcp_tool(
             name=name,
             fn=fn,
             description=description,
-            input_schema=input_schema,
+            capability=capability,
+            universal_discovery=universal_discovery,
+            # H2: any tool that can reach the size backstop must publish the
+            # continuation call, because the backstop mints against exactly this
+            # schema.  The conditional branch leaves the first call untouched,
+            # so a hand-authored signature keeps meaning what it meant.
+            input_schema=merge_continuation_branch(input_schema),
             permission_classes=permission_classes,
             permission_tier="admin" if admin else "read_write" if write else "read",
         )
@@ -125,6 +144,8 @@ def mcp_dispatcher(
     name: str,
     description: str,
     permission_classes: list[type[BasePermission]] | None = None,
+    capability: str | None = None,
+    universal_discovery: bool = False,
 ) -> Callable[[_ClassT], _ClassT]:
     """
     Register a class as a named MCP dispatcher tool.
@@ -139,6 +160,16 @@ def mcp_dispatcher(
         description: Human-readable description shown in ``tools/list``.
         permission_classes: DRF permission classes that guard this dispatcher.
             Pass ``None`` or ``[]`` for unrestricted access.
+        capability: The ``"app_label.model"`` base this dispatcher's per-action
+            verbs resolve against under
+            ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` (e.g.
+            ``"catalog.item"``, which combines with each action's verb to give
+            ``"catalog.add_item"``).  A class dispatcher has no ViewSet queryset
+            to derive this from; without it every action is hidden and the
+            dispatcher is dropped as an empty navigation entry point.
+        universal_discovery: Publish this dispatcher and its full action enum
+            to every caller.  Must be stated explicitly — an indeterminate
+            dispatcher is hidden, not universally visible.
 
     Returns:
         The original class, unchanged, registered as a side-effect.
@@ -190,6 +221,8 @@ def mcp_dispatcher(
             is_dispatcher=True,
             permission_tier="read",
             dispatcher_meta=meta,
+            capability=capability,
+            universal_discovery=universal_discovery,
         )
         return cls
 
@@ -241,6 +274,8 @@ def mcp_heavy(
     permission_classes: list[type[BasePermission]] | None = None,
     write: bool = False,
     admin: bool = False,
+    capability: str | None = None,
+    universal_discovery: bool = False,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Register the decorated callable as a heavy MCP tool with response-negotiation.
@@ -315,6 +350,8 @@ def mcp_heavy(
             description=description,
             input_schema=_merge_negotiation_schema(input_schema),
             permission_classes=permission_classes,
+            capability=capability,
+            universal_discovery=universal_discovery,
             is_heavy=True,
             permission_tier="admin" if admin else "read_write" if write else "read",
         )

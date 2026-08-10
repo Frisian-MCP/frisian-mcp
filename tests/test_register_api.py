@@ -29,6 +29,12 @@ def _echo(arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
 def _request() -> MagicMock:
     """Build a minimal mock request."""
     req = MagicMock()
+    # H7: a bare MagicMock fabricates `_mcp_effective_tier`, presenting a Mock
+    # where a tier string belongs.  An unrecognised tier now ranks BELOW read,
+    # so pin the MCP attributes to their real "no context" values.
+    req._mcp_effective_tier = None
+    req._mcp_max_tier = None
+    req.auth = None
     req.user = MagicMock()
     req.user.is_authenticated = True
     return req
@@ -172,7 +178,8 @@ class TestRegisterPermissions:
     def test_register_with_no_permissions_is_open(self, registry: ToolRegistry) -> None:
         """A tool registered without permission_classes is callable by anyone."""
         registry.register("open.tool", _echo, "Open", {}, permission_classes=None)
-        unauthenticated = MagicMock()
+        # H7: pin the MCP tier attributes; a bare MagicMock fabricates a tier.
+        unauthenticated = MagicMock(_mcp_effective_tier=None, _mcp_max_tier=None, auth=None)
         unauthenticated.user.is_authenticated = False
         result = registry.dispatch(unauthenticated, "open.tool", {})
         assert result == {}

@@ -45,6 +45,26 @@ Registered checks
     without a ``backend_action`` annotation.  The permission adapter cannot
     derive the required Django permission verb for unannotated custom actions.
 
+``frisian_mcp.E007``
+    Error when ``FRISIAN_MCP_UNAUTHENTICATED_TIER`` is set to a value that is
+    neither a recognised tier nor the canonical ``"none"``.  The runtime denies
+    on such a value (H7 — it used to degrade silently to ``read``), so without
+    this check a typo would lock anonymous callers out with nothing explaining
+    why.  An absent setting and an explicit ``None``/``"none"`` are both
+    silent: absence is the documented ``read`` default, and ``none`` is a
+    deliberate lockdown.
+
+``frisian_mcp.E008``
+    Error when a **group** dispatcher is registered without
+    ``group_tool_names``.  That field feeds two security mechanisms in
+    ``views.py`` (the caller-supplied-``resource`` membership gate and the
+    audit resolver), and both fail closed on a falsy set — so the host is safe
+    but uninformed, and silently loses ``@mcp_heavy`` negotiation and the
+    dispatcher-routed lean write envelope.  ``@mcp_dispatcher`` classes are out
+    of scope: they carry ``dispatcher_meta`` and legitimately have no
+    membership set.  Silence with ``SILENCED_SYSTEM_CHECKS`` if a
+    membership-less dispatcher is deliberate.
+
 ``frisian_mcp.W012``
     Warns (LOUD) when ``frisian_mcp.contrib.oauth`` is installed but
     ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False``.  That flag 404s the
@@ -79,6 +99,19 @@ Registered checks
     runtime — and it never coerces the value (``deny`` is never guessed from an
     ambiguous config).
 
+``frisian_mcp.W016``
+    Warns when heavy-response continuation entries share an eviction domain
+    with OAuth security state — either because
+    ``FRISIAN_MCP_HEAVY_CACHE_ALIAS`` is unset (still ``default``) or because
+    it resolves to the same ``LOCATION`` as ``default``.  Continuation entries
+    are attacker-amplifiable (an unauthenticated caller can mint them) while
+    authorization codes and the token-endpoint rate counter are security state,
+    and the rate limiter fails **open** when its cache is unavailable.  Absence
+    of this warning is **not** proof of isolation: two aliases addressing
+    different logical Redis DBs on one instance have distinct ``LOCATION``
+    strings and still share that instance's memory.  The requirement is an
+    independent eviction *budget*, which settings alone cannot express.
+
 Per-route configuration checks (``E004``, ``E005``, ``E1xx``, ``E2xx``,
 ``W004``–``W007``) live in :mod:`frisian_mcp.route_audit` and are registered
 from there.  They are config-only: the tool registry is empty while system
@@ -97,6 +130,7 @@ from typing import Any
 
 from django.apps import apps as django_apps
 from django.conf import settings
+from django.core.cache import DEFAULT_CACHE_ALIAS
 from django.core.checks import (  # pylint: disable=redefined-builtin
     Error,
     Tags,
@@ -104,7 +138,13 @@ from django.core.checks import (  # pylint: disable=redefined-builtin
     register,
 )
 
-from frisian_mcp.registry import _VALID_PERMISSION_TIERS, tool_registry
+from frisian_mcp.registry import (
+    DENY_TIER,
+    UNAUTH_TIER_INVALID,
+    _VALID_PERMISSION_TIERS,
+    classify_unauthenticated_tier,
+    tool_registry,
+)
 from frisian_mcp.usage.resolver import USAGE_POLICY_SETTING, resolve_system_policy
 
 logger = logging.getLogger(__name__)
@@ -114,9 +154,13 @@ W002_PLAINTEXT_API_KEYS = "frisian_mcp.W002"
 W003_PRIVILEGED_SERVICE_ACCOUNT = "frisian_mcp.W003"
 E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
 E003_UNANNOTATED_CUSTOM_ACTION = "frisian_mcp.E003"
+E007_INVALID_UNAUTHENTICATED_TIER = "frisian_mcp.E007"
+E008_DISPATCHER_WITHOUT_MEMBERSHIP = "frisian_mcp.E008"
 W012_OAUTH_DISCOVERY_HIDDEN = "frisian_mcp.W012"
 W013_MALFORMED_RATE_LIMIT = "frisian_mcp.W013"
 W014_INVALID_USAGE_POLICY = "frisian_mcp.W014"
+W015_INDETERMINATE_CAPABILITY = "frisian_mcp.W015"
+W016_HEAVY_CACHE_NOT_ISOLATED = "frisian_mcp.W016"
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -294,10 +338,130 @@ def check_service_account_user(  # pylint: disable=unused-argument
 
 
 @register(Tags.security)
-def check_permission_aware_discovery(  # pylint: disable=unused-argument
+def check_unauthenticated_tier_value(  # pylint: disable=unused-argument
     app_configs: Any = None,  # noqa: ARG001
     **kwargs: Any,  # noqa: ARG001
 ) -> list[Error]:
+    """
+    H7: an unrecognised ``FRISIAN_MCP_UNAUTHENTICATED_TIER`` must be loud.
+
+    The runtime already fails closed on an unrecognised value, so this check
+    exists for the operator, not the gateway.  A typo used to degrade silently
+    to ``read`` — the setting was present, spelled plausibly, and did nothing,
+    which is undetectable by reading the config.  Now it denies, and denying
+    silently is its own trap: a host that intended ``read_write`` and typed
+    ``readwrite`` would lose anonymous access with no explanation.
+
+    Three cases, matching ``registry._resolve_unauthenticated_tier``:
+
+    * absent → no error (documented default ``read``)
+    * ``None`` or ``"none"`` → no error (a deliberate lockdown)
+    * anything else → this error
+    """
+    # H13: classification comes from the registry, not a local re-derivation.
+    # This check previously carried its own sentinel and vocabulary comparison —
+    # a second answer to a question the runtime already answers, and mcp_doctor
+    # carried a third that had drifted.
+    case, _tier = classify_unauthenticated_tier()
+    if case != UNAUTH_TIER_INVALID:
+        return []
+
+    raw = getattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER", None)
+    accepted = ", ".join(sorted(_VALID_PERMISSION_TIERS) + [DENY_TIER])
+    return [
+        Error(
+            f"FRISIAN_MCP_UNAUTHENTICATED_TIER={raw!r} is not a recognised tier. "
+            "Anonymous callers are being DENIED all access, which may not be what "
+            "this host intended.",
+            hint=(
+                f"Set it to one of: {accepted}. Use {DENY_TIER!r} (or None) to deny "
+                "anonymous access deliberately, or remove the setting entirely to "
+                "keep the documented default of 'read'."
+            ),
+            id=E007_INVALID_UNAUTHENTICATED_TIER,
+        )
+    ]
+
+
+@register(Tags.security)
+def check_dispatcher_membership(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Error]:
+    """
+    H5: a group dispatcher registered without ``group_tool_names`` is an Error.
+
+    ``group_tool_names`` is no longer a negotiation hint.  It is the input to
+    two security mechanisms in ``views.py`` — the gate that stops a
+    caller-supplied ``resource`` resolving against the *global* registry, and
+    the audit resolver deciding whether caller text reaches the sink.  Both
+    fail closed on a falsy membership set, so the host is safe; what it is not
+    is *informed*.  A dispatcher registered this way silently loses
+    ``@mcp_heavy`` negotiation and the dispatcher-routed lean write envelope,
+    with no runtime signal at all.
+
+    ``Error``, not ``Warning``, for consistency with this module's own
+    convention: every ``Warning`` here is configuration hygiene where the
+    package can still tell what the operator meant, and the one existing
+    ``Error`` — ``E003`` — is indeterminate security metadata on a dispatcher.
+    This is the second instance of that category, not a new one.
+
+    Only **group** dispatchers are in scope.  A ``@mcp_dispatcher`` class
+    carries ``dispatcher_meta`` and legitimately has no membership set — its
+    actions are methods, not registry entries — so firing on it would break
+    startup for every correctly-configured host.  The two kinds are mutually
+    exclusive at registration: ``decorators.py`` sets ``dispatcher_meta`` and
+    never ``group_tool_names``; ``apps.py`` and ``route_views.py`` do the
+    reverse.
+
+    The package cannot manufacture this state itself.  Full route pruning
+    yields *absent, not empty* — ``route_views`` drops a wholly-denied group
+    rather than rebuilding it membership-less — so this is confined to
+    hand-registration, which is why a startup-time instrument is the right
+    place for it.
+    """
+    errors: list[Error] = []
+    try:
+        for tool_name in tool_registry.list_names():
+            entry = tool_registry.get_entry(tool_name)
+            if entry is None or not entry.is_dispatcher:
+                continue
+            # A class dispatcher is identified by its meta, not by membership.
+            if getattr(entry, "dispatcher_meta", None) is not None:
+                continue
+            if getattr(entry, "group_tool_names", None):
+                continue
+            errors.append(
+                Error(
+                    f"Group dispatcher {tool_name!r} is registered without "
+                    "'group_tool_names'. It cannot route to any resource: "
+                    "@mcp_heavy negotiation and the dispatcher-routed lean write "
+                    "envelope are both inert on this tool, and the membership gate "
+                    "that keeps a caller-supplied 'resource' from resolving against "
+                    "the global registry has nothing to check against.",
+                    hint=(
+                        "Pass group_tool_names=frozenset({...}) naming the flat tools "
+                        f"this dispatcher bundles, as apps.py does when it builds one "
+                        f"from FRISIAN_MCP_DISPATCH_GROUPS. If {tool_name!r} is "
+                        "deliberately membership-less, silence this check by adding "
+                        f"'{E008_DISPATCHER_WITHOUT_MEMBERSHIP}' to "
+                        "SILENCED_SYSTEM_CHECKS."
+                    ),
+                    id=E008_DISPATCHER_WITHOUT_MEMBERSHIP,
+                )
+            )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "frisian_mcp E008 check failed during registry iteration: %s", exc, exc_info=True
+        )
+    return errors
+
+
+@register(Tags.security)
+def check_permission_aware_discovery(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Error | Warning]:
     """
     Validate the ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` configuration.
 
@@ -312,7 +476,7 @@ def check_permission_aware_discovery(  # pylint: disable=unused-argument
     if not getattr(settings, "FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY", False):
         return []
 
-    errors: list[Error] = []
+    errors: list[Error | Warning] = []
 
     # E003 — Unannotated non-CRUD dispatcher actions.
     try:
@@ -340,6 +504,56 @@ def check_permission_aware_discovery(  # pylint: disable=unused-argument
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.error(
             "frisian_mcp E003 check failed during registry iteration: %s", exc, exc_info=True
+        )
+
+    # W015 — H3: entries whose capability cannot be determined.
+    #
+    # These are now HIDDEN rather than universally visible, so the failure mode
+    # is a tool that silently stops appearing in tools/list.  That is the safe
+    # direction but a confusing one to debug from the outside, which is why the
+    # ruling requires a loud diagnostic rather than silence.
+    #
+    # A Warning, not an Error: hiding is already the safe outcome, and a host
+    # upgrading into this should be told what disappeared without having its
+    # startup blocked.  Declaring `capability` or `universal_discovery` clears
+    # it, and either way the operator has made a choice rather than inherited
+    # one.
+    try:
+        indeterminate = sorted(
+            name
+            for name in tool_registry.list_names()
+            if (entry := tool_registry.get_entry(name)) is not None
+            and not entry.hidden
+            and not entry.universal_discovery
+            and not entry.capability
+            and not (entry.perm_app_label and entry.perm_model)
+            # Group dispatchers are judged by their children in list_tools, so
+            # they are never indeterminate in their own right.
+            and not entry.group_tool_names
+        )
+        if indeterminate:
+            shown = ", ".join(repr(n) for n in indeterminate[:10])
+            more = f" (and {len(indeterminate) - 10} more)" if len(indeterminate) > 10 else ""
+            errors.append(
+                Warning(
+                    f"FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY is on and "
+                    f"{len(indeterminate)} tool(s) have no determinable capability, "
+                    f"so they are HIDDEN from tools/list for every caller: "
+                    f"{shown}{more}.",
+                    hint=(
+                        "Pass capability='app_label.verb_model' to make the tool "
+                        "participate in capability filtering, or "
+                        "universal_discovery=True to state that it is meant to be "
+                        "visible to everyone. Auto-discovered ViewSet tools derive "
+                        "this automatically; decorator and imperative registrations "
+                        "must declare it."
+                    ),
+                    id=W015_INDETERMINATE_CAPABILITY,
+                )
+            )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "frisian_mcp W015 check failed during registry iteration: %s", exc, exc_info=True
         )
 
     return errors
@@ -489,3 +703,76 @@ def check_usage_reporting_policy_value(  # pylint: disable=unused-argument
             id=W014_INVALID_USAGE_POLICY,
         )
     ]
+
+
+@register(Tags.security)
+def check_heavy_cache_isolation(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Warning]:
+    """
+    H6: continuation state must not share an eviction domain with security state.
+
+    Continuation entries are **attacker-amplifiable** — an unauthenticated
+    caller can mint them — while OAuth authorization codes, the consumed-code
+    gate and the token-endpoint rate counter are authentication and
+    brute-force-control state.  When both draw on one pool, exhausting the
+    first can take the second with it, and the token-endpoint rate limiter
+    fails **open** when its cache is unavailable.
+
+    ``FRISIAN_MCP_HEAVY_CACHE_ALIAS`` selects the continuation cache.  This
+    check reports the two unseparated states it can actually see:
+
+    * the alias is still ``default``, so nothing was separated at all;
+    * the alias exists but resolves to the same ``LOCATION`` as ``default``,
+      so the pool was renamed rather than divided.
+
+    It **cannot** confirm the converse.  Two aliases addressing distinct
+    logical Redis DBs on one instance have different ``LOCATION`` strings and
+    still share that instance's memory, so one exhausts the other.  Absence of
+    this warning is therefore not proof of isolation — the requirement is an
+    independent eviction *budget* (a separate instance, or ``maxmemory`` set
+    per instance), which is an operator obligation the package cannot verify
+    from settings.
+
+    A Warning rather than an Error: the unseparated arrangement is what every
+    host ran before this setting existed, so failing startup would break
+    upgrades that are no worse off than they were.  The exposure is real but
+    it is not created by the upgrade.
+    """
+    alias = getattr(settings, "FRISIAN_MCP_HEAVY_CACHE_ALIAS", None)
+    hint = (
+        "Point FRISIAN_MCP_HEAVY_CACHE_ALIAS at a cache with its own eviction "
+        "budget — a separate Redis instance, or one with maxmemory set. A second "
+        "logical DB on the same instance is NOT sufficient: DBs share the "
+        "instance's memory, so exhausting one takes the other down with it."
+    )
+
+    if alias is None or alias == DEFAULT_CACHE_ALIAS:
+        return [
+            Warning(
+                "Heavy-response continuation entries share the 'default' cache with "
+                "OAuth authorization codes and the token-endpoint rate counter. An "
+                "unauthenticated caller can mint continuation entries, so cache "
+                "exhaustion is reachable from outside; the rate limiter fails OPEN "
+                "when its cache is unavailable.",
+                hint=hint,
+                id=W016_HEAVY_CACHE_NOT_ISOLATED,
+            )
+        ]
+
+    caches_setting = getattr(settings, "CACHES", {}) or {}
+    heavy_location = (caches_setting.get(alias) or {}).get("LOCATION")
+    default_location = (caches_setting.get(DEFAULT_CACHE_ALIAS) or {}).get("LOCATION")
+    if heavy_location is not None and heavy_location == default_location:
+        return [
+            Warning(
+                f"FRISIAN_MCP_HEAVY_CACHE_ALIAS={alias!r} resolves to the same "
+                f"LOCATION as 'default' ({heavy_location!r}), so continuation state "
+                "and OAuth security state still share one eviction domain. The alias "
+                "renames the pool; it does not divide it.",
+                hint=hint,
+                id=W016_HEAVY_CACHE_NOT_ISOLATED,
+            )
+        ]
+    return []

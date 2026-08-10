@@ -46,7 +46,8 @@ from collections.abc import AsyncGenerator, Container, Generator
 from typing import Any
 
 from django.conf import settings
-from django.core.cache import cache as django_cache
+from django.core.cache import DEFAULT_CACHE_ALIAS, cache as django_cache, caches
+from django.core.cache.backends.base import InvalidCacheBackendError
 from django.core.exceptions import ImproperlyConfigured
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
@@ -58,9 +59,13 @@ from rest_framework.request import Request as DRFRequest
 from rest_framework.views import APIView
 
 from frisian_mcp.backends.base import ToolResult
-from frisian_mcp.contrib.permissions.base import _DRF_ACTION_TO_PERM_VERB
+from frisian_mcp.contrib.permissions.base import build_action_filter, entry_is_visible
 from frisian_mcp.middleware import build_middleware_chain, get_middleware_instances
-from frisian_mcp.negotiation import DEFAULT_NEGOTIATION_MODE, NEGOTIATION_MODES
+from frisian_mcp.negotiation import (
+    DEFAULT_NEGOTIATION_MODE,
+    NEGOTIATION_MODES,
+    schema_discloses_continuation,
+)
 from frisian_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -72,6 +77,7 @@ from frisian_mcp.protocol import (
 )
 from frisian_mcp.registry import (
     _TIER_RANK,
+    _caller_rank,
     ToolInputError,
     ToolInvocationError,
     ToolNotFoundError,
@@ -91,7 +97,56 @@ audit_logger = logging.getLogger("frisian_mcp.audit")
 
 _TOOLS_LIST_CACHE_KEY = "frisian_mcp:tools_list"
 _HEAVY_CACHE_PREFIX = "frisian_mcp:heavy:"
-_HEAVY_CACHE_TTL: int = 300  # seconds; tokens expire after 5 minutes
+
+#: Default TTL for a continuation entry, in seconds.  Overridable via
+#: ``FRISIAN_MCP_HEAVY_CACHE_TTL`` (H6): a blast-radius control, **not** a
+#: substitute for isolation — a caller can mint many short-lived entries.
+_DEFAULT_HEAVY_CACHE_TTL: int = 300
+
+
+def _heavy_cache_ttl() -> int:
+    """Return the continuation-entry TTL in seconds (``FRISIAN_MCP_HEAVY_CACHE_TTL``)."""
+    return int(getattr(settings, "FRISIAN_MCP_HEAVY_CACHE_TTL", _DEFAULT_HEAVY_CACHE_TTL))
+
+
+def _heavy_cache() -> Any:
+    """
+    Return the cache holding continuation entries.
+
+    H6: continuation state is **attacker-amplifiable** — an unauthenticated
+    caller can mint entries — while OAuth authorization codes, the consumed-code
+    gate and the token-endpoint rate counter are authentication and
+    brute-force-control state.  Sharing one eviction domain lets the first
+    displace the second.
+
+    ``FRISIAN_MCP_HEAVY_CACHE_ALIAS`` selects the alias.  It defaults to
+    ``default`` because the package cannot conjure a second cache for a host
+    that has not configured one; the startup check reports that unseparated
+    state rather than letting it pass silently.
+
+    A **separate alias is not by itself a boundary.**  Two aliases addressing
+    the same Redis instance — including two logical DBs on one instance — share
+    that instance's memory and therefore its failure.  The boundary required is
+    an *independent eviction domain*: a separate instance, or a per-instance
+    memory budget.  The startup check catches the collisions it can see; the
+    rest is an operator obligation and is documented as one.
+
+    An alias naming a cache that does not exist falls back to ``default``
+    rather than failing the request: a misconfiguration should not deny service,
+    and the startup check surfaces it loudly at boot.
+    """
+    alias = getattr(settings, "FRISIAN_MCP_HEAVY_CACHE_ALIAS", DEFAULT_CACHE_ALIAS)
+    if alias == DEFAULT_CACHE_ALIAS:
+        # Resolve through the module-level binding rather than ``caches[...]``.
+        # They are the same object in production, but this is the seam the test
+        # suite injects on, and routing the default case around it would make
+        # every heavy-path test assert against a cache the code no longer used.
+        return django_cache
+    try:
+        return caches[alias]
+    except InvalidCacheBackendError:
+        return django_cache
+
 
 #: Default byte threshold for the auto-negotiate backstop
 #: (``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD``).  A tool response whose serialized
@@ -626,7 +681,7 @@ def _request_visible_entry(request: Any, tool_name: str) -> Any:
     entry = route_view.entries.get(tool_name)
     if entry is None:
         return None
-    caller_rank = _TIER_RANK.get(_get_token_permission(request), 0)
+    caller_rank = _caller_rank(_get_token_permission(request))
     if _TIER_RANK.get(entry.permission_tier, 0) > caller_rank:
         return None
     return entry
@@ -937,27 +992,14 @@ def _make_perm_entry_filter(capabilities: Container[str]) -> Any:
     """
     Return a ``_ToolEntry`` filter callable for the given capability set.
 
-    A tool is included when:
-
-    * It has no ``perm_app_label`` / ``perm_model`` metadata (decorator tools,
-      group dispatchers) — always visible.
-    * It is a dispatcher — always visible (per-action enforcement happens at
-      invocation time inside the dispatcher's own permission tier checks).
-    * Its derived capability string (``"app_label.verb_model"``) is present in
-      *capabilities*.
-
-    Unknown DRF action names default to ``"view"`` (conservative inclusion —
-    if the user can view the resource they can see the tool).
+    A thin adapter over :func:`entry_is_visible`, which is the single place the
+    "what can this caller see" question is answered.  The logic deliberately
+    does not live here: it used to, and three other consumers kept a sibling
+    copy whose indeterminate branch meant the opposite.
     """
 
     def _filter(entry: Any) -> bool:
-        if not entry.perm_app_label or not entry.perm_model:
-            return True
-        if entry.is_dispatcher:
-            return True
-        verb = _DRF_ACTION_TO_PERM_VERB.get(entry.perm_drf_action or "", "view")
-        cap = f"{entry.perm_app_label}.{verb}_{entry.perm_model}"
-        return cap in capabilities
+        return entry_is_visible(entry, capabilities)
 
     return _filter
 
@@ -968,31 +1010,14 @@ def _make_perm_action_filter_factory(
     """
     Build an ``action_filter_factory`` for permission-filtered dispatcher action enums.
 
-    The factory receives a dispatcher ``_ToolEntry`` and returns either
-    ``None`` (no filtering — the dispatcher has no perm metadata) or a
-    ``(action_name, action_entry) -> bool`` predicate.
-
-    For each action the predicate resolves the required Django permission verb:
-
-    * Non-CRUD actions use ``action_entry.backend_action`` when set.
-    * All other action names are looked up in ``_DRF_ACTION_TO_PERM_VERB``
-      (defaulting to ``"view"`` for unknowns).
-
-    An action is hidden when the derived
-    ``"app_label.verb_model"`` string is absent from *capabilities*.
+    A thin adapter over :func:`build_action_filter`.  ``None`` from the factory
+    means "publish every action" and is reached only via an explicit
+    ``universal_discovery`` declaration; an indeterminate dispatcher gets
+    :func:`deny_all_actions` so its enum empties and ``list_tools`` drops it.
     """
 
     def factory(entry: Any) -> Any:
-        if not entry.perm_app_label or not entry.perm_model:
-            return None
-        app_label: str = entry.perm_app_label
-        model: str = entry.perm_model
-
-        def action_filter(action_name: str, action_entry: Any) -> bool:
-            verb = action_entry.backend_action or _DRF_ACTION_TO_PERM_VERB.get(action_name, "view")
-            return f"{app_label}.{verb}_{model}" in capabilities
-
-        return action_filter
+        return build_action_filter(entry, capabilities)
 
     return factory
 
@@ -1464,7 +1489,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     # validation, which is intentional — call-2 arguments only need the token + mode.
     cont_token: str | None = arguments.get("continuation_token")
     if cont_token is not None:
-        cached = django_cache.get(f"{_HEAVY_CACHE_PREFIX}{cont_token}")
+        cached = _heavy_cache().get(f"{_HEAVY_CACHE_PREFIX}{cont_token}")
         # SEC-3: legacy raw-result entries (pre-fix deploys) lack the owner
         # binding and are treated as expired — better a brief disruption
         # during cutover than serving cross-caller data.
@@ -1821,10 +1846,10 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         _w_token = secrets.token_urlsafe(16)
         _lean = _extract_lean_envelope(result, _w_token, _http_status, tool_name=tool_name)
         if "continuation_token" in _lean:
-            django_cache.set(
+            _heavy_cache().set(
                 f"{_HEAVY_CACHE_PREFIX}{_w_token}",
                 _build_heavy_cache_entry(result, request, tool_name),
-                _HEAVY_CACHE_TTL,
+                _heavy_cache_ttl(),
             )
         elif _lean.get("deleted") is True:
             # Delete: enrich with the pk from original arguments.
@@ -1859,10 +1884,10 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             # change, not a refactor — left for a follow-up.)
             _d_lean = _extract_lean_envelope(result, _w_token, _http_status, tool_name=tool_name)
             if "continuation_token" in _d_lean:
-                django_cache.set(
+                _heavy_cache().set(
                     f"{_HEAVY_CACHE_PREFIX}{_w_token}",
                     _build_heavy_cache_entry(result, request, tool_name),
-                    _HEAVY_CACHE_TTL,
+                    _heavy_cache_ttl(),
                 )
             elif _d_lean.get("deleted") is True:
                 pk_val = _d_params.get("pk") or _d_params.get("id")
@@ -1902,10 +1927,10 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # mint to the inner name while redeem stays outer, and every grouped
         # redemption would fail owner-mismatch.  That is the unredeemable-token
         # bug this change exists to fix, reintroduced from the other side.
-        django_cache.set(
+        _heavy_cache().set(
             f"{_HEAVY_CACHE_PREFIX}{_token}",
             _build_heavy_cache_entry(result, request, tool_name),
-            _HEAVY_CACHE_TTL,
+            _heavy_cache_ttl(),
         )
         probe = _build_probe_envelope(result, _token)
         return _usage_success(
@@ -1919,14 +1944,29 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
     _threshold: int | None = getattr(
         settings, "FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD", _DEFAULT_AUTO_NEGOTIATE_THRESHOLD
     )
-    if _threshold is not None:
+    #
+    # H2: size alone is not sufficient grounds to mint.  The token is only
+    # worth issuing if the caller can legally send it back, and that is decided
+    # by the schema they were handed in `tools/list` — so the gate reads that
+    # same schema rather than a flag recorded beside it.  Disclosure and mint
+    # eligibility are therefore one fact read twice and cannot drift apart,
+    # which is how tokens came to be minted for shapes no schema-validating
+    # caller could return.
+    #
+    # The OUTER entry's schema is authoritative, deliberately.  `_heavy_entry`
+    # above resolves inward to decide *whether* a routed tool negotiates; this
+    # decides whether the *caller* can reply, and the caller validated against
+    # the outer tool — the same reason the owner key binds the outer name (G1).
+    if _threshold is not None and schema_discloses_continuation(
+        getattr(_entry, "input_schema", None)
+    ):
         _serialized = json.dumps(result)
         if len(_serialized.encode()) > _threshold:
             _token = secrets.token_urlsafe(16)
-            django_cache.set(
+            _heavy_cache().set(
                 f"{_HEAVY_CACHE_PREFIX}{_token}",
                 _build_heavy_cache_entry(result, request, tool_name),
-                _HEAVY_CACHE_TTL,
+                _heavy_cache_ttl(),
             )
             probe = _build_probe_envelope(result, _token)
             return _usage_success(

@@ -235,7 +235,18 @@ An agent sends the **raw** key as `Authorization: Bearer <raw-key>`; the package
 **Type:** `str`  
 **Default:** `'read'`
 
-The maximum permission tier for callers who provide no credentials. Set to `None` to require authentication for all tool access.
+The maximum permission tier for callers who provide no credentials.
+
+Three cases are distinguished, and all of them fail closed except the compatibility default:
+
+| Value | Effect |
+|---|---|
+| setting absent | `read` — the documented default, so a host that never set it keeps working |
+| `'read'` / `'read_write'` / `'admin'` | that tier |
+| `None` or `'none'` | denied below `read` — no tool is listed and none can be invoked without credentials |
+| any other value | denied below `read`, **and** a startup error is raised naming the setting |
+
+The last row matters: a misspelled tier is a configuration error, not a silent downgrade. It is reported at startup rather than discovered in production.
 
 ```python
 # Public read access (default)
@@ -244,6 +255,8 @@ FRISIAN_MCP_UNAUTHENTICATED_TIER = 'read'
 # Require auth for everything
 FRISIAN_MCP_UNAUTHENTICATED_TIER = None
 ```
+
+> **Correction — this setting did not deny access in releases before this one.** Earlier documentation, including two install configurations distributed as production examples, stated that `None` requires authentication for all tools. It did not: an unrecognised tier — which `None` and `'none'` both were — ranked equal to `read`, so anonymous callers kept the full read surface. The setting was present, spelled plausibly, and had no effect. If you deployed against that guidance, treat the read surface of those deployments as having been reachable without credentials, and confirm what was mounted there. The behaviour described in the table above is what this release does.
 
 ---
 

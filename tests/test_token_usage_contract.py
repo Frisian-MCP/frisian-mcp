@@ -160,17 +160,44 @@ class TestBackwardsCompatContract:
 
 
 def _grouped_registry() -> ToolRegistry:
-    """Registry with a flat tool + tiered tools destined for a group dispatcher."""
+    """
+    Registry with a flat tool + tiered tools destined for a group dispatcher.
+
+    H3: these carry ``universal_discovery=True`` because this fixture exists to
+    exercise *schema parity*, not visibility.  Since permission-aware discovery
+    fails closed, perm-less tools are now correctly hidden from a caller with no
+    capabilities — which would leave the parity test with nothing to compare and
+    make it pass vacuously.  Declaring the tools visible keeps the assertion
+    about the thing it is named for.
+    """
     reg = ToolRegistry()
     schema = {"type": "object", "properties": {"q": {"type": "string"}}}
     reg.register(
-        "user_list", _stub({}), "flat", schema, permission_classes=[], permission_tier="read"
+        "user_list",
+        _stub({}),
+        "flat",
+        schema,
+        permission_classes=[],
+        permission_tier="read",
+        universal_discovery=True,
     )
     reg.register(
-        "device_list", _stub({}), "grp", schema, permission_classes=[], permission_tier="read"
+        "device_list",
+        _stub({}),
+        "grp",
+        schema,
+        permission_classes=[],
+        permission_tier="read",
+        universal_discovery=True,
     )
     reg.register(
-        "device_retrieve", _stub({}), "grp", schema, permission_classes=[], permission_tier="read"
+        "device_retrieve",
+        _stub({}),
+        "grp",
+        schema,
+        permission_classes=[],
+        permission_tier="read",
+        universal_discovery=True,
     )
     reg.register(
         "device_create",
@@ -179,6 +206,7 @@ def _grouped_registry() -> ToolRegistry:
         schema,
         permission_classes=[],
         permission_tier="read_write",
+        universal_discovery=True,
     )
     return reg
 

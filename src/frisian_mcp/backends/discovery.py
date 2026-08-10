@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover
     _JSONRenderer = None  # type: ignore[assignment,misc]
 
 from frisian_mcp.backends.base import BaseDiscoveryBackend, ToolDefinition
+from frisian_mcp.negotiation import merge_continuation_branch
 
 logger = logging.getLogger(__name__)
 
@@ -460,6 +461,15 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                     },
                 },
             }
+
+            # H2: auto-discovered actions are the population the size backstop
+            # exists for — high-cardinality reads on ViewSets nobody reviewed,
+            # with no decorator to annotate.  They are also the population that
+            # never disclosed the continuation call, so the backstop minted
+            # tokens against schemas that could not legally return them.  The
+            # branch is conditional, so the generated first-call signature is
+            # unchanged.
+            input_schema = merge_continuation_branch(input_schema)
 
             tools.append(
                 ToolDefinition(

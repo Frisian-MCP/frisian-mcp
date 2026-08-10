@@ -18,7 +18,7 @@ The adapter answers two questions:
 
 from __future__ import annotations
 
-from collections.abc import Container
+from collections.abc import Callable, Container
 from typing import Any, Protocol, runtime_checkable
 
 #: Maps DRF viewset action names to the Django permission verb used when
@@ -171,3 +171,108 @@ class DjangoPermissionAdapter:
     def is_unrestricted(self, user: Any) -> bool:
         """Return ``True`` when *user* is a superuser and should see all tools."""
         return bool(getattr(user, "is_superuser", False))
+
+
+# ---------------------------------------------------------------------------
+# H3 — the single capability lens
+# ---------------------------------------------------------------------------
+#
+# Every consumer that asks "what can this caller see?" resolves it HERE.
+#
+# H3 originally fixed only the consumer its task named (`tools/list`) and left
+# three others on a sibling helper whose indeterminate branch returned "no
+# filtering".  On the same indeterminate dispatcher, `tools/list` denied every
+# action while `action="help"` published every action — not a gap but the exact
+# inverse of the ruling, reachable on one request.
+#
+# That is the third time on this board a gate was fixed in one consumer and the
+# others kept the old semantics (`is_heavy` on the outer name; the duplicated
+# `_TIER_RANK` literals).  Four independently-correct copies is how the shape
+# recurs, so there is one implementation and the call sites are thin.
+
+
+def resolve_entry_capability(entry: Any) -> str | None:
+    """
+    Return the Django permission string *entry* requires, or ``None``.
+
+    ``None`` means **indeterminate** — neither derivable from DRF discovery nor
+    declared — and every caller must treat that as "hide", never as
+    "unrestricted".
+
+    Derived metadata wins over a declaration: discovery read it off the ViewSet
+    queryset, so it cannot drift from the resource the tool actually touches.
+    """
+    if getattr(entry, "perm_app_label", None) and getattr(entry, "perm_model", None):
+        verb = _DRF_ACTION_TO_PERM_VERB.get(getattr(entry, "perm_drf_action", None) or "", "view")
+        return f"{entry.perm_app_label}.{verb}_{entry.perm_model}"
+    return getattr(entry, "capability", None) or None
+
+
+def entry_is_visible(entry: Any, capabilities: Container[str]) -> bool:
+    """
+    Return whether *entry* may be disclosed to a caller holding *capabilities*.
+
+    Fails closed: an entry whose capability cannot be determined is hidden.
+    Used for ``tools/list`` filtering and for any error path that would
+    otherwise name a tool the caller cannot see.
+
+    A class dispatcher is judged by its ACTIONS rather than here — see
+    :func:`build_action_filter` — because its ``capability`` is an
+    ``"app_label.model"`` base, not a permission string.
+    """
+    if getattr(entry, "universal_discovery", False):
+        return True
+    if getattr(entry, "dispatcher_meta", None) is not None:
+        return True
+    capability = resolve_entry_capability(entry)
+    if capability is None:
+        return False
+    return capability in capabilities
+
+
+def deny_all_actions(_action_name: str, _action_entry: Any) -> bool:
+    """Action predicate hiding every action (indeterminate dispatcher)."""
+    return False
+
+
+def build_action_filter(
+    entry: Any,
+    capabilities: Container[str],
+) -> Callable[[str, Any], bool] | None:
+    """
+    Return the action predicate for dispatcher *entry*, or ``None``.
+
+    ``None`` means **publish every action**, and is returned only when the
+    dispatcher explicitly declares ``universal_discovery``.  An entry whose
+    capability is indeterminate gets :func:`deny_all_actions`, so the enum comes
+    back empty and the dispatcher is dropped as an empty navigation shell.
+
+    Callers must not substitute ``None`` for the indeterminate case.  That
+    inversion — "no metadata" silently meaning "no filtering" — is the defect
+    this lens exists to make unrepresentable.
+    """
+    if getattr(entry, "universal_discovery", False):
+        return None
+
+    if getattr(entry, "perm_app_label", None) and getattr(entry, "perm_model", None):
+        base = f"{entry.perm_app_label}.{{verb}}_{entry.perm_model}"
+    elif getattr(entry, "capability", None):
+        # A class dispatcher has no ViewSet queryset to derive from, so it
+        # declares the "app_label.model" base its per-action verbs resolve
+        # against.  W015 tells operators to declare exactly this, so a helper
+        # that ignored it would make following the documented remedy produce a
+        # filtered tools/list and an unfiltered action="help".
+        app_label, _, model = str(entry.capability).partition(".")
+        if not app_label or not model:
+            return deny_all_actions
+        base = f"{app_label}.{{verb}}_{model}"
+    else:
+        return deny_all_actions
+
+    def action_filter(action_name: str, action_entry: Any) -> bool:
+        verb = getattr(action_entry, "backend_action", None) or _DRF_ACTION_TO_PERM_VERB.get(
+            action_name, "view"
+        )
+        return base.format(verb=verb) in capabilities
+
+    return action_filter

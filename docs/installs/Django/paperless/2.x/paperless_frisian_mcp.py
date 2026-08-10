@@ -28,8 +28,15 @@ INSTALLED_APPS.append("frisian_mcp.contrib.oauth")  # noqa: F405
 # Mount path for the MCP endpoint.
 FRISIAN_MCP_PATH = "mcp"
 
-# Require authentication for all MCP requests.
-# Set to "read" to allow unauthenticated callers read-only access.
+# Deny unauthenticated callers entirely: no tool is listed and none can be
+# invoked without credentials.  Set to "read" to allow unauthenticated callers
+# read-only access instead.
+#
+# CORRECTION: this line did NOT have that effect in releases before the one
+# that ships this file.  None and "none" were unrecognised tier values and
+# ranked equal to "read", so anonymous callers kept the full read surface.
+# If you deployed an earlier copy of this config believing it required
+# authentication, it did not — check what was mounted and reachable.
 FRISIAN_MCP_UNAUTHENTICATED_TIER = None
 
 # ---------------------------------------------------------------------------

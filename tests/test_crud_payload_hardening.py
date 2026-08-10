@@ -52,6 +52,11 @@ def _noop_tool(arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
 
 def _build_request() -> Any:
     req = MagicMock()
+    # H7: a bare MagicMock fabricates `_mcp_effective_tier`, presenting a Mock
+    # where a tier string belongs.  An unrecognised tier now ranks BELOW read,
+    # so pin the MCP attributes to their real "no context" values.
+    req._mcp_effective_tier = None
+    req.auth = None
     req.user = MagicMock()
     req.user.is_authenticated = True
     req._mcp_max_tier = None  # no tier cap

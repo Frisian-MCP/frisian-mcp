@@ -660,3 +660,103 @@ class TestGroupInvokeCappedAbsence:
                 "svc",
                 {"resource": "item", "action": "create", "params": {}},
             )
+
+
+# ---------------------------------------------------------------------------
+# H9 — the unknown-tool hint: right axis, and both discovery lenses
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownToolHintAxis:
+    """The did-you-mean hint names the axis the caller actually missed.
+
+    ``_raise_unknown_tool`` fires whenever the COMPOSED ``resource{sep}action``
+    misses, which includes a correct resource paired with a wrong action.
+    Matching on the resource in that case returns it as its own best match, so
+    the hint named back the half the caller got right and said nothing about
+    the half they got wrong.
+    """
+
+    #: ``secret`` is admin-only throughout, so a read caller must never see it
+    #: named — on either axis.
+    TIERS = {
+        "item_list": "read",
+        "item_retrieve": "read",
+        "item_create": "read_write",
+        "secret_list": "admin",
+        "secret_retrieve": "admin",
+    }
+
+    @classmethod
+    def _registry(cls) -> ToolRegistry:
+        """A registry whose ``secret`` resource is admin-only throughout."""
+        reg = ToolRegistry()
+        schema = {"type": "object", "properties": {}}
+        for name, tier in cls.TIERS.items():
+            reg.register(name, _stub_tool(name), "stub", schema, permission_tier=tier)
+        return reg
+
+    @classmethod
+    def _invoke(cls, reg: ToolRegistry) -> Any:
+        return make_group_invoke("svc", frozenset(cls.TIERS), reg)
+
+    @staticmethod
+    def _capped(rf: RequestFactory) -> Any:
+        """A read-tier caller on a read-capped route."""
+        req = _request(rf, permission="read")
+        req._mcp_max_tier = "read"
+        return req
+
+    def _call(self, reg: ToolRegistry, req: Any, resource: str, action: str) -> str:
+        with pytest.raises(LookupError) as excinfo:
+            self._invoke(reg)({"resource": resource, "action": action, "params": {}}, req)
+        return str(excinfo.value)
+
+    def test_wrong_action_suggests_on_the_action_axis(self, rf: RequestFactory) -> None:
+        """A correct resource with a misspelled action suggests the ACTION."""
+        message = self._call(self._registry(), _request(rf, permission="read"), "item", "lst")
+        assert "Did you mean action='list'?" in message
+        assert "resource=" not in message
+
+    def test_wrong_resource_still_suggests_on_the_resource_axis(self, rf: RequestFactory) -> None:
+        """The original behaviour is preserved where it was already right."""
+        message = self._call(self._registry(), _request(rf, permission="read"), "ite", "list")
+        assert "Did you mean resource='item'?" in message
+        assert "action=" not in message
+
+    def test_action_candidates_are_tier_filtered(self, rf: RequestFactory) -> None:
+        """An above-ceiling action is never named back as a suggestion."""
+        message = self._call(self._registry(), self._capped(rf), "item", "creat")
+        assert "create" not in message
+
+    def test_resource_candidates_are_tier_filtered(self, rf: RequestFactory) -> None:
+        """A resource whose every action is above the ceiling is never named."""
+        message = self._call(self._registry(), self._capped(rf), "secre", "list")
+        assert "secret" not in message
+        assert "Did you mean" not in message
+
+    def test_above_ceiling_resource_is_indistinguishable_from_one_never_registered(
+        self, rf: RequestFactory
+    ) -> None:
+        """The hint must not become a tier oracle on the RESOURCE axis (V11-20/F3).
+
+        The pre-existing parity test varies only the ACTION, so it compared two
+        errors that shared one visible resource and agreed for the wrong reason.
+        Varying the resource is what exposes the oracle: an above-ceiling
+        resource drew "Did you mean resource='secret'?" while a resource that
+        never existed drew no hint at all.
+        """
+        reg = self._registry()
+        above = self._call(reg, self._capped(rf), "secret", "list")
+        never = self._call(reg, self._capped(rf), "widget", "list")
+        assert above.replace("secret_list", "TOOL") == never.replace("widget_list", "TOOL")
+
+    def test_uncapped_mount_keeps_the_unfiltered_hint(self, rf: RequestFactory) -> None:
+        """Uncapped legacy mounts are deliberately unchanged.
+
+        They keep ``registry.dispatch``'s tier-error behaviour rather than
+        acquiring a new absence contract here; narrowing them is the
+        uncapped-mount enumeration question, which is ruled elsewhere.
+        """
+        message = self._call(self._registry(), _request(rf, permission="read"), "secre", "list")
+        assert "Did you mean resource='secret'?" in message

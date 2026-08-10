@@ -79,6 +79,7 @@ from rest_framework.permissions import (
 
 from frisian_mcp.registry import (
     _TIER_RANK,
+    _caller_rank,
     ToolNotFoundError,
     _normalize_argument_keys,
     tool_registry,
@@ -326,7 +327,7 @@ def _list_entries(
     # legacy/internal path.  A non-None but UNRECOGNISED tier string fails
     # CLOSED (rank 0 = read), matching this module's _min_tier convention, so a
     # garbled cap can never widen visibility to admin-tier tools.
-    max_rank = 2 if max_tier is None else _TIER_RANK.get(max_tier, 0)
+    max_rank = 2 if max_tier is None else _caller_rank(max_tier)
     tools: list[dict[str, Any]] = []
     for entry in entries.values():
         if entry.hidden:
