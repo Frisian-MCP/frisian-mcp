@@ -1984,3 +1984,132 @@ class TestH3OneLensAllConsumers:
         with pytest.raises(LookupError) as exc:
             invoke({"resource": "secre", "action": "list", "params": {}}, request)
         assert "Did you mean resource='secret'?" in str(exc.value)
+
+
+class TestH15GroupVisibleToNonSuperuser:
+    """
+    H15 REGRESSION: a non-superuser with ``view_*`` caps must still see the group.
+
+    Nothing asserted this, which is why a full green suite shipped a change that
+    emptied ``tools/list`` for every non-superuser client on a per-route mount.
+    Superusers were unaffected — ``is_unrestricted`` short-circuits to
+    ``entry_filter=None`` — so every superuser-tied check stayed green too.
+
+    Asserted on **both** listing paths deliberately.  The defect was that they
+    were two implementations and H3's group fix reached only one; a test that
+    exercised either alone would have missed it exactly as the suite did.
+    """
+
+    _CAPS = frozenset({"catalog.view_item"})
+
+    def _registry(self) -> ToolRegistry:
+        reg = ToolRegistry()
+        for action, _verb in (("list", "view"), ("create", "add")):
+            reg.register(
+                name=f"item_{action}",
+                fn=_noop,
+                description=f"item {action}",
+                input_schema={"type": "object"},
+                perm_app_label="catalog",
+                perm_model="item",
+                perm_drf_action=action,
+                hidden=True,
+            )
+        reg.register(
+            name="catalog",
+            fn=_noop,
+            description="group dispatcher",
+            input_schema={"type": "object"},
+            is_dispatcher=True,
+            group_tool_names=frozenset({"item_list", "item_create"}),
+        )
+        return reg
+
+    def _filters(self, caps: frozenset[str]) -> tuple[Any, Any]:
+        from frisian_mcp.views import _make_perm_action_filter_factory, _make_perm_entry_filter
+
+        return _make_perm_entry_filter(caps), _make_perm_action_filter_factory(caps)
+
+    def test_registry_path_shows_the_group(self) -> None:
+        """``ToolRegistry.list_tools`` — the path that already had H3's fix."""
+        reg = self._registry()
+        entry_filter, action_factory = self._filters(self._CAPS)
+        names = {
+            t["name"]
+            for t in reg.list_tools(entry_filter=entry_filter, action_filter_factory=action_factory)
+        }
+        assert "catalog" in names
+
+    def test_route_path_shows_the_group(self) -> None:
+        """
+        ``route_views._list_entries`` — the path that did NOT, and the one a
+        real deployment serves from.
+
+        A group dispatcher carries no ``perm_app_label``, no ``perm_model``, no
+        ``capability`` and no ``dispatcher_meta``, so the fail-closed entry
+        filter rejects it outright.  Its capability lives in its children, and
+        only the group branch knows to look there.
+        """
+        from frisian_mcp.route_views import _list_entries
+
+        reg = self._registry()
+        entry_filter, action_factory = self._filters(self._CAPS)
+        entries = {n: reg.get_entry(n) for n in ("item_list", "item_create", "catalog")}
+        names = {
+            t["name"]
+            for t in _list_entries(
+                entries,
+                max_tier="read",
+                entry_filter=entry_filter,
+                action_filter_factory=action_factory,
+            )
+        }
+        assert "catalog" in names
+
+    def test_both_paths_agree(self) -> None:
+        """
+        Parity, so the two can never diverge again without a test going red.
+
+        H15 existed because one listing path was fixed and its documented
+        mirror was not.  Asserting agreement fails whichever side drifts.
+        """
+        from frisian_mcp.route_views import _list_entries
+
+        reg = self._registry()
+        entry_filter, action_factory = self._filters(self._CAPS)
+        entries = {n: reg.get_entry(n) for n in ("item_list", "item_create", "catalog")}
+
+        via_registry = {
+            t["name"]
+            for t in reg.list_tools(
+                max_tier="read", entry_filter=entry_filter, action_filter_factory=action_factory
+            )
+        }
+        via_route = {
+            t["name"]
+            for t in _list_entries(
+                entries,
+                max_tier="read",
+                entry_filter=entry_filter,
+                action_filter_factory=action_factory,
+            )
+        }
+        assert via_registry == via_route
+
+    def test_group_still_hidden_when_no_child_is_visible(self) -> None:
+        """The fix must not become fail-open: no usable child, no group."""
+        from frisian_mcp.route_views import _list_entries
+
+        reg = self._registry()
+        entry_filter, action_factory = self._filters(frozenset({"other.view_thing"}))
+        entries = {n: reg.get_entry(n) for n in ("item_list", "item_create", "catalog")}
+        names = {
+            t["name"]
+            for t in _list_entries(
+                entries,
+                max_tier="read",
+                entry_filter=entry_filter,
+                action_filter_factory=action_factory,
+            )
+        }
+        assert "catalog" not in names

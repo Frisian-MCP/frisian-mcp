@@ -359,6 +359,106 @@ class ToolInvocationError(Exception):
         super().__init__(str(content))
 
 
+def shape_tools_listing(  # pylint: disable=too-many-branches
+    entries: Any,
+    *,
+    max_rank: int,
+    max_tier: str | None,
+    entry_filter: Callable[[Any], bool] | None,
+    action_filter_factory: Callable[[Any], Callable[[str, Any], bool] | None] | None,
+) -> list[dict[str, Any]]:
+    """
+    Shape *entries* into MCP ``tools/list`` format.  **The only implementation.**
+
+    Both listing paths call this: :meth:`ToolRegistry.list_tools` over the whole
+    registry, and ``route_views._list_entries`` over one route's already
+    deny-carved mapping.  They differ only in which mapping is passed, which is
+    why child lookups resolve against *entries* rather than a global registry.
+
+    H15: these used to be two implementations, the second documented as
+    *"Mirrors ToolRegistry.list_tools"*.  The group-dispatcher fix landed in one
+    of them, so on a per-route mount — what a real deployment serves from —
+    every group dispatcher vanished from ``tools/list`` for every non-superuser
+    while remaining fully invocable.  A mirror is a copy, and a copy drifts the
+    moment one side is fixed.
+    """
+    # Lazy-import to avoid a circular dependency with backends.dispatcher,
+    # which itself imports from this module.
+    # pylint: disable=import-outside-toplevel
+    from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
+
+    tools: list[dict[str, Any]] = []
+    for entry in entries.values():
+        if entry.hidden:
+            continue
+        if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
+            continue
+
+        # A group dispatcher is judged by its children, not by its own
+        # (necessarily absent) capability metadata — see below.  Running the
+        # generic filter on it first would hide every group unconditionally now
+        # that the filter fails closed.
+        if entry_filter is not None and not entry.group_tool_names and not entry_filter(entry):
+            continue
+
+        # Group dispatcher: hide when the caller has capabilities for none of
+        # its children, so an agent never sees a group it cannot use at all and
+        # the existence of other groups is not leaked.
+        #
+        # Every child is considered, not only perm-aware ones.  This branch used
+        # to pre-filter to children carrying `perm_app_label` AND `perm_model`,
+        # because perm-less children "always pass the filter regardless of the
+        # user's capabilities".  That premise died when the filter began failing
+        # closed: a perm-less child now passes only if it declares a capability
+        # or universal discovery, which is a legitimate reason to show the
+        # group.  Keeping the pre-filter left a group assembled ENTIRELY from
+        # perm-less tools universally visible, having no perm-aware children for
+        # the guard to test.
+        #
+        # This IS the group's capability determination, which is why it REPLACES
+        # the generic entry filter above rather than stacking on it.
+        if entry.group_tool_names and entry_filter is not None:
+            children = [entries[t] for t in entry.group_tool_names if t in entries]
+            if not any(entry_filter(c) for c in children):
+                continue
+
+        # Plain (non-dispatcher) tool: include the registered schema verbatim —
+        # the entry's own permission_tier already gated it above.
+        if not entry.is_dispatcher or entry.dispatcher_meta is None:
+            tools.append(
+                {
+                    "name": entry.name,
+                    "description": entry.description,
+                    "inputSchema": entry.input_schema,
+                    "tier": entry.permission_tier,
+                }
+            )
+            continue
+
+        # Dispatcher: rebuild the action enum filtered to the caller's tier and
+        # capabilities, and omit a dispatcher with nothing left to call.
+        action_filter = action_filter_factory(entry) if action_filter_factory is not None else None
+        filtered_schema = _build_dispatcher_input_schema(
+            entry.dispatcher_meta, max_tier=max_tier, action_filter=action_filter
+        )
+        visible_actions = filtered_schema["properties"]["action"]["enum"]
+        # Drop when *capability* filtering emptied the enum, not only tier
+        # filtering — an empty navigation shell is the same either way.  Still
+        # gated on filtering having been applied, so an unfiltered listing keeps
+        # its legacy shape.
+        if not visible_actions and (max_tier is not None or action_filter is not None):
+            continue
+        tools.append(
+            {
+                "name": entry.name,
+                "description": entry.description,
+                "inputSchema": filtered_schema,
+                "tier": entry.permission_tier,
+            }
+        )
+    return tools
+
+
 class _ToolEntry:  # pylint: disable=too-many-instance-attributes
     __slots__ = (
         "capability",
@@ -674,107 +774,14 @@ class ToolRegistry:
         # frisian_mcp.route_views._list_entries — the two must not diverge.
         max_rank = 2 if max_tier is None else _caller_rank(max_tier)
 
-        # Lazy-import to avoid a circular dependency with backends.dispatcher,
-        # which itself imports from this module.
-        # pylint: disable=import-outside-toplevel
-        from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
-
         with self._lock:
-            tools: list[dict[str, Any]] = []
-            for entry in self._tools.values():
-                if entry.hidden:
-                    continue
-                if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
-                    continue
-                # H3: a group dispatcher is judged by its children, not by its
-                # own (necessarily absent) capability metadata — see below.
-                # Running the generic filter on it first would hide every group
-                # unconditionally now that the filter fails closed.
-                if (
-                    entry_filter is not None
-                    and not entry.group_tool_names
-                    and not entry_filter(entry)
-                ):
-                    continue
-
-                # Group dispatcher: hide when the user has no capabilities for
-                # any of its child tools.  Without this check every group tool
-                # (dcim, bgp, ipam, …) would always appear in tools/list even
-                # when the user's ObjectPermissions cover only one group (e.g.
-                # dns), leaking the existence of every other group dispatcher.
-                #
-                # H3: every child is now considered, not just perm-aware ones.
-                #
-                # This branch used to pre-filter to children with perm_app_label
-                # AND perm_model, because perm-less children "always pass
-                # _make_perm_entry_filter regardless of the user's
-                # capabilities" — counting them would have made the group
-                # visible to everyone.  That premise is gone: the filter fails
-                # closed, so a perm-less child passes only when it explicitly
-                # declares a capability or universal discovery, and then it is
-                # a legitimate reason to show the group.
-                #
-                # Keeping the pre-filter would leave the gap this task names: a
-                # group assembled ENTIRELY from perm-less tools has no
-                # perm-aware children, so the guard never fired and the group
-                # stayed universally visible no matter what its children
-                # required.  Behaviour for perm-aware children is unchanged —
-                # one that fails the filter is excluded either way.
-                #
-                # This IS the group's capability determination, which is why it
-                # replaces the generic entry filter above rather than stacking
-                # on top of it: a group dispatcher never carries perm metadata
-                # of its own, so under fail-closed the generic filter would
-                # reject every group before its children were ever consulted.
-                if entry.group_tool_names and entry_filter is not None:
-                    children = [self._tools[t] for t in entry.group_tool_names if t in self._tools]
-                    if not any(entry_filter(c) for c in children):
-                        continue
-
-                # Plain (non-dispatcher) tool: include the registered schema
-                # verbatim — the entry's own permission_tier already gated it
-                # above, so the schema does not need filtering.
-                if not entry.is_dispatcher or entry.dispatcher_meta is None:
-                    tools.append(
-                        {
-                            "name": entry.name,
-                            "description": entry.description,
-                            "inputSchema": entry.input_schema,
-                            "tier": entry.permission_tier,
-                        }
-                    )
-                    continue
-
-                # Dispatcher: rebuild the inputSchema with the action enum
-                # filtered to the caller's tier.  Hide the dispatcher entirely
-                # when no actions remain visible (avoids exposing an empty
-                # navigation tool that can only return help with zero actions).
-                action_filter = (
-                    action_filter_factory(entry) if action_filter_factory is not None else None
-                )
-                filtered_schema = _build_dispatcher_input_schema(
-                    entry.dispatcher_meta, max_tier=max_tier, action_filter=action_filter
-                )
-                visible_actions = filtered_schema["properties"]["action"]["enum"]
-                # H3: also drop when *capability* filtering emptied the enum,
-                # not only tier filtering.  The old condition required
-                # ``max_tier is not None``, so a perm-aware caller with no
-                # capabilities for any action got the dispatcher published with
-                # an empty enum — the empty navigation shell this check already
-                # refuses to advertise, reached by the other filter.  Still
-                # gated on filtering having been applied, so an unfiltered
-                # listing keeps its legacy shape.
-                if not visible_actions and (max_tier is not None or action_filter is not None):
-                    continue
-                tools.append(
-                    {
-                        "name": entry.name,
-                        "description": entry.description,
-                        "inputSchema": filtered_schema,
-                        "tier": entry.permission_tier,
-                    }
-                )
-            return tools
+            return shape_tools_listing(
+                self._tools,
+                max_rank=max_rank,
+                max_tier=max_tier,
+                entry_filter=entry_filter,
+                action_filter_factory=action_filter_factory,
+            )
 
     def dispatch(
         self,
