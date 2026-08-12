@@ -207,25 +207,57 @@ nothing** — the full suite passed with §5's wiring reverted, which would have
 left §4 shipped, green, and vacuous. That is the failure mode this ADR is about,
 reproduced inside the work that implements it.
 
-### 7.5 Exception on record — §4 and §5 are not live-verified
+### 7.5 Evidence recorded for §4 — cross-route redemption, verified live
 
-Live verification of cross-route redemption needs **two mounts exposing
-different surfaces** on a connector-reachable host, and a token minted on one
-and replayed against the other. The demo host currently serves a single capped
-mount, so the scenario cannot be posed without a route-configuration change and
-a redeploy — outside the scope of the change that lands this, and not a
-decision this seat makes alone.
+This section was first written as an *exception*: the demo host served a single
+capped mount, so the scenario could not be posed. A two-mount topology was
+subsequently deployed and the exception has been **discharged**.
 
-Recorded as an exception per §7 rather than omitted, and deliberately alongside
-§7.3 so the two open live gaps are read together rather than discovered
-separately.
+**Topology.** Two mounts, **identical `read` ceiling**, different surfaces,
+reachable by one credential — so the SEC-3 owner key matches on both and the
+*route* check is the only variable. Route A exposes a resource that Route B's
+allow-list excludes. The probe resource crossed the negotiation threshold
+(~74 KB) and therefore minted through the `AUTO_NEGOTIATE_THRESHOLD` backstop —
+**the grouped path §5 exists for**, and the one whose mint site nearly bound the
+outer name.
 
-**What would discharge it:** a second mount whose allow/deny carve-out excludes
-a member the first exposes, then one grouped probe on the permissive mount and
-one redemption of that token against the restrictive one. The expected result
-is the ordinary expired-or-not-found envelope, with
-`continuation_route_not_authorized` in the audit log and nothing on the wire
-distinguishing it from expiry.
+> The identical ceiling is the load-bearing detail. Had the two mounts differed
+> in ceiling, a ceiling comparison would have passed the test and it would have
+> proved nothing — the same trap §4 names and mutant 2 in §7.4 kills.
+
+| Step | Result |
+|---|---|
+| Mint on Route A | token issued |
+| Redeem on Route A | **served** — same-route redemption unaffected |
+| Redeem the A-minted token on Route B | **refused** |
+| Redeem under a different `Mcp-Session-Id` | **served** — TUR-16 not regressed |
+
+The control matters as much as the refusal: a change that broke legitimate
+same-route redemption would be worse than the exposure it closes.
+
+**The refusal is audit-only, confirmed on the wire and in the log.** The client
+received the ordinary expired-or-not-found envelope, byte-identical to a
+genuinely expired token; the server emitted a distinct
+`heavy_continuation_route_not_authorized` signal. Both requirements of §6 held
+simultaneously — no third client-visible outcome, and operators retain the
+discrimination.
+
+> **Why the server-side signal was required before this counted.** The correct
+> client outcome is *indistinguishable from a token that was never valid*. A
+> route check that was silently broken and one working perfectly therefore look
+> identical from outside. Without the log line, step 3 would have been necessary
+> but not sufficient — it would have shown a refusal, not that the route check
+> caused it.
+
+**Recorded precisely:** the string quoted from the live host was the
+`heavy_continuation_route_not_authorized` warning. The audit-context `reason`
+field on the same branch is `continuation_route_not_authorized` (and
+`continuation_target_unrecorded` for a pre-§5 entry). Both are emitted from the
+one branch, so the observation is sound; they are distinguished here so a later
+reader greps for the right string rather than the one this note quotes.
+
+**§7.3 is not discharged by any of this** — see below. The two gaps were
+recorded together and only one has closed.
 
 ## 8. Side-channel question
 
