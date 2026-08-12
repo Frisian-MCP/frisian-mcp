@@ -369,13 +369,125 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
     return f"tool={tool_name}:auth={auth_id}:tier={tier}{user_part}{conn_part}"
 
 
-def _build_heavy_cache_entry(result: Any, request: Any, tool_name: str) -> dict[str, Any]:
-    """Wrap *result* with the SEC-3 owner-binding metadata for the cache."""
+def _build_heavy_cache_entry(
+    result: Any,
+    request: Any,
+    tool_name: str,
+    resolved_target: str | None = None,
+) -> dict[str, Any]:
+    """
+    Wrap *result* with the SEC-3 owner-binding metadata for the cache.
+
+    ADR-011 §5: entries also record ``resolved_target`` — the child tool the
+    *server* resolved for this call, not the outer name the caller sent.  For a
+    flat or class-dispatcher call the two are the same; for a grouped call the
+    child is what `_dispatcher_target_entry` routed to.
+
+    Recording only the outer name would leave the §4 re-authorization with
+    nothing to evaluate: the dispatcher is mounted, so a membership check
+    against *it* always passes, while the child — the thing whose route
+    containment actually matters — would be unrepresented.  The re-check would
+    look correct and be vacuous.
+    """
     return {
         "result": result,
         "owner_key": _heavy_owner_key(request, tool_name),
         "tool_name": tool_name,
+        "resolved_target": resolved_target or tool_name,
     }
+
+
+def _redemption_target_authorized(request: Any, tool_name: str, target_name: str) -> bool:
+    """
+    ADR-011 §4: may the *current* route serve a continuation for *target_name*?
+
+    Re-evaluates the cached, server-resolved target against the **current**
+    :class:`~frisian_mcp.route_views.RouteView` of the route the redemption
+    arrived on — not the route recorded at mint time, and deliberately not the
+    tier ceiling alone.
+
+    **A ceiling comparison would be insufficient.**  Two routes may declare the
+    same ``FRISIAN_MCP_MAX_TIER`` and expose entirely different resources,
+    because ADR-010's allow/deny grammar carves the surface independently of
+    tier.  A control that compared ceilings would look correct, pass a
+    plausible test, and permit exactly the cross-route service it exists to
+    refuse.  So all four dimensions of the surface are evaluated:
+
+    * **mounted membership + deny carve-outs** — the outer tool must be present
+      in this route's ``entries``, and for a grouped call the child must be in
+      that route's *pruned* ``group_tool_names``.  Pruning is per route, so a
+      group whose members were partly denied here yields a narrower set than
+      the one the token was minted against.
+    * **effective tier ceiling** — the caller's tier as already clamped to
+      ``request._mcp_max_tier``, compared against the *target's* required tier
+      rather than the dispatcher's (dispatchers register as ``read`` to stay
+      visible as navigation entry-points, so checking the outer entry's tier
+      would pass everything).
+    * **capability / permission visibility** — the same per-user entry filter
+      ``tools/list`` applies under ``PERMISSION_AWARE_DISCOVERY``.
+
+    Returns ``False`` on anything it cannot affirmatively authorize; the caller
+    maps that to §6's existing refusal outcome.
+    """
+    rv: RouteView | None = getattr(request, "_mcp_route_view", None)
+    # No per-route mount means the global registry *is* this route's surface.
+    outer = rv.entries.get(tool_name) if rv is not None else tool_registry.get_entry(tool_name)
+    if outer is None:
+        return False  # outer tool unmounted or denied on this route
+
+    if target_name == tool_name:
+        target = outer
+    else:
+        members = getattr(outer, "group_tool_names", None)
+        if members is None or target_name not in members:
+            return False  # child not a member of this route's pruned group
+        # Membership is the route-scoped fact; the tier/permission metadata
+        # still lives on the member's own entry.  Resolve it against the
+        # registry the view was materialised from — in production the global
+        # singleton, but threading it keeps the check honest about its backing
+        # store rather than reaching past the view to a global.
+        source = rv._registry if rv is not None else tool_registry
+        target = source.get_entry(target_name)
+        if target is None:
+            return False
+
+    if _caller_rank(_get_token_permission(request)) < _TIER_RANK.get(target.permission_tier, 0):
+        return False
+
+    perm_filter = getattr(request, "_mcp_perm_entry_filter", None)
+    if perm_filter is not None and not perm_filter(target):
+        return False
+
+    return True
+
+
+#: ADR-011 §6: every non-ownership redemption refusal returns *this* string.
+#: Expiry, a pre-SEC-3 legacy entry, an entry minted before §5, and a
+#: route-containment failure are operationally distinct and are distinguished in
+#: the audit reason — never on the wire.  Redemption already exposes two
+#: client-visible outcomes (this one and the owner mismatch), which is a
+#: token-validity oracle; tolerable only because tokens are 128-bit.  A third
+#: outcome meaning "valid token, wrong route" would additionally disclose server
+#: deploy state — that this host serves some other mount where the token would
+#: work — to any token holder, anonymous callers on open mounts included.
+_CONTINUATION_REFUSED_ERROR: str = (
+    "Continuation token expired or not found."
+    " Re-invoke without continuation_token"
+    " to start a new negotiation."
+)
+
+
+def _continuation_refused(request_id: Any) -> Any:
+    """Return the single client-visible refusal envelope shared by §6's cases."""
+    return _jsonrpc_success(
+        request_id,
+        {
+            "content": [
+                {"type": "text", "text": json.dumps({"error": _CONTINUATION_REFUSED_ERROR})}
+            ],
+            "isError": True,
+        },
+    )
 
 
 def _dispatcher_target_entry(entry: Any, arguments: dict[str, Any]) -> Any | None:
@@ -1515,26 +1627,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 decision="deny",
                 reason="continuation_expired" if cached is None else "continuation_unbound_legacy",
             )
-            return _jsonrpc_success(
-                request_id,
-                {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(
-                                {
-                                    "error": (
-                                        "Continuation token expired or not found."
-                                        " Re-invoke without continuation_token"
-                                        " to start a new negotiation."
-                                    )
-                                }
-                            ),
-                        }
-                    ],
-                    "isError": True,
-                },
-            )
+            return _continuation_refused(request_id)
         # SEC-3: refuse to serve when the current caller does not match the
         # caller that issued the continuation.  Owner key composes auth
         # identity, tier, user, agent connection, and tool name; any drift
@@ -1575,6 +1668,37 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     "isError": True,
                 },
             )
+        # ADR-011 §4: SEC-3 answers *who minted this token*; it does not answer
+        # *may it be served here, now*.  Route containment is an authorization
+        # check at use time, deliberately NOT an owner-key dimension — folding
+        # it into the owner key would invalidate every outstanding token
+        # whenever a route's configuration changed, and callers would
+        # experience that mass invalidation as ordinary expiry.
+        #
+        # Evaluated against the CURRENT route surface, so a mount change takes
+        # effect on tokens already outstanding without invalidating them.
+        _target: str = cached.get("resolved_target", "")
+        if not _target or not _redemption_target_authorized(request, tool_name, _target):
+            logger.warning(
+                "heavy_continuation_route_not_authorized",
+                extra={"tool": tool_name, "target": _target or "<unrecorded>"},
+            )
+            _log_audit_context(
+                request,
+                tool_name,
+                arguments,
+                decision="deny",
+                # §5: an entry minted before the shape change has no resolved
+                # target, so it cannot be authorized and is refused rather than
+                # served on trust — same posture as the pre-SEC-3 legacy entries
+                # above, and visible as a refusal wave across the deploy.
+                reason=(
+                    "continuation_route_not_authorized"
+                    if _target
+                    else "continuation_target_unrecorded"
+                ),
+            )
+            return _continuation_refused(request_id)
         # ADR-005 item (b), ruled B2: a bare continuation_token is bounded, not
         # complete.  `full` is still available and still returns everything —
         # it just has to be asked for, so an omitted or mistyped `mode` cannot
@@ -1886,7 +2010,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             if "continuation_token" in _d_lean:
                 _heavy_cache().set(
                     f"{_HEAVY_CACHE_PREFIX}{_w_token}",
-                    _build_heavy_cache_entry(result, request, tool_name),
+                    # ADR-011 §5: bind the server-resolved child, not the outer
+                    # dispatcher name, so redemption has something to re-authorize.
+                    _build_heavy_cache_entry(
+                        result, request, tool_name, getattr(_d_entry, "name", None)
+                    ),
                     _heavy_cache_ttl(),
                 )
             elif _d_lean.get("deleted") is True:
@@ -1929,7 +2057,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # bug this change exists to fix, reintroduced from the other side.
         _heavy_cache().set(
             f"{_HEAVY_CACHE_PREFIX}{_token}",
-            _build_heavy_cache_entry(result, request, tool_name),
+            # ADR-011 §5: bind the server-resolved child, not the outer
+            # dispatcher name, so redemption has something to re-authorize.
+            _build_heavy_cache_entry(
+                result, request, tool_name, getattr(_heavy_entry, "name", None)
+            ),
             _heavy_cache_ttl(),
         )
         probe = _build_probe_envelope(result, _token)
@@ -1965,7 +2097,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             _token = secrets.token_urlsafe(16)
             _heavy_cache().set(
                 f"{_HEAVY_CACHE_PREFIX}{_token}",
-                _build_heavy_cache_entry(result, request, tool_name),
+                # ADR-011 §5: the outer name governs schema disclosure and the
+                # owner key (both above); route containment is a third fact and
+                # takes the server-resolved child.  Binding the outer name here
+                # would make §4's membership re-check trivially pass for every
+                # grouped token minted through this backstop.
+                _build_heavy_cache_entry(
+                    result, request, tool_name, getattr(_heavy_entry, "name", None)
+                ),
                 _heavy_cache_ttl(),
             )
             probe = _build_probe_envelope(result, _token)

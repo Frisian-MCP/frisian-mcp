@@ -1553,3 +1553,66 @@ class TestH6HeavyCacheIsolation:
 
         with override_settings(FRISIAN_MCP_HEAVY_CACHE_TTL=42):
             assert _heavy_cache_ttl() == 42
+
+
+class TestAdr011ResolvedTarget:
+    """
+    ADR-011 §5 — the minted entry records the *server-resolved child*.
+
+    These assertions exist because §4's re-authorization is silently vacuous
+    without them: the outer dispatcher is always mounted, so a membership check
+    against the outer name passes unconditionally while the child — the thing
+    whose route containment actually matters — goes unchecked.  Reverting the
+    mint-site wiring previously left the whole suite green.
+
+    Read off ``django_cache.set`` via :func:`_minted_entry`, so this describes
+    what the view stored rather than what the test hoped it would store.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _threshold(self, low_threshold: None) -> None:
+        """The backstop is the only mint path reachable on the group shape."""
+
+    def test_group_mint_records_the_child_not_the_dispatcher(self, rf: RequestFactory) -> None:
+        reg = ToolRegistry()
+        name = _build_group_dispatcher(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            _call(rf, name, {"resource": "item", "action": "list", "params": {}})
+            entry = _minted_entry(cache)
+
+        # The owner key still binds the outer group (G1) — §5 is a third fact.
+        assert entry["tool_name"] == "catalog"
+        assert entry["resolved_target"] == "item_list"
+
+    def test_the_other_resource_in_the_same_group_resolves_to_itself(
+        self, rf: RequestFactory
+    ) -> None:
+        """A per-resource fact, not a constant baked in at the group level."""
+        reg = ToolRegistry()
+        name = _build_group_dispatcher(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            _call(rf, name, {"resource": "container", "action": "list", "params": {}})
+            entry = _minted_entry(cache)
+
+        assert entry["resolved_target"] == "container_list"
+
+    def test_flat_mint_records_itself(self, rf: RequestFactory) -> None:
+        reg = ToolRegistry()
+        name = _build_flat_heavy(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            _call(rf, name, {})
+            entry = _minted_entry(cache)
+
+        assert entry["resolved_target"] == name

@@ -10,21 +10,21 @@
 
 ## Implementation status — read this before citing anything below
 
-This ADR records **one decision**, of which only part is shipped. The
-distinction is stated per-section and repeated here because an accepted
-document that describes unshipped behaviour as current is the precise defect
-ADR-005's amended cache-layer section exists to correct.
+This ADR records **one decision**, now shipped in full. The distinction is
+stated per-section and kept here because an accepted document that describes
+unshipped behaviour as current is the precise defect ADR-005's amended
+cache-layer section exists to correct.
 
 | Decision | Status |
 |---|---|
-| §3 Route-scoped resolution of caller-derived names | **Shipped** (membership gate; verified live, §7) |
-| §4 Re-authorization at redemption | **Decided, not implemented** |
-| §5 Grouped entries retain the server-resolved child | **Decided, not implemented** |
+| §3 Route-scoped resolution of caller-derived names | **Shipped** (membership gate; verified live, §7.2) |
+| §4 Re-authorization at redemption | **Shipped** (§7.4 — synthetic + mutation evidence; live verification deferred, §7.5) |
+| §5 Grouped entries retain the server-resolved child | **Shipped** (§7.4) |
 | §6 Route identity stays out of the owner key | **Shipped** (by construction — it was never in it) |
-| §6 Refusal reuses the existing outcome | **Shipped** for §3; applies to §4 when built |
+| §6 Refusal reuses the existing outcome | **Shipped** for §3 and §4 |
 
-Nothing in §4 or §5 may be described elsewhere as a control the gateway
-currently applies.
+**One caveat travels with §4 and §5:** they are shipped and covered, but their
+live verification is an open exception (§7.5), not a completed step.
 
 ## 1. Context
 
@@ -92,7 +92,11 @@ grammar carves the surface independently of tier. A control that compared
 ceilings would look correct, pass a plausible test, and permit exactly the
 cross-route service it was built to refuse.
 
-> **Status: decided, not implemented.**
+> **Status: shipped.** `_redemption_target_authorized()` in `views.py`,
+> evaluated after the SEC-3 owner check and before any mode is served, so
+> redemption still short-circuits ahead of re-dispatch. The claim in the
+> paragraph above is executable, not rhetorical: a ceiling-only implementation
+> is a mutant that the suite kills (§7.4).
 
 ## 5. Grouped-call entries retain the server-resolved child target
 
@@ -108,7 +112,12 @@ This is a **cache-entry shape change**. It is additive; entries lacking the
 field are treated as unauthorizable and fall to §6's refusal, consistent with
 the pre-SEC-3 legacy-entry handling already in the redemption path.
 
-> **Status: decided, not implemented.**
+> **Status: shipped.** `_build_heavy_cache_entry()` records `resolved_target`
+> at all four mint sites. Note which path mattered most: the
+> `AUTO_NEGOTIATE_THRESHOLD` backstop is the *only* mint path currently
+> reachable on the dispatcher shapes, so had that one site kept binding the
+> outer name, §4 would have been vacuous for every grouped token in practice
+> while appearing correct everywhere else.
 
 ## 6. Route identity is not an ownership dimension, and refusal is not a new outcome
 
@@ -170,6 +179,54 @@ synthetically only.
 This is recorded as an exception rather than omitted, per the rule in §7. It is
 the same gap that let the original defect ship, and it remains open.
 
+### 7.4 Evidence recorded for §4 and §5
+
+§4 and §5 landed together, §5 first — it is the precondition, and building §4
+against entries that bind only the outer name would have produced a check that
+passes unconditionally.
+
+Coverage is in `tests/test_adr011_redemption_reauthorization.py` (the four
+surface dimensions, against real `RouteView`s built from a real registry, not
+stubs) and `TestAdr011ResolvedTarget` in `tests/test_heavy_negotiation_matrix.py`
+(the mint-site wiring, read off what the view actually stored).
+
+**Verified by mutation, because passing tests prove less than killed mutants.**
+Three mutants were introduced and the suite re-run:
+
+| Mutant | Result |
+|---|---|
+| §4 check always authorizes | 6 tests fail |
+| §4 checks tier/ceiling but skips the allow/deny carve-out | 3 fail, including the same-ceiling case |
+| §5 mint wiring reverted to bind the outer name | 2 fail |
+
+The second mutant is the point: it is precisely the plausible implementation
+§4 warns about, and the same-ceiling test exists to kill it.
+
+The third mutant is recorded because **before that test was added it killed
+nothing** — the full suite passed with §5's wiring reverted, which would have
+left §4 shipped, green, and vacuous. That is the failure mode this ADR is about,
+reproduced inside the work that implements it.
+
+### 7.5 Exception on record — §4 and §5 are not live-verified
+
+Live verification of cross-route redemption needs **two mounts exposing
+different surfaces** on a connector-reachable host, and a token minted on one
+and replayed against the other. The demo host currently serves a single capped
+mount, so the scenario cannot be posed without a route-configuration change and
+a redeploy — outside the scope of the change that lands this, and not a
+decision this seat makes alone.
+
+Recorded as an exception per §7 rather than omitted, and deliberately alongside
+§7.3 so the two open live gaps are read together rather than discovered
+separately.
+
+**What would discharge it:** a second mount whose allow/deny carve-out excludes
+a member the first exposes, then one grouped probe on the permissive mount and
+one redemption of that token against the restrictive one. The expected result
+is the ordinary expired-or-not-found envelope, with
+`continuation_route_not_authorized` in the audit log and nothing on the wire
+distinguishing it from expiry.
+
 ## 8. Side-channel question
 
 Whether route-scoped resolution leaves a **timing or enumeration channel** that
@@ -219,8 +276,5 @@ deliberately unchanged.
   previously short-circuited.
 - §5 changes the cache-entry shape. Entries minted before it are unauthorizable
   and refuse under §6 — correct, and visible as a refusal wave across a deploy.
-- **The gap between decided and shipped is itself a risk.** §4 and §5 are
-  recorded as decisions; until they land, a grouped token minted on one route
-  and redeemed on another is still served. The implementation status table
-  exists so that no reader mistakes this ADR for a description of current
-  behaviour.
+- §4 and §5 ship without live verification. That exception, and what would
+  discharge it, is recorded in §7.5 rather than left implicit.

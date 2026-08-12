@@ -487,6 +487,7 @@ class TestMcpHeavyIntegration:
                     "result": stored,
                     "owner_key": expected_owner,
                     "tool_name": "int.heavy2",
+                    "resolved_target": "int.heavy2",
                 }
                 response = _call_tool(
                     rf, "int.heavy2", {"continuation_token": token, "mode": "full"}
@@ -526,6 +527,7 @@ class TestMcpHeavyIntegration:
                     "result": stored,
                     "owner_key": expected_owner,
                     "tool_name": "int.heavy3",
+                    "resolved_target": "int.heavy3",
                 }
                 response = _call_tool(
                     rf, "int.heavy3", {"continuation_token": token, "mode": "summary"}
@@ -687,6 +689,7 @@ class TestHeavyContinuationOwnerBinding:
                 # Deliberately-foreign owner — different tier.
                 "owner_key": "tool=sec3.heavy2:auth=anon:tier=admin",
                 "tool_name": "sec3.heavy2",
+                "resolved_target": "sec3.heavy2",
             }
             response = _call_tool(
                 rf,
@@ -746,6 +749,7 @@ class TestHeavyContinuationOwnerBinding:
                 "result": {"sensitive": "data"},
                 "owner_key": owner_for_heavy3,
                 "tool_name": "sec3.heavy3",
+                "resolved_target": "sec3.heavy3",
             }
             # … but the call-2 names sec3.evil.
             response = _call_tool(
@@ -802,6 +806,7 @@ class TestHeavyContinuationOwnerBinding:
                 "result": {"ok": True},
                 "owner_key": owner,
                 "tool_name": "sec3.heavy5",
+                "resolved_target": "sec3.heavy5",
             }
             response = _call_tool(
                 rf,
@@ -852,6 +857,7 @@ class TestHeavyContinuationOwnerBinding:
                 "result": {"ok": True},
                 "owner_key": owner,
                 "tool_name": "sec3.heavy6",
+                "resolved_target": "sec3.heavy6",
             }
             response = _view(redeem_req)
 
@@ -1013,6 +1019,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": "matrix.paginated",
+                "resolved_target": "matrix.paginated",
             }
             response = _call_tool(
                 rf,
@@ -1044,6 +1051,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": "matrix.filtered",
+                "resolved_target": "matrix.filtered",
             }
             response = _call_tool(
                 rf,
@@ -1099,6 +1107,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": tool_name,
+                "resolved_target": tool_name,
             }
             response = _view(redeem_req)
 
@@ -1151,6 +1160,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": "matrix.anon",
+                "resolved_target": "matrix.anon",
             }
             response = _view(redeem_req)
 
