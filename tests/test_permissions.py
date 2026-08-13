@@ -53,11 +53,19 @@ def _req(allow_flag: bool = True) -> Any:
     """Build a mock request with an optional allow_flag attribute."""
     req = MagicMock()
     # H7: a bare MagicMock fabricates `_mcp_effective_tier`, presenting a Mock
-    # where a tier string belongs.  An unrecognised tier now ranks BELOW read,
-    # so pin the MCP attributes to their real "no context" values.
-    req._mcp_effective_tier = None
+    # where a tier string belongs, and an unrecognised tier now ranks BELOW read.
+    #
+    # Stamp the effective tier rather than pinning it to None and letting
+    # resolution run: these tests are about permission CLASSES, and a bare
+    # MagicMock also makes `user.is_superuser` truthy, so a host with a
+    # FRISIAN_MCP_TOKEN_TIER_MAP would silently take the role-map branch and
+    # these tests would depend on a setting they never mention.  A stamped tier
+    # short-circuits resolution entirely, so the fixture models one thing.
+    req._mcp_effective_tier = "read"
     req._mcp_max_tier = None
-    req.auth = None
+    req.user.is_superuser = False
+    req.user.is_staff = False
+    req.user.is_authenticated = True
     req.allow_flag = allow_flag
     return req
 

@@ -52,10 +52,13 @@ Audits `DEBUG`, `FRISIAN_MCP_HMAC_KEY`, `FRISIAN_MCP_UNAUTHENTICATED_TIER`, and 
 - `UNAUTHENTICATED_TIER` set to `read_write` or `admin` (anonymous write/admin grants)
 - `TRUSTED_PROXY_COUNT=0` in non-debug mode when a reverse proxy is in play
 
-#### `FRISIAN_MCP_UNAUTHENTICATED_TIER` — four distinct reports
+#### `FRISIAN_MCP_UNAUTHENTICATED_TIER` — five reports over four runtime cases
 
-The doctor distinguishes the same four cases the runtime does, and reads them
-from the same classifier, so the two cannot disagree:
+The doctor reads the same classifier the runtime does, so the two cannot
+disagree about what a setting means. It emits five reports rather than four
+because it splits the one *granting* case in two: an explicitly configured
+`read` is reported separately from an elevated `read_write` / `admin`, since
+only the latter warrants a warning.
 
 | Setting | Report | Meaning |
 |---|---|---|

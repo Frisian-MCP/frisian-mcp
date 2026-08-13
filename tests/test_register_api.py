@@ -30,12 +30,20 @@ def _request() -> MagicMock:
     """Build a minimal mock request."""
     req = MagicMock()
     # H7: a bare MagicMock fabricates `_mcp_effective_tier`, presenting a Mock
-    # where a tier string belongs.  An unrecognised tier now ranks BELOW read,
-    # so pin the MCP attributes to their real "no context" values.
+    # where a tier string belongs, and an unrecognised tier now ranks BELOW read.
+    #
+    # `auth` must NOT be None here.  `_resolve_request_tier` selects the
+    # UNAUTHENTICATED fallback on `request.auth is None`, so pairing auth=None
+    # with is_authenticated=True produced a fixture that claimed to be an
+    # authenticated caller while actually reading
+    # FRISIAN_MCP_UNAUTHENTICATED_TIER — under UNAUTH='admin' it resolved to
+    # admin. Model the authenticated read caller these tests intend.
     req._mcp_effective_tier = None
     req._mcp_max_tier = None
-    req.auth = None
+    req.auth = MagicMock(permission="read")
     req.user = MagicMock()
+    req.user.is_superuser = False
+    req.user.is_staff = False
     req.user.is_authenticated = True
     return req
 

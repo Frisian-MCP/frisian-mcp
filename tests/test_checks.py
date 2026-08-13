@@ -21,6 +21,7 @@ from frisian_mcp.checks import (
     E007_INVALID_UNAUTHENTICATED_TIER,
     E008_DISPATCHER_WITHOUT_MEMBERSHIP,
     E009_HEAVY_CACHE_ALIAS_MISSING,
+    E010_INVALID_MAX_TIER,
     W001_NO_PERMISSION_CLASSES,
     W002_PLAINTEXT_API_KEYS,
     W003_PRIVILEGED_SERVICE_ACCOUNT,
@@ -30,6 +31,7 @@ from frisian_mcp.checks import (
     check_api_keys_are_hashed,
     check_dispatcher_membership,
     check_heavy_cache_isolation,
+    check_max_tier_value,
     check_oauth_discovery_not_hidden,
     check_oauth_token_rate_limit_format,
     check_permission_classes_in_production,
@@ -402,7 +404,7 @@ class TestMalformedRateLimit:
 
 
 # ---------------------------------------------------------------------------
-# H7 — E004: an unrecognised FRISIAN_MCP_UNAUTHENTICATED_TIER must be loud
+# H7 — E007: an unrecognised FRISIAN_MCP_UNAUTHENTICATED_TIER must be loud
 # ---------------------------------------------------------------------------
 
 
@@ -726,3 +728,67 @@ class TestE009HeavyCacheAliasMissing:
     def test_a_correctly_spelled_alias_is_silent(self, settings: Any) -> None:
         """The control — E009 must not fire on the arrangement it is asking for."""
         assert self._run(settings, "heavy_continuation") == []
+
+
+# ---------------------------------------------------------------------------
+# E010: an unrecognised FRISIAN_MCP_MAX_TIER must be loud
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTierValueCheck:
+    """
+    E007's argument applied to the second tier setting.
+
+    Route ``highest_tier`` is parser-validated; the global cap was read raw.
+    The runtime fails closed but *asymmetrically*, which is what makes silence
+    dangerous: anonymous read keeps working while every privileged caller is
+    denied, so the symptom points away from this setting.
+    """
+
+    def test_absent_is_silent(self, settings: Any) -> None:
+        """No global cap is the documented default."""
+        if hasattr(settings, "FRISIAN_MCP_MAX_TIER"):
+            del settings.FRISIAN_MCP_MAX_TIER
+        assert check_max_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="read_write")
+    def test_valid_tier_is_silent(self) -> None:
+        """A recognised tier raises nothing."""
+        assert check_max_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_typo_raises_error(self) -> None:
+        """A typo is an Error, matching E007's treatment of the sibling setting."""
+        errors = check_max_tier_value()
+        assert len(errors) == 1
+        assert errors[0].id == E010_INVALID_MAX_TIER
+        assert isinstance(errors[0], Error)
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_message_names_the_asymmetry(self) -> None:
+        """
+        The message must describe the *asymmetric* consequence.
+
+        An operator seeing "admins denied, anonymous fine" would not otherwise
+        suspect a global cap, so the message says exactly that.
+        """
+        err = check_max_tier_value()[0]
+        assert "readwrite" in err.msg
+        assert "DENIED" in err.msg
+        assert "'read' callers are unaffected" in err.msg
+
+    def test_runtime_really_is_asymmetric(self) -> None:
+        """
+        Pins the behaviour the message describes, so the two cannot drift.
+
+        Asserted on the rank rather than end-to-end: ranking is what every gate
+        compares, and the clamp returns the invalid string itself.
+        """
+        from unittest.mock import MagicMock
+
+        from frisian_mcp.registry import _apply_max_tier_cap, _caller_rank
+
+        req = MagicMock(_mcp_max_tier="reed")
+        assert _apply_max_tier_cap("read", req) == "read"
+        assert _caller_rank(_apply_max_tier_cap("read_write", req)) < _caller_rank("read")
+        assert _caller_rank(_apply_max_tier_cap("admin", req)) < _caller_rank("read")

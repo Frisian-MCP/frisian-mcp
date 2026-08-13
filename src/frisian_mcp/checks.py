@@ -65,6 +65,13 @@ Registered checks
     membership set.  Silence with ``SILENCED_SYSTEM_CHECKS`` if a
     membership-less dispatcher is deliberate.
 
+``frisian_mcp.E010``
+    Error when ``FRISIAN_MCP_MAX_TIER`` is set to an unrecognised tier.  The
+    runtime fails closed, but asymmetrically: ``read`` callers are unaffected
+    while ``read_write``/``admin`` callers are clamped to the invalid value and
+    then denied every tool.  E007's argument applied to the second tier setting
+    — route ``highest_tier`` is parser-validated, the global cap was not.
+
 ``frisian_mcp.W012``
     Warns (LOUD) when ``frisian_mcp.contrib.oauth`` is installed but
     ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False``.  That flag 404s the
@@ -168,6 +175,7 @@ E002_OAUTH_IDENTITY_GAP = "frisian_mcp.E002"
 E003_UNANNOTATED_CUSTOM_ACTION = "frisian_mcp.E003"
 E007_INVALID_UNAUTHENTICATED_TIER = "frisian_mcp.E007"
 E008_DISPATCHER_WITHOUT_MEMBERSHIP = "frisian_mcp.E008"
+E010_INVALID_MAX_TIER = "frisian_mcp.E010"
 W012_OAUTH_DISCOVERY_HIDDEN = "frisian_mcp.W012"
 W013_MALFORMED_RATE_LIMIT = "frisian_mcp.W013"
 W014_INVALID_USAGE_POLICY = "frisian_mcp.W014"
@@ -346,6 +354,54 @@ def check_service_account_user(  # pylint: disable=unused-argument
                 "Run 'manage.py mcp_doctor --security' to verify the account's privilege level."
             ),
             id=W003_PRIVILEGED_SERVICE_ACCOUNT,
+        )
+    ]
+
+
+@register(Tags.security)
+def check_max_tier_value(  # pylint: disable=unused-argument
+    app_configs: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> list[Error]:
+    """
+    An unrecognised ``FRISIAN_MCP_MAX_TIER`` must be loud (CodeRabbit).
+
+    This is E007's argument applied to the second tier setting.  ``highest_tier``
+    on a route is parser-validated; the **global** cap is read straight from
+    settings and never checked, so a typo reaches ``_apply_max_tier_cap``
+    unexamined.
+
+    The runtime already fails closed, and the shape of that failure is why the
+    check is needed rather than merely nice:
+
+    * a ``read`` caller is unaffected — the invalid cap ranks 0, so the
+      ``caller_rank > cap_rank`` comparison is False and nothing is clamped;
+    * a ``read_write`` or ``admin`` caller **is** clamped, to the invalid string
+      itself, which then ranks below ``read`` and denies them every tool.
+
+    So a single typo silently locks out exactly the privileged callers, leaves
+    anonymous read working, and produces no diagnostic anywhere.  A host would
+    see "admins can't call anything, anonymous users can" and have no reason to
+    suspect this setting.
+
+    Absent is silent: no cap is the documented default.
+    """
+    sentinel = object()
+    raw = getattr(settings, "FRISIAN_MCP_MAX_TIER", sentinel)
+    if raw is sentinel or raw is None:
+        return []
+    value = str(raw).strip().lower()
+    if value in _VALID_PERMISSION_TIERS:
+        return []
+
+    valid = ", ".join(sorted(_VALID_PERMISSION_TIERS))
+    return [
+        Error(
+            f"FRISIAN_MCP_MAX_TIER={raw!r} is not a recognised tier. Callers above "
+            "'read' are being clamped to this value and then DENIED every tool, "
+            "while 'read' callers are unaffected.",
+            hint=(f"Set it to one of: {valid}, or remove it entirely for no global cap."),
+            id=E010_INVALID_MAX_TIER,
         )
     ]
 

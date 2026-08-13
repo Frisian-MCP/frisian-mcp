@@ -320,11 +320,15 @@ class TestGetTokenPermission:
         distinguished.  Every host that never set this keeps working; collapsing
         the two cases would silently lock out the majority to punish a typo.
         """
-        assert not hasattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER") or True
         with override_settings():
             del_setting = "FRISIAN_MCP_UNAUTHENTICATED_TIER"
             if hasattr(settings, del_setting):
                 delattr(settings._wrapped, del_setting)  # noqa: SLF001
+            # Assert the precondition AFTER the deletion. The previous version
+            # asserted it before, as `not hasattr(...) or True` — a tautology
+            # that could not fail and therefore proved the setting was absent
+            # only by coincidence.
+            assert not hasattr(settings, del_setting), "precondition: the setting is absent"
             assert _resolve_unauthenticated_tier() == "read"
 
     @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER=None)

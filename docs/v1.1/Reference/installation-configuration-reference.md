@@ -237,7 +237,7 @@ An agent sends the **raw** key as `Authorization: Bearer <raw-key>`; the package
 
 The maximum permission tier for callers who provide no credentials.
 
-Three cases are distinguished, and all of them fail closed except the compatibility default:
+Four cases are distinguished. Two grant access — an absent setting, which uses the compatibility default, and an explicitly configured tier. The other two deny:
 
 | Value | Effect |
 |---|---|

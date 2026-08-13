@@ -180,7 +180,16 @@ def _heavy_cache() -> Any | None:
         return django_cache
     try:
         return caches[alias]
-    except InvalidCacheBackendError:
+    except (InvalidCacheBackendError, ImproperlyConfigured, ImportError):
+        # Django wraps an *unimportable* BACKEND path in InvalidCacheBackendError,
+        # but backend construction happens outside that wrapper: a backend whose
+        # ``__init__`` raises ImproperlyConfigured (bad LOCATION, missing option)
+        # or ImportError (missing client library) propagates out of ``caches[...]``
+        # untouched.  Every one of these means the same thing operationally —
+        # this alias cannot hold continuation state — so they get the same
+        # answer.  Letting them escape turned a misconfigured cache into an
+        # HTTP 500 on any over-threshold read, which is a worse failure than
+        # declining to negotiate.
         _log_missing_heavy_cache_alias(alias)
         return None
 
@@ -698,6 +707,26 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
     }
 
 
+def _envelope_payload_key(result: Any) -> str | None:
+    """
+    Return the key holding a paginated envelope's list payload, or ``None``.
+
+    Host-agnostic **by construction**: an envelope is recognised as a dict with
+    exactly one list-valued key, and that key is the payload.  No field name is
+    hard-coded, so a host using ``results``, ``items``, ``data`` or anything
+    else is handled identically and no vendor vocabulary enters ``src/``.
+
+    ``None`` is returned when the shape is not unambiguous — no list value, or
+    more than one.  Two lists could each plausibly be the payload and guessing
+    would silently paginate the wrong one; the caller keeps the whole result,
+    which is the pre-H23 behaviour for that shape.
+    """
+    if not isinstance(result, dict):
+        return None
+    list_keys = [k for k, v in result.items() if isinstance(v, list)]
+    return list_keys[0] if len(list_keys) == 1 else None
+
+
 def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
     """
     Serve a cached heavy result in the requested response mode.
@@ -748,8 +777,22 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
         # place.  A caller who genuinely needs a large object bounded still has
         # `summary` and `filtered`, both of which stay meaningful on a dict;
         # what is removed is only an option that produced unusable output.
-        if not isinstance(result, list):
+        # H23: a *paginated list envelope* is a dict, and the T18 guard above
+        # sent it down the "already bounded" path — so the single most common
+        # heavy case (a large list endpoint) returned in full, ignoring
+        # `page_size` entirely.  T18 enumerated two non-list shapes, the write
+        # result and the single-object retrieve, and missed the third, which is
+        # the dominant one in production.
+        #
+        # `_envelope_payload_key` finds the list to paginate WITHOUT naming a
+        # host field: an envelope is a dict with exactly one list-valued key.
+        # Ambiguity is not guessed at — zero or several lists means we cannot
+        # tell which is the payload, and the result is returned whole as before.
+        payload_key = None if isinstance(result, list) else _envelope_payload_key(result)
+        if not isinstance(result, list) and payload_key is None:
             return result
+
+        items: list[Any] = result if isinstance(result, list) else result[payload_key]
         page: int = max(1, int(arguments.get("page", 1)))
         _default_page_size: int = getattr(settings, "FRISIAN_MCP_HEAVY_PAGE_SIZE", 20)
         _max_page_size: int = getattr(
@@ -761,13 +804,23 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
         )
         start = (page - 1) * page_size
         end = start + page_size
-        return {
-            "items": result[start:end],
+        served: dict[str, Any] = {
+            "items": items[start:end],
             "page": page,
             "page_size": page_size,
-            "total": len(result),
-            "has_more": end < len(result),
+            "total": len(items),
+            "has_more": end < len(items),
         }
+        if payload_key is not None:
+            # The envelope's own keys describe the HOST's pagination over the
+            # host's full result set; ours describe this slice of the cached
+            # page.  `count: 114` beside `total: 50` beside two returned records
+            # is three numbers meaning three different things, so the host's are
+            # nested rather than merged — nothing is dropped, and nothing sits
+            # side by side pretending to be the same measurement.
+            served["envelope"] = {k: v for k, v in result.items() if k != payload_key}
+            served["envelope_payload_key"] = payload_key
+        return served
 
     if mode == "filtered":
         filter_keys: list[str] = list(arguments.get("filter_keys") or [])
@@ -1930,10 +1983,23 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # absence error that wraps it.  The route/tier lens is already applied
         # via the route view + max_tier; this adds the per-user capability lens.
         _perm_filter = getattr(request, "_mcp_perm_entry_filter", None)
+        # The ACTION lens has to come too, not just the entry lens.  A dispatcher
+        # whose every action the caller lacks permission for still passes
+        # ``entry_filter`` — the entry itself is visible, it is the actions that
+        # are not — so it stayed in ``known_names`` and a near-match handed its
+        # name back inside the very error that denies it exists.  ``tools/list``
+        # drops that dispatcher because the empty action enum makes it an empty
+        # shell; passing the same factory here makes the two agree.  Same
+        # disagreement class as H3's four consumers: one lens applied in one
+        # consumer is not the lens applied.
+        _caps = getattr(request, "_mcp_capabilities", None)
+        _action_factory = _make_perm_action_filter_factory(_caps) if _caps is not None else None
         known_names = [
             t["name"]
             for t in _known_lister(
-                max_tier=_get_token_permission(request), entry_filter=_perm_filter
+                max_tier=_get_token_permission(request),
+                entry_filter=_perm_filter,
+                action_filter_factory=_action_factory,
             )
         ]
         suggestions = difflib.get_close_matches(tool_name, known_names, n=3, cutoff=0.6)

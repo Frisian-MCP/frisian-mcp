@@ -379,10 +379,8 @@ deliberately unchanged.
 
 ### Negative / risks
 
-- §4 costs a route-surface evaluation on every redemption, on a path that
-  previously short-circuited.
-- §5 changes the cache-entry shape. Entries minted before it are unauthorizable
-  and refuse under §6 — correct, and visible as a refusal wave across a deploy.
 - §4 costs one route-surface evaluation per redemption, but only after the
   owner check has already passed — the path still short-circuits ahead of
   re-dispatch.
+- §5 changes the cache-entry shape. Entries minted before it are unauthorizable
+  and refuse under §6 — correct, and visible as a refusal wave across a deploy.

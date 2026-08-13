@@ -354,6 +354,79 @@ class TestServeHeavyMode:
         assert served["items"] == list(range(10, 15))
         assert served["has_more"] is False
 
+    def test_paginated_honours_page_size_on_a_list_envelope(self) -> None:
+        """
+        H23, the reported bug: asked for 2 records, received the whole page.
+
+        A paginated list envelope is a **dict**, so T18's "a non-list result is
+        already bounded" guard sent the single most common heavy case — a large
+        list endpoint — straight down the return-whole path with ``page_size``
+        never read.  T18 enumerated the write result and the single-object
+        retrieve and missed the envelope, which is the dominant shape in
+        production.
+
+        Worse than the behaviour it replaced: before T18 a dict was chunked into
+        fixed-width slices — unusable, but *bounded*.  After, it was parseable
+        and *unbounded*, on exactly the case the package exists to bound.
+        """
+        envelope = {
+            "count": 114,
+            "next": "http://host/api/thing/?page=2",
+            "previous": None,
+            "results": [{"id": i} for i in range(50)],
+        }
+        served = _serve_heavy_mode(envelope, "paginated", {"page": 1, "page_size": 2})
+        assert len(served["items"]) == 2, "page_size was ignored on a list envelope"
+        assert served["total"] == 50
+        assert served["has_more"] is True
+
+    def test_paginated_envelope_walks_pages(self) -> None:
+        """``page`` selects a slice of the envelope's payload, not of the envelope."""
+        envelope = {"count": 9, "results": [{"id": i} for i in range(9)]}
+        served = _serve_heavy_mode(envelope, "paginated", {"page": 2, "page_size": 3})
+        assert [item["id"] for item in served["items"]] == [3, 4, 5]
+
+    def test_paginated_envelope_nests_the_hosts_own_numbers(self) -> None:
+        """
+        The host's pagination keys are preserved but NOT merged with ours.
+
+        ``count`` describes the host's full result set, ``total`` describes the
+        cached page we are slicing, and ``items`` is the slice — three numbers
+        measuring three different things.  Side by side at one level they read
+        as contradictory, so the host's are nested under ``envelope`` and the
+        payload key is named rather than assumed.
+        """
+        envelope = {"count": 114, "next": "http://host/x?page=2", "results": [{"id": 1}]}
+        served = _serve_heavy_mode(envelope, "paginated", {"page": 1, "page_size": 1})
+        assert served["envelope"] == {"count": 114, "next": "http://host/x?page=2"}
+        assert served["envelope_payload_key"] == "results"
+        assert "count" not in served, "host and continuation numbers must not sit side by side"
+
+    def test_paginated_ambiguous_envelope_returns_whole(self) -> None:
+        """
+        Two list-valued keys is not an envelope we can safely paginate.
+
+        Guessing which list is the payload would silently return a slice of the
+        wrong collection, which is worse than returning too much.  This is the
+        pre-H23 behaviour, kept deliberately for the shape that cannot be
+        resolved without naming a host field.
+        """
+        ambiguous = {"a": [1, 2, 3], "b": [4, 5, 6]}
+        assert _serve_heavy_mode(ambiguous, "paginated", {"page": 1, "page_size": 1}) == ambiguous
+
+    def test_paginated_envelope_detection_names_no_host_field(self) -> None:
+        """
+        Detection is structural, so a host using any payload key works.
+
+        Asserted across three vocabularies to pin that no field name is
+        hard-coded — ``results`` is DRF's convention, not this package's.
+        """
+        for key in ("results", "items", "records"):
+            envelope = {"count": 3, key: [{"id": i} for i in range(3)]}
+            served = _serve_heavy_mode(envelope, "paginated", {"page": 1, "page_size": 1})
+            assert len(served["items"]) == 1, f"payload key {key!r} not detected"
+            assert served["envelope_payload_key"] == key
+
     def test_paginated_non_list_returns_it_whole(self) -> None:
         """
         Paginated mode returns a non-list result whole, chunking nothing.

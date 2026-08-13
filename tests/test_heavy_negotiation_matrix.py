@@ -327,18 +327,17 @@ _SHAPE_IDS = tuple(_SHAPES)
 #: holds it to the contract.  Keys are module paths relative to the package
 #: root; :func:`_discover_disclosing_call_sites` recomputes the left-hand side
 #: from the source so this mapping cannot silently fall behind.
-_CONSUMER_TO_SHAPE: dict[str, str] = {
-    "decorators.py": "flat_heavy",  # also @mcp_tool -> plain_tool, see below
-    "backends/dispatcher.py": "class_dispatcher",
-    "backends/group_dispatcher.py": "group_dispatcher",
-    "backends/discovery.py": "auto_discovered",
+_CONSUMER_TO_SHAPES: dict[str, tuple[str, ...]] = {
+    # ``decorators.py`` hosts TWO consumers — ``@mcp_heavy`` (flat merge) and
+    # ``@mcp_tool`` (conditional branch).  The multiplicity lives in the mapping
+    # rather than in a separate constant precisely because module granularity
+    # alone cannot see one of them disappear: the module still has a call site,
+    # so a key-set comparison stays green.  The count is the guard.
+    "decorators.py": ("flat_heavy", "plain_tool"),
+    "backends/dispatcher.py": ("class_dispatcher",),
+    "backends/group_dispatcher.py": ("group_dispatcher",),
+    "backends/discovery.py": ("auto_discovered",),
 }
-
-#: ``decorators.py`` hosts two consumers — ``@mcp_heavy`` (flat merge) and
-#: ``@mcp_tool`` (conditional branch) — so module granularity alone would let
-#: one of them be dropped without the guard noticing.  Both are named here and
-#: both have shapes.
-_DECORATORS_SHAPES = ("flat_heavy", "plain_tool")
 
 #: The two helpers that publish the negotiation protocol.  A consumer is any
 #: call site of either, outside their defining module.
@@ -523,20 +522,39 @@ class TestDisclosure:
         either parameterised or explicitly recorded as covered.
         """
         found = _discover_disclosing_call_sites()
-        unclaimed = sorted(set(found) - set(_CONSUMER_TO_SHAPE))
+        unclaimed = sorted(set(found) - set(_CONSUMER_TO_SHAPES))
         assert not unclaimed, (
             f"negotiation consumer(s) {unclaimed} exist in src/ but no shape covers them;"
-            " add one to _SHAPES and map it in _CONSUMER_TO_SHAPE rather than"
+            " add one to _SHAPES and map it in _CONSUMER_TO_SHAPES rather than"
             " exempting the new construction path"
         )
 
-        stale = sorted(set(_CONSUMER_TO_SHAPE) - set(found))
+        stale = sorted(set(_CONSUMER_TO_SHAPES) - set(found))
         assert not stale, (
-            f"_CONSUMER_TO_SHAPE claims {stale}, which no longer merges the"
+            f"_CONSUMER_TO_SHAPES claims {stale}, which no longer merges the"
             " negotiation fields; drop the mapping or restore the disclosure"
         )
 
-        uncovered = sorted(set(_CONSUMER_TO_SHAPE.values()) - set(_SHAPE_IDS))
+        # The count is the part that actually guards.  The three set comparisons
+        # above all stayed GREEN when one of decorators.py's two consumers was
+        # removed: the module still had a call site, so no key changed.  The
+        # per-module count was already being computed by the discovery pass and
+        # then discarded — the evidence was in hand and thrown away.
+        miscounted = {
+            module: (found[module], len(shapes))
+            for module, shapes in _CONSUMER_TO_SHAPES.items()
+            if found.get(module) != len(shapes)
+        }
+        assert not miscounted, (
+            f"call-site count disagrees with claimed shapes {miscounted} "
+            "(module: found_in_src, shapes_claimed); a consumer was added or "
+            "removed inside a module that still has others, which no key-set "
+            "comparison can see"
+        )
+
+        uncovered = sorted(
+            {shape for shapes in _CONSUMER_TO_SHAPES.values() for shape in shapes} - set(_SHAPE_IDS)
+        )
         assert not uncovered, f"mapped shape ids {uncovered} are not in _SHAPES"
 
 

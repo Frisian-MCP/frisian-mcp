@@ -724,6 +724,56 @@ class TestUnknownToolHintAxis:
         assert "Did you mean resource='item'?" in message
         assert "action=" not in message
 
+    def test_multi_word_resource_still_suggests_on_the_action_axis(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        A multi-word resource must reach the action axis (CodeRabbit).
+
+        The hint vocabulary was built with ``split(sep, 1)[0]``, which reduces
+        ``location_type_list`` to ``location``.  Intersected against a configured
+        prefix set naming ``location_type``, that emptied — so a multi-word
+        resource had no visible prefix, could not enter the action branch, and
+        the caller got a bare "Unknown tool" with no guidance on either axis.
+
+        Parsing with ``_parse_tool_name`` makes the hint vocabulary the same one
+        the routing path uses, so the two cannot disagree about where a name
+        divides.
+        """
+        reg = ToolRegistry()
+        members = {"location_type_list", "location_type_retrieve"}
+        for name in members:
+            reg.register(name, lambda a, r: {}, "stub", {"type": "object"}, permission_tier="read")
+        invoke = make_group_invoke("dcim", frozenset(members), reg, frozenset({"location_type"}))
+        with pytest.raises(LookupError) as excinfo:
+            invoke(
+                {"resource": "location_type", "action": "lst", "params": {}},
+                _request(rf, permission="read"),
+            )
+        assert "Did you mean action='list'?" in str(excinfo.value)
+
+    def test_multi_word_resource_still_suggests_on_the_resource_axis(
+        self, rf: RequestFactory
+    ) -> None:
+        """The resource axis must name the full multi-word resource, not a fragment."""
+        reg = ToolRegistry()
+        reg.register(
+            "location_type_list",
+            lambda a, r: {},
+            "stub",
+            {"type": "object"},
+            permission_tier="read",
+        )
+        invoke = make_group_invoke(
+            "dcim", frozenset({"location_type_list"}), reg, frozenset({"location_type"})
+        )
+        with pytest.raises(LookupError) as excinfo:
+            invoke(
+                {"resource": "location_typ", "action": "list", "params": {}},
+                _request(rf, permission="read"),
+            )
+        assert "Did you mean resource='location_type'?" in str(excinfo.value)
+
     def test_action_candidates_are_tier_filtered(self, rf: RequestFactory) -> None:
         """An above-ceiling action is never named back as a suggestion."""
         message = self._call(self._registry(), self._capped(rf), "item", "creat")

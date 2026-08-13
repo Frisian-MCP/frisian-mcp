@@ -407,7 +407,18 @@ def make_group_invoke(  # pylint: disable=too-many-locals
 
                 visible_names = frozenset(name for name in tool_names if _is_visible(name))
 
-            visible_prefixes = {t.split(sep, 1)[0] for t in visible_names}
+            # Parse with the prefix-aware splitter, not ``split(sep, 1)``.  A
+            # naive split reduces ``location_type_list`` to ``location``, which
+            # then intersects to nothing against a configured prefix set naming
+            # ``location_type`` — so a multi-word resource had no visible prefix,
+            # could not enter the action branch, and produced no hint at all on
+            # either axis.  ``_parse_tool_name`` is the same helper the routing
+            # path uses, so the hint vocabulary and the routing vocabulary
+            # cannot disagree about where a name divides.
+            _parsed = (
+                (name, _parse_tool_name(name, sep, resource_prefixes)) for name in visible_names
+            )
+            visible_prefixes = {parsed[0] for _name, parsed in _parsed if parsed is not None}
             if resource_prefixes is not None:
                 # Configured prefixes are the display vocabulary, but only those
                 # still backed by a visible member may be named.
@@ -421,9 +432,15 @@ def make_group_invoke(  # pylint: disable=too-many-locals
             # answer to resource='item', action='lst'.  Pick the axis the caller
             # actually missed.
             if resource in visible_prefixes:
-                prefix = f"{resource}{sep}"
+                # Action candidates come from the same parse, so a multi-word
+                # resource yields its real actions rather than a suffix that
+                # still carries part of the resource name.
                 candidates = sorted(
-                    name[len(prefix) :] for name in visible_names if name.startswith(prefix)
+                    parsed[1]
+                    for parsed in (
+                        _parse_tool_name(name, sep, resource_prefixes) for name in visible_names
+                    )
+                    if parsed is not None and parsed[0] == resource
                 )
                 matches = difflib.get_close_matches(action, candidates, n=1)
                 hint = f" Did you mean action={matches[0]!r}?" if matches else ""
