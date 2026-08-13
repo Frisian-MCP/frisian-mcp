@@ -18,21 +18,22 @@ from django.core.checks import Error
 from django.test import modify_settings, override_settings
 
 from frisian_mcp.checks import (
-    W016_HEAVY_CACHE_NOT_ISOLATED,
-    check_heavy_cache_isolation,
     E007_INVALID_UNAUTHENTICATED_TIER,
     E008_DISPATCHER_WITHOUT_MEMBERSHIP,
+    E009_HEAVY_CACHE_ALIAS_MISSING,
     W001_NO_PERMISSION_CLASSES,
     W002_PLAINTEXT_API_KEYS,
     W003_PRIVILEGED_SERVICE_ACCOUNT,
     W012_OAUTH_DISCOVERY_HIDDEN,
     W013_MALFORMED_RATE_LIMIT,
+    W016_HEAVY_CACHE_NOT_ISOLATED,
     check_api_keys_are_hashed,
+    check_dispatcher_membership,
+    check_heavy_cache_isolation,
     check_oauth_discovery_not_hidden,
     check_oauth_token_rate_limit_format,
     check_permission_classes_in_production,
     check_service_account_user,
-    check_dispatcher_membership,
     check_unauthenticated_tier_value,
 )
 
@@ -407,8 +408,7 @@ class TestMalformedRateLimit:
 
 class TestUnauthenticatedTierCheck:
     """
-    The runtime already denies on an unrecognised value; this check is for the
-    operator.
+    This check is for the operator; the runtime already denies.
 
     Denying silently is its own trap: a host that meant ``read_write`` and typed
     ``readwrite`` would lose anonymous access with nothing explaining why.  The
@@ -538,9 +538,11 @@ class TestDispatcherMembershipCheck:
 
     def test_class_dispatcher_never_fires(self) -> None:
         """
-        ⚠️ The blast-radius guard. A ``@mcp_dispatcher`` class legitimately has
-        no membership set — its actions are methods, not registry entries — so
-        firing on it would break startup for every correctly-configured host.
+        ⚠️ The blast-radius guard: a class dispatcher must never fire.
+
+        A ``@mcp_dispatcher`` class legitimately has no membership set — its
+        actions are methods, not registry entries — so firing on it would break
+        startup for every correctly-configured host.
 
         The two kinds are mutually exclusive at registration: ``decorators.py``
         sets ``dispatcher_meta`` and never ``group_tool_names``; ``apps.py``
@@ -676,3 +678,51 @@ class TestW016HeavyCacheIsolation:
         from django.core.checks import registry as checks_registry
 
         assert any(c is check_heavy_cache_isolation for c in checks_registry.registry.get_checks())
+
+
+class TestE009HeavyCacheAliasMissing:
+    """
+    H19: an alias naming no configured cache is the case where silence is wrong.
+
+    Every other branch of :func:`check_heavy_cache_isolation` falls through
+    quietly for it — ``CACHES.get(alias)`` is ``None``, so the LOCATION
+    comparison never fires and the check reports clean while the runtime has
+    dropped continuation state back into the cache holding OAuth codes.  The
+    operator reads that silence as confirmation.
+    """
+
+    def _run(self, settings: Any, alias: str) -> list[Any]:
+        settings.FRISIAN_MCP_HEAVY_CACHE_ALIAS = alias
+        settings.CACHES = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "default-loc",
+            },
+            "heavy_continuation": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "heavy-loc",
+            },
+        }
+        return check_heavy_cache_isolation()
+
+    def test_a_typod_alias_is_an_error_not_silence(self, settings: Any) -> None:
+        """The named missing case: a configured alias that ``CACHES`` does not define."""
+        results = self._run(settings, "heavy_continuations")
+
+        assert len(results) == 1
+        assert results[0].id == E009_HEAVY_CACHE_ALIAS_MISSING
+        assert isinstance(results[0], Error), (
+            "Warning is the wrong level here: the Warning rationale is that the "
+            "unseparated arrangement predates the setting, which a typo cannot"
+        )
+
+    def test_the_error_names_the_alias_the_operator_wrote(self, settings: Any) -> None:
+        """An operator scanning startup output must see their own typo, not a generic line."""
+        results = self._run(settings, "hevy")
+
+        assert "'hevy'" in results[0].msg
+        assert "hevy" in results[0].hint
+
+    def test_a_correctly_spelled_alias_is_silent(self, settings: Any) -> None:
+        """The control — E009 must not fire on the arrangement it is asking for."""
+        assert self._run(settings, "heavy_continuation") == []

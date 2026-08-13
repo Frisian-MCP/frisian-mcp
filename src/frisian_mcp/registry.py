@@ -368,7 +368,7 @@ def shape_tools_listing(  # pylint: disable=too-many-branches
     action_filter_factory: Callable[[Any], Callable[[str, Any], bool] | None] | None,
 ) -> list[dict[str, Any]]:
     """
-    Shape *entries* into MCP ``tools/list`` format.  **The only implementation.**
+    Shape *entries* into MCP ``tools/list`` format — the only implementation.
 
     Both listing paths call this: :meth:`ToolRegistry.list_tools` over the whole
     registry, and ``route_views._list_entries`` over one route's already

@@ -79,10 +79,10 @@ from rest_framework.permissions import (
 
 from frisian_mcp.registry import (
     _TIER_RANK,
-    _caller_rank,
-    shape_tools_listing,
     ToolNotFoundError,
+    _caller_rank,
     _normalize_argument_keys,
+    shape_tools_listing,
     tool_registry,
 )
 from frisian_mcp.route_config import RouteConfig, parse_route_configs

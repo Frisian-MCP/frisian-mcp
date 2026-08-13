@@ -112,6 +112,18 @@ Registered checks
     strings and still share that instance's memory.  The requirement is an
     independent eviction *budget*, which settings alone cannot express.
 
+``frisian_mcp.E009``
+    Errors when ``FRISIAN_MCP_HEAVY_CACHE_ALIAS`` names no cache in ``CACHES``.
+    An ``Error`` rather than a ``Warning`` because the W016 rationale — the
+    unseparated arrangement is what every host ran before the setting existed —
+    cannot apply to a name that resolves to nothing: a typo has no
+    previously-working deployment to break.  It is also the one case where this
+    module's silence would be *wrong* rather than merely unproven, since every
+    other branch falls through when the alias is absent.  Note it is not
+    sufficient on its own: ``get_wsgi_application()`` does not run system
+    checks, so a gunicorn/uWSGI boot never executes this; the runtime disables
+    negotiation instead of relocating continuation state.
+
 Per-route configuration checks (``E004``, ``E005``, ``E1xx``, ``E2xx``,
 ``W004``–``W007``) live in :mod:`frisian_mcp.route_audit` and are registered
 from there.  They are config-only: the tool registry is empty while system
@@ -139,9 +151,9 @@ from django.core.checks import (  # pylint: disable=redefined-builtin
 )
 
 from frisian_mcp.registry import (
+    _VALID_PERMISSION_TIERS,
     DENY_TIER,
     UNAUTH_TIER_INVALID,
-    _VALID_PERMISSION_TIERS,
     classify_unauthenticated_tier,
     tool_registry,
 )
@@ -161,6 +173,7 @@ W013_MALFORMED_RATE_LIMIT = "frisian_mcp.W013"
 W014_INVALID_USAGE_POLICY = "frisian_mcp.W014"
 W015_INDETERMINATE_CAPABILITY = "frisian_mcp.W015"
 W016_HEAVY_CACHE_NOT_ISOLATED = "frisian_mcp.W016"
+E009_HEAVY_CACHE_ALIAS_MISSING = "frisian_mcp.E009"
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -709,7 +722,7 @@ def check_usage_reporting_policy_value(  # pylint: disable=unused-argument
 def check_heavy_cache_isolation(  # pylint: disable=unused-argument
     app_configs: Any = None,  # noqa: ARG001
     **kwargs: Any,  # noqa: ARG001
-) -> list[Warning]:
+) -> list[Error | Warning]:
     """
     H6: continuation state must not share an eviction domain with security state.
 
@@ -762,6 +775,36 @@ def check_heavy_cache_isolation(  # pylint: disable=unused-argument
         ]
 
     caches_setting = getattr(settings, "CACHES", {}) or {}
+
+    # An alias that names no configured cache is the one case where silence is
+    # not merely unproven but *wrong*.  The operator asked for isolation, the
+    # runtime cannot honour it, and every other branch of this check would fall
+    # through quietly: ``caches_setting.get(alias)`` is ``None``, so the
+    # LOCATION comparison below is skipped and the check reports clean.
+    #
+    # Error rather than Warning, deliberately.  The Warning rationale for the
+    # branches above is that the unseparated arrangement *is what every host ran
+    # before this setting existed*, so failing startup would break upgrades that
+    # are no worse off than they were.  That reasoning does not reach a typo:
+    # the setting is new, so a name that resolves to nothing cannot be
+    # pre-existing behaviour, and there is no deployment this breaks that was
+    # previously working as configured.  Operators who genuinely want it silenced
+    # have SILENCED_SYSTEM_CHECKS, which is the informed opt-out.
+    if alias not in caches_setting:
+        return [
+            Error(
+                f"FRISIAN_MCP_HEAVY_CACHE_ALIAS={alias!r} does not name any cache in "
+                "CACHES, so continuation state falls back to 'default' — the shared "
+                "eviction domain this setting exists to leave. The isolation control "
+                "reads as configured while doing nothing.",
+                hint=(
+                    f"Add a {alias!r} entry to CACHES, or correct the alias to match an "
+                    "existing one. " + hint
+                ),
+                id=E009_HEAVY_CACHE_ALIAS_MISSING,
+            )
+        ]
+
     heavy_location = (caches_setting.get(alias) or {}).get("LOCATION")
     default_location = (caches_setting.get(DEFAULT_CACHE_ALIAS) or {}).get("LOCATION")
     if heavy_location is not None and heavy_location == default_location:

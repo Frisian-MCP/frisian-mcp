@@ -21,7 +21,6 @@ from django.test import RequestFactory
 
 from frisian_mcp.route_views import RouteView
 from frisian_mcp.views import _build_heavy_cache_entry, _redemption_target_authorized
-
 from tests.test_route_views import _cfg, _make_registry
 
 
@@ -38,6 +37,7 @@ class TestGroupedMembershipIsRouteScoped:
     """§4: the child is checked against *this* route's pruned membership."""
 
     def test_member_of_an_intact_group_is_authorized(self) -> None:
+        """A child of a fully-allowed group is authorized on that route."""
         reg = _make_registry()
         view = RouteView.build(reg, _cfg(allow=("*",)))
         assert _redemption_target_authorized(_request(view), "catalog", "order_list") is True
@@ -53,6 +53,7 @@ class TestGroupedMembershipIsRouteScoped:
         assert _redemption_target_authorized(req, "catalog", "item_list") is True
 
     def test_outer_dispatcher_absent_from_this_route_is_refused(self) -> None:
+        """An outer dispatcher not mounted on this route is refused."""
         reg = _make_registry()
         view = RouteView.build(reg, _cfg(allow=("ping",)))
         assert _redemption_target_authorized(_request(view), "catalog", "item_list") is False
@@ -74,6 +75,7 @@ class TestCeilingComparisonWouldNotCatchThis:
     """
 
     def test_same_ceiling_different_surface(self) -> None:
+        """Two routes sharing a tier ceiling can expose different resources."""
         reg = _make_registry()
         minted_on = RouteView.build(reg, _cfg("wide", allow=("*",), highest_tier="read_write"))
         redeemed_on = RouteView.build(
@@ -90,12 +92,15 @@ class TestCeilingComparisonWouldNotCatchThis:
 
 class TestTierIsTheChildsNotTheDispatchers:
     """
-    §4: dispatchers register as ``read`` so they stay visible as navigation
+    §4: the child's tier gates redemption, not the dispatcher's.
+
+    Dispatchers register as ``read`` so they stay visible as navigation
     entry-points.  Reading the tier off the *outer* entry would therefore
     authorize a write-tier child for a read-tier caller.
     """
 
     def test_read_caller_cannot_redeem_a_write_tier_child(self) -> None:
+        """The child's own tier gates redemption, not the dispatcher's."""
         reg = _make_registry()
         view = RouteView.build(reg, _cfg(allow=("*",)))
         assert reg.get_entry("catalog").permission_tier == "read"  # the outer says read
@@ -107,6 +112,7 @@ class TestTierIsTheChildsNotTheDispatchers:
         )
 
     def test_write_caller_can(self) -> None:
+        """A read_write caller may redeem a write-tier child."""
         reg = _make_registry()
         view = RouteView.build(reg, _cfg(allow=("*",)))
         assert (
@@ -118,10 +124,24 @@ class TestTierIsTheChildsNotTheDispatchers:
 
 
 class TestCapabilityFilterIsApplied:
-    """§4: the same per-user entry filter ``tools/list`` uses under
-    ``PERMISSION_AWARE_DISCOVERY``."""
+    """
+    §4: the same per-user entry filter ``tools/list`` uses.
+
+    ⚠️ **Helper-level only — this class is not evidence that the capability
+    lens runs.**  It assigns ``_mcp_perm_entry_filter`` itself, so it proves
+    the helper refuses *given* a filter and nothing about whether the request
+    lifecycle supplies one.  It did not: the branch ran before the permission
+    context was resolved, and this class passed throughout, including under
+    mutation.  See H17.
+
+    The production claim is asserted in
+    ``tests/test_adr011_capability_reauthorization.py``, which sets no private
+    request state.  Keep both — but read that file, not this one, when asking
+    whether the control is live.
+    """
 
     def test_entry_filter_can_refuse(self) -> None:
+        """The per-user entry filter refuses a child the caller cannot see."""
         reg = _make_registry()
         view = RouteView.build(reg, _cfg(allow=("*",)))
         req = _request(view)
@@ -135,6 +155,7 @@ class TestSection5EntryShape:
     """§5: the entry records the server-resolved child, not only the outer name."""
 
     def test_resolved_target_is_recorded_when_supplied(self) -> None:
+        """§5: the server-resolved child target is retained on the entry."""
         entry = _build_heavy_cache_entry({"d": 1}, _request(None), "catalog", "order_list")
         assert entry["resolved_target"] == "order_list"
         # The owner key still binds the OUTER name (G1) — §5 is a third fact,
@@ -142,5 +163,6 @@ class TestSection5EntryShape:
         assert entry["tool_name"] == "catalog"
 
     def test_flat_calls_default_to_the_tool_itself(self) -> None:
+        """§5: a flat call records the tool itself as the resolved target."""
         entry = _build_heavy_cache_entry({"d": 1}, _request(None), "ping")
         assert entry["resolved_target"] == "ping"

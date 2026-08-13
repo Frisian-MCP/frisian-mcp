@@ -6,12 +6,14 @@ import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import jsonschema
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
 from frisian_mcp.decorators import _merge_negotiation_schema, mcp_heavy
+from frisian_mcp.negotiation import schema_discloses_continuation
 from frisian_mcp.registry import ToolInputError, ToolRegistry
 from frisian_mcp.views import (
     McpView,
@@ -93,15 +95,30 @@ class TestMergeNegotiationSchema:
         base: dict[str, Any] = {"type": "string"}
         assert _merge_negotiation_schema(base) is base
 
-    def test_removes_additional_properties_false(self) -> None:
-        """additionalProperties: false is removed to allow negotiation fields."""
+    def test_preserves_additional_properties_false(self) -> None:
+        """
+        H20 INVERTED: ``additionalProperties: false`` is now PRESERVED.
+
+        This asserted the opposite, on the rationale that the restriction "is
+        removed to allow negotiation fields".  The premise was wrong: this merge
+        declares the five fields in the **same** ``properties`` object that
+        ``additionalProperties`` is evaluated against, so they are permitted by
+        construction and nothing needed removing.
+
+        Deleting it was a real weakening, not a formality — ``dispatch``
+        validates against the published schema, and ``@mcp_heavy`` carries the
+        *host's* ``input_schema``, so a host that asked for strictness lost it.
+        """
         base = {
             "type": "object",
             "properties": {},
             "additionalProperties": False,
         }
         merged = _merge_negotiation_schema(base)
-        assert "additionalProperties" not in merged
+        assert merged["additionalProperties"] is False
+        # ...and the negotiation fields are still reachable alongside it.
+        assert "continuation_token" in merged["properties"]
+        assert "mode" in merged["properties"]
 
     def test_preserves_required_array(self) -> None:
         """Required array from original schema is preserved unchanged."""
@@ -1412,3 +1429,81 @@ class TestIssue53AcceptanceMatrix:
             result = _tool_result(_view(redeem_req))
 
         assert result == stored
+
+
+class TestHeavyClosedSchemaKeepsItsStrictness:
+    """
+    H20: ``@mcp_heavy`` carries the HOST's schema, so its strictness is theirs.
+
+    H18 fixed ``merge_continuation_branch`` and left this site, on the argument
+    that ``_merge_negotiation_schema`` applies to *"argument shapes that are
+    ours"*.  Only half true: ``@mcp_dispatcher`` and the group builder produce
+    ours, but a host applies ``@mcp_heavy`` to its own tool with its own
+    ``input_schema``.  Same consent problem, same runtime effect, different
+    decorator — the consumer-enumeration lesson recurring inside the fix for it.
+
+    Unlike the conditional branch, nothing had to be given up here: the flat
+    merge declares its fields in the same object ``additionalProperties`` is
+    evaluated against, so strictness and negotiation coexist.
+    """
+
+    CLOSED: dict[str, Any] = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "additionalProperties": False,
+    }
+
+    def _registry(self) -> ToolRegistry:
+        reg = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_heavy(
+                name="item_search",
+                description="host-authored closed schema",
+                input_schema=dict(self.CLOSED),
+            )
+            def _fn(arguments: dict[str, Any], _request: Any) -> Any:
+                return {"got": sorted(arguments)}
+
+            _ = _fn
+        return reg
+
+    def test_published_schema_stays_closed(self) -> None:
+        """The host's restriction survives registration."""
+        entry = self._registry().get_entry("item_search")
+        assert entry is not None
+        assert entry.input_schema.get("additionalProperties") is False
+
+    def test_unknown_field_still_rejected_on_call_one(self) -> None:
+        """
+        Asserted at ``dispatch`` — where the weakening actually bit.
+
+        A schema-shape assertion alone would not have caught the consequence.
+        """
+        reg = self._registry()
+        request = RequestFactory().post("/mcp/")
+        request.user = AnonymousUser()
+
+        with pytest.raises(ToolInputError) as exc:
+            reg.dispatch(request, "item_search", {"q": "x", "unexpected_field": "smuggled"})
+        assert "unexpected_field" in str(exc.value)
+
+        # The host's own field still works — strictness, not breakage.
+        assert reg.dispatch(request, "item_search", {"q": "x"}) == {"got": ["q"]}
+
+    def test_negotiation_still_reachable_on_a_closed_schema(self) -> None:
+        """
+        And unlike the conditional-branch case, the tool still negotiates.
+
+        Preserving the restriction cost nothing here, so a heavy tool with a
+        closed schema keeps both its strictness and its continuation call.
+        """
+        entry = self._registry().get_entry("item_search")
+        assert entry is not None
+        assert schema_discloses_continuation(entry.input_schema) is True
+
+        # A continuation-shaped call validates against the published schema,
+        # even though that schema still rejects everything undeclared.
+        validator = jsonschema.Draft7Validator(entry.input_schema)
+        assert not list(validator.iter_errors({"continuation_token": "t", "mode": "full"}))
+        assert list(validator.iter_errors({"continuation_token": "t", "smuggled": 1}))

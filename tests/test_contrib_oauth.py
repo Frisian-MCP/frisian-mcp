@@ -2540,11 +2540,9 @@ class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-met
         a per-test reset, an earlier test that hit either branch would
         suppress the log this class expects to capture.
         """
-        from frisian_mcp.contrib.oauth import (
-            authentication as oauth_authn,  # pylint: disable=import-outside-toplevel
-        )
-        from frisian_mcp.contrib.oauth import (
-            views as oauth_views,  # pylint: disable=import-outside-toplevel
+        from frisian_mcp.contrib.oauth import (  # pylint: disable=import-outside-toplevel
+            authentication as oauth_authn,
+            views as oauth_views,
         )
         from frisian_mcp.contrib.oauth._consent_gate import (  # pylint: disable=import-outside-toplevel
             LOGGED_PRIOR_CONSENT_APPROVALS,

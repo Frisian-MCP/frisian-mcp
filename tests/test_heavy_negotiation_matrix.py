@@ -1403,8 +1403,10 @@ class TestBackstopMintsOnUndisclosedShapes:
 
     def test_host_field_collision_still_leaves_the_token_redeemable(self) -> None:
         """
-        KNOWN LIMIT, pinned deliberately: a host field named ``mode`` narrows
-        mode *selection* but never makes the token unredeemable.
+        KNOWN LIMIT, pinned deliberately: selection narrows, redemption survives.
+
+        A host field named ``mode`` narrows mode *selection* but never makes the
+        token unredeemable.
 
         ``mode``/``page``/``page_size``/``filter_keys`` can be genuine host
         field names, which is why they are declared in the conditional branch
@@ -1574,6 +1576,7 @@ class TestAdr011ResolvedTarget:
         """The backstop is the only mint path reachable on the group shape."""
 
     def test_group_mint_records_the_child_not_the_dispatcher(self, rf: RequestFactory) -> None:
+        """§5: a grouped mint retains the server-resolved child, not the outer name."""
         reg = ToolRegistry()
         name = _build_group_dispatcher(reg)
         with (
@@ -1605,6 +1608,7 @@ class TestAdr011ResolvedTarget:
         assert entry["resolved_target"] == "container_list"
 
     def test_flat_mint_records_itself(self, rf: RequestFactory) -> None:
+        """§5: a flat mint records the tool itself as the resolved target."""
         reg = ToolRegistry()
         name = _build_flat_heavy(reg)
         with (
@@ -1616,3 +1620,80 @@ class TestAdr011ResolvedTarget:
             entry = _minted_entry(cache)
 
         assert entry["resolved_target"] == name
+
+
+class TestH19MissingAliasDisablesNegotiation:
+    """
+    H19: a misconfigured alias must not silently relocate continuation state.
+
+    The check (E009) catches this at ``manage.py check`` / ``migrate`` time.  It
+    cannot be the only defence: ``get_wsgi_application()`` calls ``django.setup()``
+    and **not** the system-check framework, so a gunicorn/uWSGI process starts
+    without ever running it.  These assert the runtime behaviour that holds when
+    the check never executed.
+
+    Asserted on **where the bytes went**, not on the return value alone — the
+    exposure is continuation state landing in the cache that holds OAuth codes
+    and the brute-force counter, so that is the thing to measure.
+    """
+
+    @pytest.fixture()
+    def broken_alias(self, settings: Any) -> None:
+        """Point the heavy alias at a cache that ``CACHES`` does not define."""
+        settings.FRISIAN_MCP_HEAVY_CACHE_ALIAS = "does_not_exist"
+        settings.FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = _THRESHOLD
+
+    def test_nothing_is_written_to_the_default_cache(
+        self, rf: RequestFactory, broken_alias: None
+    ) -> None:
+        """The security property: the OAuth cache gains nothing from a heavy read."""
+        reg = ToolRegistry()
+        name = _build_flat_heavy(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as default_cache,
+        ):
+            default_cache.get.return_value = None
+            _call(rf, name, {})
+
+        assert not default_cache.set.called, (
+            "continuation state was written to the default cache after the "
+            "configured alias failed to resolve — the isolation setting reads as "
+            "on while the exposure it removes is back"
+        )
+
+    def test_the_caller_gets_the_whole_response_not_a_dead_token(
+        self, rf: RequestFactory, broken_alias: None
+    ) -> None:
+        """
+        Negotiation is unavailable, not broken.
+
+        Minting a token that was never stored would hand back a continuation no
+        redemption can satisfy — the unredeemable-token shape this project has
+        already paid for once.
+        """
+        reg = ToolRegistry()
+        name = _build_flat_heavy(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as default_cache,
+        ):
+            default_cache.get.return_value = None
+            served = _result(_call(rf, name, {}))
+
+        assert "continuation_token" not in served
+        assert served == _PAYLOAD
+
+    def test_a_working_alias_still_negotiates(self, rf: RequestFactory, settings: Any) -> None:
+        """The control — the guard must not disable negotiation for everyone."""
+        settings.FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = _THRESHOLD
+        reg = ToolRegistry()
+        name = _build_flat_heavy(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            probe = _result(_call(rf, name, {}))
+
+        assert "continuation_token" in probe

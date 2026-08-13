@@ -155,10 +155,39 @@ def merge_continuation_branch(base: dict[str, Any]) -> dict[str, Any]:
     Idempotent: a schema that already discloses is returned unchanged, so this
     can be applied on a registration path without checking whether some other
     path got there first.
+
+    **A closed schema is returned unchanged and therefore never negotiates.**
+    See below — that is a deliberate refusal, not an oversight.
     """
     if base.get("type") != "object":
         return base
     if schema_discloses_continuation(base):
+        return base
+    # H18: a schema declaring ``"additionalProperties": false`` is left ALONE.
+    #
+    # This previously deleted that restriction so the four branch fields would
+    # validate.  ``ToolRegistry.dispatch`` validates every call against the
+    # published schema, so deleting it was not a `tools/list` presentation
+    # change — it silently converted the host's "reject unknown fields" into
+    # the JSON-Schema default of accepting them, at runtime, on an ordinary
+    # first call.  Applied automatically to arbitrary host schemas by
+    # ``@mcp_tool``, that is a contract change no host asked for, and it broke
+    # this function's own promise that a first call "validates exactly as it
+    # did before".
+    #
+    # There is no safe in-place transformation.  JSON Schema evaluates
+    # ``additionalProperties`` against ``properties`` in the SAME schema
+    # object, so a field declared in an ``allOf`` branch is still "additional"
+    # to the root and gets rejected; and hoisting the four protocol fields to
+    # the root would widen the very signature the closed schema exists to pin.
+    #
+    # So the tool simply does not disclose.  Because negotiation eligibility is
+    # DERIVED from the published schema rather than recorded beside it, not
+    # disclosing means not minting — the caller is never handed a token their
+    # schema forbids them to return.  The cost is that an over-threshold
+    # response from such a tool is returned whole; the alternative was
+    # weakening validation for every host that asked for strictness.
+    if base.get("additionalProperties") is False:
         return base
 
     merged: dict[str, Any] = {**base}
@@ -166,14 +195,6 @@ def merge_continuation_branch(base: dict[str, Any]) -> dict[str, Any]:
         **base.get("properties", {}),
         NEGOTIATION_PROTOCOL_ONLY_KEY: _NEGOTIATION_PROPERTIES[NEGOTIATION_PROTOCOL_ONLY_KEY],
     }
-    # A closed schema cannot express a continuation call at all: the four
-    # branch fields would be rejected as additional properties, leaving a token
-    # that is minted and unredeemable — the defect this function exists to
-    # prevent.  The alternative, leaving it closed and refusing to negotiate,
-    # hands back the unbounded payload the backstop was added to stop.  Opening
-    # it is the same trade `_merge_negotiation_schema` already makes.
-    if merged.get("additionalProperties") is False:
-        del merged["additionalProperties"]
     merged["allOf"] = [
         *base.get("allOf", []),
         {
@@ -195,13 +216,33 @@ def _merge_negotiation_schema(base: dict[str, Any]) -> dict[str, Any]:
     Merge the response-negotiation protocol fields into *base* input schema.
 
     Only modifies schemas with ``"type": "object"``; returns *base* unchanged
-    otherwise.  Removes ``"additionalProperties": false`` if present, since the
-    merged negotiation fields would violate it.
+    otherwise.
+
+    **``"additionalProperties": false`` is preserved.**  This used to delete it,
+    on the stated grounds that *"the merged negotiation fields would violate
+    it"*.  They do not: this merge declares all five fields in the **same**
+    ``properties`` object that ``additionalProperties`` is evaluated against, so
+    they are permitted by construction and every *other* unknown field stays
+    rejected.  The deletion was unnecessary, and it silently converted a host's
+    "reject unknown fields" into the JSON-Schema default of accepting them —
+    at runtime, since ``ToolRegistry.dispatch`` validates against the published
+    schema (H18/H20).
+
+    That mattered because this merge does not only see schemas the package
+    generates.  ``@mcp_dispatcher`` and the group builder produce ours, but
+    **``@mcp_heavy`` carries the host's own ``input_schema``** — so a host could
+    write ``additionalProperties: false`` on a heavy tool and have it removed.
+    Package-generated schemas never set it, so preserving it costs them
+    nothing.
+
+    Contrast :func:`merge_continuation_branch`, which cannot keep a closed
+    schema and therefore declines to transform one at all: its four conditional
+    fields live in an ``allOf`` sub-schema and remain "additional" to the root
+    no matter what.  The difference is placement, not policy — neither may
+    weaken a contract the host declared.
     """
     if base.get("type") != "object":
         return base
     merged: dict[str, Any] = {**base}
     merged["properties"] = {**base.get("properties", {}), **_NEGOTIATION_PROPERTIES}
-    if merged.get("additionalProperties") is False:
-        del merged["additionalProperties"]
     return merged

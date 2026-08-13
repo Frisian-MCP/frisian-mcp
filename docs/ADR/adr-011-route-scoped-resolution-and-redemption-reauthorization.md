@@ -18,13 +18,14 @@ cache-layer section exists to correct.
 | Decision | Status |
 |---|---|
 | §3 Route-scoped resolution of caller-derived names | **Shipped** (membership gate; verified live, §7.2) |
-| §4 Re-authorization at redemption | **Shipped** (§7.4 — synthetic + mutation evidence; live verification deferred, §7.5) |
-| §5 Grouped entries retain the server-resolved child | **Shipped** (§7.4) |
+| §4 Re-authorization at redemption | **Shipped** — mutation-verified (§7.4) and **verified live** on a two-mount topology (§7.5) |
+| §5 Grouped entries retain the server-resolved child | **Shipped** (§7.4); exercised live via the backstop mint in §7.5 |
 | §6 Route identity stays out of the owner key | **Shipped** (by construction — it was never in it) |
 | §6 Refusal reuses the existing outcome | **Shipped** for §3 and §4 |
 
-**One caveat travels with §4 and §5:** they are shipped and covered, but their
-live verification is an open exception (§7.5), not a completed step.
+**One gap remains open, and it is not §4 or §5:** the class-dispatcher variant
+of §3 has never been verified live, across three projects (§7.3). §7.5 — once
+an exception on this ADR — has been discharged.
 
 ## 1. Context
 
@@ -97,6 +98,13 @@ cross-route service it was built to refuse.
 > redemption still short-circuits ahead of re-dispatch. The claim in the
 > paragraph above is executable, not rhetorical: a ceiling-only implementation
 > is a mutant that the suite kills (§7.4).
+>
+> ⚠️ **Amended (§7.6).** As first shipped, the capability dimension of this
+> list was **inert on every real redemption** — the branch ran before the
+> request's permission context was resolved, so the lens was read as absent and
+> skipped. It was covered only by a test that assigned that context itself.
+> Both are fixed; the episode is recorded in §7.6 because the failure was in
+> how the claim was *verified*, not in what it says.
 
 ## 5. Grouped-call entries retain the server-resolved child target
 
@@ -113,7 +121,11 @@ field are treated as unauthorizable and fall to §6's refusal, consistent with
 the pre-SEC-3 legacy-entry handling already in the redemption path.
 
 > **Status: shipped.** `_build_heavy_cache_entry()` records `resolved_target`
-> at all four mint sites. Note which path mattered most: the
+> at all four mint sites, and `resolved_action` for **class** dispatchers —
+> which resolve no child at all, so containment alone would re-authorize the
+> navigation entry-point rather than the thing that produced the payload. The
+> action is taken from the mint, never from the redemption call's own
+> arguments, which are caller-supplied. Note which path mattered most: the
 > `AUTO_NEGOTIATE_THRESHOLD` backstop is the *only* mint path currently
 > reachable on the dispatcher shapes, so had that one site kept binding the
 > outer name, §4 would have been vacuous for every grouped token in practice
@@ -178,6 +190,27 @@ synthetically only.
 
 This is recorded as an exception rather than omitted, per the rule in §7. It is
 the same gap that let the original defect ship, and it remains open.
+
+**A harness now exists, and a probe was run — it does not discharge this.** A
+class dispatcher (`action` + `params`, no `resource`) and a flat `@mcp_heavy`
+tool were mounted on an open route alongside the §7.5 topology, and an injected
+top-level `resource` produced a response indistinguishable from both the
+baseline and a nonexistent-resource control, with no forced probe envelope and
+no extra token. That is the *expected* result.
+
+It is recorded as **encouraging, not sufficient**, for the reason §7.1 gives:
+
+> the same observation — byte-identical to baseline — is produced both by the
+> gate working and by a schema-validating client silently nesting `resource`
+> under `params`, where it never reaches the code path at all.
+
+The operator who ran it said the raw-client confirmation was still outstanding,
+and no raw JSON-RPC matrix has been reported against it. **A pass and a
+false-negative look the same here**, which is precisely why this gap has
+survived three projects. What discharges it is the same probe driven by a client
+that ignores the published schema, plus a byte-level assertion — and, if cache
+observability allows, confirmation that no entry was minted, since the envelope
+is only the visible half and the mint is the finding.
 
 ### 7.4 Evidence recorded for §4 and §5
 
@@ -259,6 +292,48 @@ reader greps for the right string rather than the one this note quotes.
 **§7.3 is not discharged by any of this** — see below. The two gaps were
 recorded together and only one has closed.
 
+### 7.6 Amendment — the capability dimension shipped inert, and why the evidence missed it
+
+Raised in external review of PR #62 and confirmed here by reproduction.
+
+**What was wrong.** The continuation branch ran *before* the request's
+permission context was resolved. `_redemption_target_authorized()` reads that
+context with a `getattr` default and skips the capability lens when it is
+absent — so on every real redemption the lens was skipped. A continuation
+remained redeemable after the caller's capability was revoked, until TTL,
+whenever owner, tier and route still matched. §4's own list of dimensions was
+therefore describing a control that did not run.
+
+Separately, **class dispatchers recorded no resolvable target**: the resolver
+handles group membership, returns `None` for class dispatchers, and
+`resolved_target` fell back to the dispatcher — which registers as `read` to
+stay visible, so the re-check passed on the navigation entry-point. §5's
+vacuity argument, one shape over.
+
+**Why §7.4's evidence did not catch it.** The capability test assigned
+`_mcp_perm_entry_filter` itself and called the helper directly. It proved the
+helper refuses *given* the filter, never that production supplies one.
+
+> **The mutation testing did not save it either, and this is the part worth
+> keeping.** Mutating the capability check killed that test, so the mutant read
+> as caught while the gate still never ran. **Mutation testing validates the
+> assertion, not the fixture.** If the fixture constructs a state production
+> never supplies, a killed mutant means nothing. §7.4's three killed mutants
+> were real, and were not the proof they appeared to be.
+
+**Standing rule adopted from this.** A test that assigns `request._mcp_*` is
+testing the helper. Only a test that assigns nothing private is testing
+production. Security invariants require the second kind; both may exist, and
+the helper-level file now says so at the top rather than being mistaken for
+evidence again.
+
+**What was verified after the fix**, through `McpView` with no private state
+set: mint → revoke capability → redeem is refused, on both the grouped and the
+class-dispatcher shapes; the retained-capability control still serves on both;
+and an action forged into the redemption call is ignored in favour of the one
+recorded at mint. Three mutants — the ordering restored, the action lens
+bypassed, the action never recorded — are each killed by those lifecycle tests.
+
 ## 8. Side-channel question
 
 Whether route-scoped resolution leaves a **timing or enumeration channel** that
@@ -308,5 +383,6 @@ deliberately unchanged.
   previously short-circuited.
 - §5 changes the cache-entry shape. Entries minted before it are unauthorizable
   and refuse under §6 — correct, and visible as a refusal wave across a deploy.
-- §4 and §5 ship without live verification. That exception, and what would
-  discharge it, is recorded in §7.5 rather than left implicit.
+- §4 costs one route-surface evaluation per redemption, but only after the
+  owner check has already passed — the path still short-circuits ahead of
+  re-dispatch.

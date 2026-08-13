@@ -323,6 +323,14 @@ def mcp_heavy(
         permission_classes: DRF permission classes that guard this tool.
         write: Set ``True`` to assign ``permission_tier="read_write"``.
         admin: Set ``True`` to assign ``permission_tier="admin"``.
+        capability: Django permission string the caller must hold for this tool
+            to appear under ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` (H3).
+            Omitted leaves the tool indeterminate, which fails closed — it is
+            hidden, and ``W015`` names it at startup.
+        universal_discovery: Set ``True`` to declare the tool intentionally
+            visible to every caller, exempting it from capability filtering.
+            Explicit by design: intent must be stated, never inferred from
+            absent metadata.
 
     Returns:
         The original callable, unchanged, registered as a side-effect.

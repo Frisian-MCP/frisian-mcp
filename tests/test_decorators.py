@@ -8,10 +8,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import RequestFactory
 from rest_framework.permissions import IsAuthenticated
 
 from frisian_mcp.decorators import mcp_ignore, mcp_tool
-from frisian_mcp.registry import ToolRegistry, tool_registry
+from frisian_mcp.negotiation import schema_discloses_continuation
+from frisian_mcp.registry import ToolInputError, ToolRegistry, tool_registry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -195,3 +197,78 @@ class TestMcpIgnore:
             """Fn2 placeholder."""
 
         assert _fn2._mcp_ignore is value  # type: ignore[attr-defined]
+
+
+class TestClosedSchemaKeepsItsStrictness:
+    """
+    H18: a host schema declaring ``additionalProperties: false`` stays closed.
+
+    The continuation branch used to delete that restriction so its four fields
+    would validate.  ``ToolRegistry.dispatch`` validates every call against the
+    published schema, so this was never a ``tools/list`` presentation detail —
+    it converted the host's "reject unknown fields" into the JSON-Schema default
+    of accepting them, at runtime, on an ordinary first call, automatically, for
+    any schema passed to ``@mcp_tool``.
+
+    The safe fallback is free because negotiation eligibility is *derived from
+    the published schema*: a tool that does not disclose does not mint, so the
+    caller is never handed a token their own schema forbids them to return.
+    """
+
+    CLOSED: dict[str, Any] = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "additionalProperties": False,
+    }
+
+    def _register(self, schema: dict[str, Any]) -> ToolRegistry:
+        reg = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_tool(name="item_search", description="t", input_schema=deepcopy(schema))
+            def _fn(arguments: dict[str, Any], _request: Any) -> Any:
+                return {"got": sorted(arguments)}
+
+            _ = _fn
+        return reg
+
+    def test_published_schema_stays_closed(self) -> None:
+        """The restriction survives registration."""
+        entry = self._register(self.CLOSED).get_entry("item_search")
+        assert entry is not None
+        assert entry.input_schema.get("additionalProperties") is False
+
+    def test_unknown_field_still_rejected_on_call_one(self) -> None:
+        """
+        The regression this task named, asserted at the layer that enforces it.
+
+        A schema assertion alone would not have caught the original defect's
+        consequence — ``dispatch`` is where the weakening actually bit.
+        """
+        reg = self._register(self.CLOSED)
+        request = RequestFactory().post("/mcp/")
+        request.user = None
+
+        with pytest.raises(ToolInputError) as exc:
+            reg.dispatch(request, "item_search", {"q": "x", "unexpected_field": "smuggled"})
+        assert "unexpected_field" in str(exc.value)
+
+        # The host's own declared field still works — strictness, not breakage.
+        assert reg.dispatch(request, "item_search", {"q": "x"}) == {"got": ["q"]}
+
+    def test_closed_schema_does_not_disclose_and_so_cannot_mint(self) -> None:
+        """
+        The fallback: no safe transformation means no negotiation, not a weakened one.
+
+        Paired with the mint gate, which reads this same predicate, this is what
+        makes refusing to transform safe rather than merely conservative.
+        """
+        entry = self._register(self.CLOSED).get_entry("item_search")
+        assert entry is not None
+        assert schema_discloses_continuation(entry.input_schema) is False
+
+    def test_open_schema_is_unaffected(self) -> None:
+        """The common case still discloses — the fallback must not swallow it."""
+        entry = self._register({"type": "object", "properties": {}}).get_entry("item_search")
+        assert entry is not None
+        assert schema_discloses_continuation(entry.input_schema) is True

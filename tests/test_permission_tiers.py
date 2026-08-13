@@ -12,9 +12,9 @@ from django.test import RequestFactory, override_settings
 
 from frisian_mcp.decorators import mcp_action, mcp_dispatcher, mcp_tool
 from frisian_mcp.registry import (
-    DENY_TIER,
     _TIER_RANK,
     _VALID_PERMISSION_TIERS,
+    DENY_TIER,
     ToolRegistry,
     _apply_max_tier_cap,
     _caller_rank,

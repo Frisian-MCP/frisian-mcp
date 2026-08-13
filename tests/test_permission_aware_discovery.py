@@ -2042,8 +2042,9 @@ class TestH15GroupVisibleToNonSuperuser:
 
     def test_route_path_shows_the_group(self) -> None:
         """
-        ``route_views._list_entries`` — the path that did NOT, and the one a
-        real deployment serves from.
+        ``route_views._list_entries`` — the path a real deployment serves from.
+
+        This is the path that did NOT apply the fail-closed lens.
 
         A group dispatcher carries no ``perm_app_label``, no ``perm_model``, no
         ``capability`` and no ``dispatcher_meta``, so the fail-closed entry

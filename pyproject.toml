@@ -92,6 +92,11 @@ extend-exclude = '''
 profile = "black"
 line_length = 100
 known_first_party = ["frisian_mcp"]
+# Must mirror [tool.ruff.lint.isort].combine-as-imports: CI runs BOTH isort and
+# ruff's I001, and with this unset the two disagree on any module that mixes an
+# aliased import with plain ones (e.g. django.core.cache) — each "fixing" the
+# other's output forever.
+combine_as_imports = true
 # Matches the black exclude above — docs/ is documentation, not source.
 skip_glob = ["docs/**"]
 
@@ -126,6 +131,8 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["frisian_mcp"]
+# Mirrors [tool.isort].combine_as_imports — see the note there.
+combine-as-imports = true
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
