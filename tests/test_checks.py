@@ -37,6 +37,7 @@ from frisian_mcp.checks import (
     check_permission_classes_in_production,
     check_service_account_user,
     check_unauthenticated_tier_value,
+    raise_on_invalid_max_tier,
 )
 
 # ---------------------------------------------------------------------------
@@ -830,3 +831,118 @@ class TestMaxTierValueCheck:
         stamped = McpView()._effective_max_tier()  # noqa: SLF001
         capped = _apply_max_tier_cap("admin", MagicMock(_mcp_max_tier=stamped))
         assert _caller_rank(capped) < _caller_rank("read")
+
+
+# ---------------------------------------------------------------------------
+# E010 boot refusal: a checks.Error alone does not gate a WSGI server
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def fresh_app_config() -> Any:
+    """Yield the live app config with ``ready()``'s idempotency flags reset."""
+    from django.apps import apps as django_apps
+    from django.core.signals import request_started
+
+    from frisian_mcp.apps import _DEFERRED_DISCOVERY_UID
+
+    config = django_apps.get_app_config("frisian_mcp")
+    original_ready = config._mcp_ready  # noqa: SLF001
+    original_discovered = config._mcp_discovered  # noqa: SLF001
+    config._mcp_ready = False  # noqa: SLF001
+    config._mcp_discovered = False  # noqa: SLF001
+    request_started.disconnect(dispatch_uid=_DEFERRED_DISCOVERY_UID)
+    try:
+        yield config
+    finally:
+        config._mcp_ready = original_ready  # noqa: SLF001
+        config._mcp_discovered = original_discovered  # noqa: SLF001
+        request_started.disconnect(dispatch_uid=_DEFERRED_DISCOVERY_UID)
+
+
+class TestMaxTierBootRefusal:
+    """
+    E010 must bite under a WSGI server, not only under ``manage.py check``.
+
+    ``route_audit.raise_on_fatal_route_config`` records the standard this class
+    enforces for the second setting: *a* ``checks.Error`` *alone does not stop a
+    WSGI server from booting and serving traffic — only an exception raised out
+    of* ``ready()`` *does.*  Without the raise, E010 was a correct, tested
+    control that nobody running gunicorn would ever consult — the exact shape
+    this branch has spent its time removing.
+    """
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_invalid_cap_refuses(self) -> None:
+        """A typo'd cap must stop the process rather than half-serve."""
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(ImproperlyConfigured) as exc:
+            raise_on_invalid_max_tier()
+        assert "FRISIAN_MCP_MAX_TIER" in str(exc.value)
+        assert "readwrite" in str(exc.value)
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="read_write")
+    def test_valid_cap_boots(self) -> None:
+        """A recognised tier must not refuse."""
+        raise_on_invalid_max_tier()
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="  READ_WRITE  ")
+    def test_non_canonical_cap_boots(self) -> None:
+        """Whitespace and case are accepted, matching the check and the stamp."""
+        raise_on_invalid_max_tier()
+
+    def test_absent_cap_boots(self, settings: Any) -> None:
+        """No cap is the documented default and must never refuse a boot."""
+        if hasattr(settings, "FRISIAN_MCP_MAX_TIER"):
+            del settings.FRISIAN_MCP_MAX_TIER
+        raise_on_invalid_max_tier()
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["read", "read_write", "admin", "  ADMIN  ", "readwrite", "reed", "none", ""],
+    )
+    def test_refusal_and_report_never_disagree(self, raw: str) -> None:
+        """
+        The boot refusal and the E010 report must be the same decision.
+
+        Two call sites deciding validity independently is how this setting
+        produced a check that certified a config the runtime rejected.  Both
+        now go through ``_invalid_max_tier``; this pins that they cannot drift
+        back apart, including on ``"none"`` — the deny sentinel is not a
+        legal *cap*.
+        """
+        from django.core.exceptions import ImproperlyConfigured
+
+        with override_settings(FRISIAN_MCP_MAX_TIER=raw):
+            reported = bool(check_max_tier_value())
+            try:
+                raise_on_invalid_max_tier()
+                refused = False
+            except ImproperlyConfigured:
+                refused = True
+        assert reported == refused, f"{raw!r}: check and boot refusal disagree"
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_ready_actually_calls_it(self, fresh_app_config: Any) -> None:
+        """
+        The refusal must be *wired*, not merely available.
+
+        Asserted by driving ``ready()`` rather than by patching, because
+        "the function exists and is correct" is precisely the standard E010
+        already met while doing nothing on the path that matters.
+        """
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(ImproperlyConfigured, match="FRISIAN_MCP_MAX_TIER"):
+            fresh_app_config.ready()
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite", FRISIAN_MCP_ENABLED=False)
+    def test_disabled_gateway_still_boots(self, fresh_app_config: Any) -> None:
+        """
+        A disabled gateway must not refuse to start over a cap it never applies.
+
+        Same placement rule as ``raise_on_fatal_route_config``: after the
+        ENABLED guard, because a gateway that mounts nothing enforces nothing.
+        """
+        fresh_app_config.ready()

@@ -924,8 +924,8 @@ class FrisianMcpConfig(AppConfig):
         # ``manage.py check`` runs them.  Importing here (rather than at module
         # top) keeps the dependency chain inside ready() — the same point where
         # Django guarantees the app registry is populated.
-        # pylint: disable-next=import-outside-toplevel,unused-import
-        from frisian_mcp import checks, route_audit  # noqa: F401
+        # pylint: disable-next=import-outside-toplevel
+        from frisian_mcp import checks, route_audit
 
         if not getattr(settings, "FRISIAN_MCP_ENABLED", True):
             logger.debug("frisian_mcp disabled — skipping auto-discovery")
@@ -936,6 +936,14 @@ class FrisianMcpConfig(AppConfig):
         # Raised after the ENABLED guard so a disabled gateway — which mounts
         # no routes — never refuses to start over a route it will not serve.
         route_audit.raise_on_fatal_route_config()
+
+        # Same standard applied to the global tier cap (CodeRabbit).  E010
+        # reports an unrecognised FRISIAN_MCP_MAX_TIER to `manage.py check`,
+        # but under gunicorn nobody runs that: the host boots, anonymous read
+        # keeps working, and every privileged caller is denied every tool with
+        # a symptom that points away from the setting.  Refusing the boot is
+        # what turns the report into a control.
+        checks.raise_on_invalid_max_tier()
 
         # Auto-install the trailing-slash HTTP middleware before any other
         # discovery work.  This must happen on every ready() invocation where

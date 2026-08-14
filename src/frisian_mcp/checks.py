@@ -72,6 +72,12 @@ Registered checks
     then denied every tool.  E007's argument applied to the second tier setting
     — route ``highest_tier`` is parser-validated, the global cap was not.
 
+    **Also refuses the boot.**  :func:`raise_on_invalid_max_tier` is called from
+    ``AppConfig.ready()`` because a :class:`~django.core.checks.Error` alone
+    does not stop a WSGI server, so under gunicorn the report is never read.
+    Both paths share one predicate (:func:`_invalid_max_tier`) so the refusal
+    and the report cannot disagree.
+
 ``frisian_mcp.W012``
     Warns (LOUD) when ``frisian_mcp.contrib.oauth`` is installed but
     ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = False``.  That flag 404s the
@@ -156,6 +162,7 @@ from django.core.checks import (  # pylint: disable=redefined-builtin
     Warning,
     register,
 )
+from django.core.exceptions import ImproperlyConfigured
 
 from frisian_mcp.registry import (
     _VALID_PERMISSION_TIERS,
@@ -359,6 +366,62 @@ def check_service_account_user(  # pylint: disable=unused-argument
     ]
 
 
+def _invalid_max_tier() -> Any:
+    """
+    Return the raw ``FRISIAN_MCP_MAX_TIER`` when it is unrecognised, else ``None``.
+
+    **One predicate, shared by the E010 check and the boot refusal.**  Two
+    call sites deciding independently whether a value is valid is precisely how
+    this setting produced a check that certified a configuration the runtime
+    rejected; the boot refusal must not be able to disagree with the report the
+    operator reads.  Absent and ``None`` both mean "no cap", which is the
+    documented default and is silent.
+    """
+    sentinel = object()
+    raw = getattr(settings, "FRISIAN_MCP_MAX_TIER", sentinel)
+    if raw is sentinel or raw is None:
+        return None
+    # Same normalisation the request stamp uses.  Comparing differently here is
+    # how this check came to certify a value the runtime rejected.
+    return None if normalize_tier_setting(raw) is not None else raw
+
+
+def _max_tier_message(raw: Any) -> tuple[str, str]:
+    """Return the ``(message, hint)`` pair describing an invalid cap."""
+    valid = ", ".join(sorted(_VALID_PERMISSION_TIERS))
+    return (
+        f"FRISIAN_MCP_MAX_TIER={raw!r} is not a recognised tier. Callers above "
+        "'read' are being clamped to this value and then DENIED every tool, "
+        "while 'read' callers are unaffected.",
+        f"Set it to one of: {valid}, or remove it entirely for no global cap.",
+    )
+
+
+def raise_on_invalid_max_tier() -> None:
+    """
+    Raise :exc:`~django.core.exceptions.ImproperlyConfigured` on an invalid cap.
+
+    Called from :meth:`~frisian_mcp.apps.FrisianMcpConfig.ready`, beside
+    :func:`~frisian_mcp.route_audit.raise_on_fatal_route_config` and for the
+    same reason recorded there: **a** :class:`~django.core.checks.Error` **alone
+    does not stop a WSGI server from booting and serving traffic** — only an
+    exception raised out of ``ready()`` does.  ``E010`` reports the finding to
+    ``manage.py check``; this function is what makes the refusal real.
+
+    Without it the E010 report is exactly the failure mode this project keeps
+    finding: a control that is correct, tested, and never consulted on the path
+    that matters.  An operator running gunicorn never sees it, and the symptom
+    it would have explained — privileged callers denied every tool while
+    anonymous read keeps working — points away from the setting.
+    """
+    raw = _invalid_max_tier()
+    if raw is None:
+        return
+
+    message, hint = _max_tier_message(raw)
+    raise ImproperlyConfigured(f"frisian-mcp refused to start: {message} {hint}")
+
+
 @register(Tags.security)
 def check_max_tier_value(  # pylint: disable=unused-argument
     app_configs: Any = None,  # noqa: ARG001
@@ -385,27 +448,17 @@ def check_max_tier_value(  # pylint: disable=unused-argument
     see "admins can't call anything, anonymous users can" and have no reason to
     suspect this setting.
 
+    Reporting it is not the whole remedy — see :func:`raise_on_invalid_max_tier`
+    for the boot refusal that makes it bite under a WSGI server.
+
     Absent is silent: no cap is the documented default.
     """
-    sentinel = object()
-    raw = getattr(settings, "FRISIAN_MCP_MAX_TIER", sentinel)
-    if raw is sentinel or raw is None:
-        return []
-    # Same normalisation the request stamp uses.  Comparing differently here is
-    # how this check came to certify a value the runtime rejected.
-    if normalize_tier_setting(raw) is not None:
+    raw = _invalid_max_tier()
+    if raw is None:
         return []
 
-    valid = ", ".join(sorted(_VALID_PERMISSION_TIERS))
-    return [
-        Error(
-            f"FRISIAN_MCP_MAX_TIER={raw!r} is not a recognised tier. Callers above "
-            "'read' are being clamped to this value and then DENIED every tool, "
-            "while 'read' callers are unaffected.",
-            hint=(f"Set it to one of: {valid}, or remove it entirely for no global cap."),
-            id=E010_INVALID_MAX_TIER,
-        )
-    ]
+    message, hint = _max_tier_message(raw)
+    return [Error(message, hint=hint, id=E010_INVALID_MAX_TIER)]
 
 
 @register(Tags.security)
