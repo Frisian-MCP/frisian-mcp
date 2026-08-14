@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pathlib
 import re
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, NonCallableMock
 
 import pytest
 
@@ -23,6 +23,7 @@ from frisian_mcp.views import _redemption_action_authorized
 from tests._mcp_mock_guard import (
     GUARDED_ATTRS,
     McpMockFabricationError,
+    _guarded_getattr,
     mcp_request,
     mock_fabrication_guard,
 )
@@ -174,7 +175,35 @@ class TestLegitimateConstructionSurvives:
 
 
 def test_guard_is_removed_on_exit() -> None:
-    """Outside the context manager, ordinary mock behaviour is restored."""
-    request = MagicMock()
-    # No guard here: fabrication is the stdlib default again.
-    assert request._mcp_capabilities is not None
+    """
+    The context manager restores exactly what it replaced.
+
+    Previously asserted that fabrication *works* after the block — which is only
+    true when no guard is installed at all.  The session fixture installs one for
+    the whole run, so that assertion passed only because the nested-exit bug had
+    uninstalled the session guard: **the test was green because of the defect it
+    should have caught.**
+
+    Reversibility is the real property, and it holds whether or not an outer
+    guard is active, so it is asserted directly on the hook.
+    """
+    before = NonCallableMock.__getattr__
+    with mock_fabrication_guard():
+        assert NonCallableMock.__getattr__ is not before or before is _guarded_getattr
+    assert NonCallableMock.__getattr__ is before
+
+
+def test_nested_guard_does_not_disable_the_session_guard() -> None:
+    """
+    Entering the context again must not uninstall the outer guard on exit.
+
+    The session fixture installs this guard for the whole run.  Restoring the
+    unguarded original on an inner exit left every later test unprotected — the
+    guard switched off by the act of using it, which is precisely the class of
+    failure it was built to catch.
+    """
+    with mock_fabrication_guard():
+        with mock_fabrication_guard():
+            pass
+        with pytest.raises(McpMockFabricationError):
+            _ = getattr(MagicMock(), "_mcp_effective_tier")  # noqa: B009

@@ -75,6 +75,27 @@ UNAUTH_TIER_INVALID = "invalid"
 _UNSET = object()
 
 
+def normalize_tier_setting(raw: Any) -> str | None:
+    """
+    Return the canonical tier for a settings value, or ``None`` if unrecognised.
+
+    **One normalisation, shared by the runtime and the startup check.**  The two
+    previously disagreed on ``FRISIAN_MCP_MAX_TIER``: ``check_max_tier_value``
+    compared ``str(raw).strip().lower()`` while the request stamp used the raw
+    value, so ``"  READ_WRITE  "`` passed the check and then denied every
+    privileged caller at runtime — a check that actively *certified* a broken
+    configuration, which is worse than one that stays silent.
+
+    Accepting surrounding whitespace and case matches
+    :func:`classify_unauthenticated_tier`, so the two tier settings behave the
+    same way rather than one being forgiving and the other exact.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip().lower()
+    return value if value in _VALID_PERMISSION_TIERS else None
+
+
 def classify_unauthenticated_tier() -> tuple[str, str]:
     """
     Return ``(case, effective_tier)`` for ``FRISIAN_MCP_UNAUTHENTICATED_TIER``.

@@ -354,6 +354,20 @@ class TestServeHeavyMode:
         assert served["items"] == list(range(10, 15))
         assert served["has_more"] is False
 
+    def test_paginated_rejects_non_numeric_page_values_as_caller_error(self) -> None:
+        """
+        Bad ``page`` / ``page_size`` must be a caller error, not a 500.
+
+        Redemption short-circuits schema validation by design — call 2 needs
+        only the token and a mode — so these arrive unvalidated, and the
+        redemption path catches only ``ToolInputError``.  A non-numeric value
+        escaped ``int()`` as TypeError/ValueError and surfaced as a server
+        error for what is plainly a malformed request.
+        """
+        for bad in ({"page": "abc"}, {"page_size": None}, {"page": [1]}):
+            with pytest.raises(ToolInputError):
+                _serve_heavy_mode([1, 2, 3], "paginated", bad)
+
     def test_paginated_honours_page_size_on_a_list_envelope(self) -> None:
         """
         H23, the reported bug: asked for 2 records, received the whole page.

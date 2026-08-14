@@ -80,6 +80,7 @@ from frisian_mcp.registry import (
     ToolInvocationError,
     ToolNotFoundError,
     _caller_rank,
+    normalize_tier_setting,
     tool_registry,
 )
 from frisian_mcp.resources import ResourceNotFoundError, resource_registry
@@ -793,15 +794,27 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
             return result
 
         items: list[Any] = result if isinstance(result, list) else result[payload_key]
-        page: int = max(1, int(arguments.get("page", 1)))
         _default_page_size: int = getattr(settings, "FRISIAN_MCP_HEAVY_PAGE_SIZE", 20)
         _max_page_size: int = getattr(
             settings, "FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE", _default_page_size
         )
-        page_size: int = max(
-            1,
-            min(int(arguments.get("page_size", _default_page_size)), _max_page_size),
-        )
+        # Redemption deliberately short-circuits schema validation (call-2 needs
+        # only the token and a mode), so `page` / `page_size` arrive UNVALIDATED
+        # and the redemption path catches only ToolInputError.  A non-numeric
+        # value therefore escaped `int()` as TypeError/ValueError and surfaced as
+        # a 500 rather than a caller error.  Converting here keeps the one
+        # exception type the redemption path already handles.
+        try:
+            page: int = max(1, int(arguments.get("page", 1)))
+            page_size: int = max(
+                1,
+                min(int(arguments.get("page_size", _default_page_size)), _max_page_size),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ToolInputError(
+                f"'page' and 'page_size' must be integers; got page="
+                f"{arguments.get('page')!r}, page_size={arguments.get('page_size')!r}."
+            ) from exc
         start = (page - 1) * page_size
         end = start + page_size
         served: dict[str, Any] = {
@@ -2597,8 +2610,17 @@ class McpView(APIView):
         to pin a different cap (or ``None`` to disable it) without touching
         global settings — the auto-registered protected endpoint does exactly
         this so that authenticated callers receive their full tier there.
+
+        Normalised through the same helper the ``E010`` startup check uses, so
+        the check cannot bless a value the runtime then rejects.  An
+        unrecognised value stays unrecognised — it is **not** coerced to a tier
+        — so it still fails closed; what changes is that ``"  READ_WRITE  "``
+        now means what the operator plainly intended instead of denying every
+        privileged caller while the check reported the config clean.
         """
-        return getattr(settings, "FRISIAN_MCP_MAX_TIER", None)
+        return normalize_tier_setting(getattr(settings, "FRISIAN_MCP_MAX_TIER", None)) or getattr(
+            settings, "FRISIAN_MCP_MAX_TIER", None
+        )
 
     def get_authenticators(self) -> list[Any]:
         """

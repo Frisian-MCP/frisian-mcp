@@ -1831,6 +1831,7 @@ class TestH3OneLensAllConsumers:
         )
 
         request = MagicMock()
+        request._mcp_effective_tier = "read"
         request._mcp_capabilities = caps
         request._mcp_max_tier = None
         with patch("frisian_mcp.registry.tool_registry", reg):
@@ -1908,6 +1909,9 @@ class TestH3OneLensAllConsumers:
 
         reg, meta = self._dispatcher(capability="catalog.item")
         request = MagicMock()
+        # Stamp the tier too: the visibility pass computes _caller_rank from it,
+        # so a fabricated Mock here would rank as denied and hide every member.
+        request._mcp_effective_tier = "read"
         request._mcp_capabilities = frozenset({"catalog.view_item"})
         request._mcp_max_tier = None  # uncapped
 
@@ -1954,6 +1958,7 @@ class TestH3OneLensAllConsumers:
             "svc", frozenset({"secret_list"}), reg, resource_prefixes=frozenset({"secret"})
         )
         request = MagicMock()
+        request._mcp_effective_tier = "read"
         request._mcp_capabilities = caps
         request._mcp_max_tier = None
 
@@ -1978,6 +1983,7 @@ class TestH3OneLensAllConsumers:
             "svc", frozenset({"secret_list"}), reg, resource_prefixes=frozenset({"secret"})
         )
         request = MagicMock()
+        request._mcp_effective_tier = "read"
         request._mcp_capabilities = frozenset({"catalog.view_item"})
         request._mcp_max_tier = None
 

@@ -792,3 +792,41 @@ class TestMaxTierValueCheck:
         assert _apply_max_tier_cap("read", req) == "read"
         assert _caller_rank(_apply_max_tier_cap("read_write", req)) < _caller_rank("read")
         assert _caller_rank(_apply_max_tier_cap("admin", req)) < _caller_rank("read")
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="  READ_WRITE  ")
+    def test_non_canonical_value_is_accepted_by_both_check_and_runtime(self) -> None:
+        """
+        The check must not bless a value the runtime rejects (CodeRabbit).
+
+        This check normalised with ``strip().lower()`` while the request stamp
+        used the raw value, so ``"  READ_WRITE  "`` passed here and then denied
+        every privileged caller at runtime.  A control that *certifies* a broken
+        config is worse than one that stays silent, and this was that control.
+
+        Both sides now share ``normalize_tier_setting``, so agreement is
+        structural rather than a coincidence of two matching expressions.
+        """
+        from unittest.mock import MagicMock
+
+        from frisian_mcp.registry import _apply_max_tier_cap, _caller_rank
+        from frisian_mcp.views import McpView
+
+        assert check_max_tier_value() == []
+        stamped = McpView()._effective_max_tier()  # noqa: SLF001
+        capped = _apply_max_tier_cap("admin", MagicMock(_mcp_max_tier=stamped))
+        assert _caller_rank(capped) == _caller_rank(
+            "read_write"
+        ), "the check accepted this value; the runtime must too"
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_a_real_typo_still_denies_and_still_fires(self) -> None:
+        """Normalising must not turn a genuine typo into a silent pass."""
+        from unittest.mock import MagicMock
+
+        from frisian_mcp.registry import _apply_max_tier_cap, _caller_rank
+        from frisian_mcp.views import McpView
+
+        assert len(check_max_tier_value()) == 1
+        stamped = McpView()._effective_max_tier()  # noqa: SLF001
+        capped = _apply_max_tier_cap("admin", MagicMock(_mcp_max_tier=stamped))
+        assert _caller_rank(capped) < _caller_rank("read")

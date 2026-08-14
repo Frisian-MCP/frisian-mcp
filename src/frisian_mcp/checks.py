@@ -162,6 +162,7 @@ from frisian_mcp.registry import (
     DENY_TIER,
     UNAUTH_TIER_INVALID,
     classify_unauthenticated_tier,
+    normalize_tier_setting,
     tool_registry,
 )
 from frisian_mcp.usage.resolver import USAGE_POLICY_SETTING, resolve_system_policy
@@ -390,8 +391,9 @@ def check_max_tier_value(  # pylint: disable=unused-argument
     raw = getattr(settings, "FRISIAN_MCP_MAX_TIER", sentinel)
     if raw is sentinel or raw is None:
         return []
-    value = str(raw).strip().lower()
-    if value in _VALID_PERMISSION_TIERS:
+    # Same normalisation the request stamp uses.  Comparing differently here is
+    # how this check came to certify a value the runtime rejected.
+    if normalize_tier_setting(raw) is not None:
         return []
 
     valid = ", ".join(sorted(_VALID_PERMISSION_TIERS))

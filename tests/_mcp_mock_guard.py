@@ -113,12 +113,22 @@ def _guarded_getattr(self: Any, name: str) -> Any:
 
 @contextlib.contextmanager
 def mock_fabrication_guard() -> Iterator[None]:
-    """Install the guard for the duration of the block. Idempotent, reversible."""
+    """
+    Install the guard for the duration of the block. Idempotent, reversible.
+
+    Restores whatever was installed **when this context was entered**, not the
+    unguarded original.  The session fixture installs this guard for the whole
+    run, so a test that enters the context again would otherwise uninstall the
+    session guard on its own exit and leave every later test unprotected — the
+    guard disabled by the act of using it, which is the failure class it exists
+    to catch.
+    """
+    previous = NonCallableMock.__getattr__
     NonCallableMock.__getattr__ = _guarded_getattr  # type: ignore[method-assign]
     try:
         yield
     finally:
-        NonCallableMock.__getattr__ = _ORIGINAL_GETATTR  # type: ignore[method-assign]
+        NonCallableMock.__getattr__ = previous  # type: ignore[method-assign]
 
 
 class _FaithfulRequest:
