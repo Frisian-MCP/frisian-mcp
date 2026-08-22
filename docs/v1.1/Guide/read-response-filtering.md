@@ -114,31 +114,31 @@ def search_devices(arguments, request):
 
 The tool is registered at import time and surfaced in `tools/list` with the five probe-protocol parameters (`continuation_token`, `mode`, `page`, `page_size`, `filter_keys`) merged into the input schema automatically.
 
-### For Auto-Discovered ViewSets — use the threshold backstop
+### For Auto-Discovered ViewSets
 
-Most large applications expose their REST surface through auto-discovered `ModelViewSet`s, and you do not want to register every list endpoint by hand. Set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` instead — any auto-discovered tool whose response exceeds the byte threshold is auto-wrapped in the same probe envelope without a per-ViewSet code change:
+Most large applications expose their REST surface through auto-discovered `ModelViewSet`s, and you do not want to register every list endpoint by hand. `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` still watches the serialized response size, but it only mints a continuation token when the tool's published schema already discloses the continuation call. Plain auto-discovered actions do not disclose that call, so an over-threshold response from one of those actions is returned complete, with no token and no cached result:
 
 ```python
 # settings.py — this ships active at 25_000 bytes by default; set a value only to override
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)
 ```
 
-Use `@mcp_heavy` directly when you want **explicit** control — a named heavy tool that surfaces in `tools/list` with a curated input schema, distinct from the auto-discovered ViewSet action.
+Use `@mcp_heavy` directly when you want probe-first negotiation for a known-large read — a named heavy tool that surfaces in `tools/list` with a curated input schema, distinct from the auto-discovered ViewSet action.
 
 ---
 
 ## Automatic Threshold Negotiation
 
-For large applications where not every ViewSet has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` enables automatic `@mcp_heavy` behavior as a safety net. **It ships active with a default of `25000` bytes** — any successful non-write response over the threshold probes first out of the box, with no configuration (high-cardinality lists are the common case, but detail reads and custom tool output are covered too). Override the value to tune, or set it to `None` to disable the backstop entirely:
+For large applications where not every read has been individually reviewed, `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` is the byte-size backstop. **It ships active with a default of `25000` bytes**. Override the value to tune, or set it to `None` to disable the backstop entirely:
 
 ```python
 # settings.py — the default is 25000; set a value only to override, or None to disable
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25000  # bytes (shipped default)
 ```
 
-When **any** successful non-write tool response would exceed this threshold (in bytes), frisian-mcp applies probe-first behavior automatically even for tools and auto-discovered ViewSet actions that are not explicitly registered as heavy. This is not limited to list actions — it covers detail/retrieve reads and any custom `@mcp_tool` output whose serialized JSON is over the threshold. (Writes return their lean confirmation envelope before the backstop, and explicitly registered `@mcp_heavy` tools use their own probe path.) The response format is identical to an explicitly registered `@mcp_heavy` tool. The exact default value and upgrade behavior are documented in the [Installation & Configuration Reference](../Reference/installation-configuration-reference.md#frisian_mcp_auto_negotiate_threshold).
+When a successful non-write response exceeds this threshold, frisian-mcp mints a probe envelope only if the published input schema discloses the continuation call. That includes explicitly registered `@mcp_heavy` tools, class dispatchers, and group dispatchers. It does not include ordinary `@mcp_tool` registrations or plain auto-discovered ViewSet actions. For those non-disclosing tools, an over-threshold response is returned complete: no truncation, no continuation token, and no cache entry pinned.
 
-Auto-negotiation is a fallback, not a replacement for explicit registration. An explicitly registered `@mcp_heavy` tool is always probe-first; auto-negotiation only triggers when the response would be large enough to warrant it. For endpoints you know will always return large results, an explicit `@mcp_heavy` tool is clearer and more predictable.
+That distinction is deliberate. Publishing the continuation branch on every ordinary tool added 380 tokens to an empty `@mcp_tool` schema and 382 tokens to an auto-discovered action schema. On a production-shaped registry, removing that always-on disclosure changed `tools/list` from 5,292 to 2,625 tokens, saving 2,667 tokens (50.4%). For endpoints you know will always return large results and should negotiate instead of returning whole, register an explicit `@mcp_heavy` tool.
 
 ---
 
@@ -176,7 +176,7 @@ See [Write-Response Filtering](write-path-response-filtering.md) for the `@mcp_l
 
 ## Summary: When to Make a Read Heavy
 
-Register a read as an `@mcp_heavy` tool (or rely on the auto-negotiate threshold) when:
+Register a read as an `@mcp_heavy` tool when:
 
 - The record count depends on user-supplied filters that could match an unbounded number of records
 - The underlying model has many fields or nested relationships, making individual records large

@@ -12,6 +12,29 @@ from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
 from frisian_mcp.registry import ToolRegistry
+from tests._mcp_mock_guard import mock_fabrication_guard
+
+# ---------------------------------------------------------------------------
+# H22 — fabrication guard, active for the whole suite
+# ---------------------------------------------------------------------------
+#
+# A bare ``MagicMock()`` request auto-materialises a truthy child mock for any
+# unset ``_mcp_*`` attribute, so a security gate reads a "stamp" no real request
+# carries and takes a branch it never would in production. This shipped three
+# false results in three days (H7, H17, and the #62 review round). The suite
+# is clean of it today; this keeps it clean. See ``tests/_mcp_mock_guard.py``.
+#
+# Session-scoped and autouse: the guard fires only on genuine fabrication of a
+# guarded name, never on explicit construction, so it costs nothing to leave on
+# and reds immediately if the pattern returns.
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_against_mock_fabrication() -> Generator[None, None, None]:
+    """Install the H22 fabrication guard for the entire test session."""
+    with mock_fabrication_guard():
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Registry fixture

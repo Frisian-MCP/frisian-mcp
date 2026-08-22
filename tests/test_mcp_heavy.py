@@ -6,14 +6,17 @@ import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import jsonschema
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory, override_settings
 
 from frisian_mcp.decorators import _merge_negotiation_schema, mcp_heavy
+from frisian_mcp.negotiation import schema_discloses_continuation
 from frisian_mcp.registry import ToolInputError, ToolRegistry
 from frisian_mcp.views import (
+    _HEAVY_CACHE_PREFIX,
     McpView,
     _build_probe_envelope,
     _serve_heavy_mode,
@@ -93,15 +96,30 @@ class TestMergeNegotiationSchema:
         base: dict[str, Any] = {"type": "string"}
         assert _merge_negotiation_schema(base) is base
 
-    def test_removes_additional_properties_false(self) -> None:
-        """additionalProperties: false is removed to allow negotiation fields."""
+    def test_preserves_additional_properties_false(self) -> None:
+        """
+        H20 INVERTED: ``additionalProperties: false`` is now PRESERVED.
+
+        This asserted the opposite, on the rationale that the restriction "is
+        removed to allow negotiation fields".  The premise was wrong: this merge
+        declares the five fields in the **same** ``properties`` object that
+        ``additionalProperties`` is evaluated against, so they are permitted by
+        construction and nothing needed removing.
+
+        Deleting it was a real weakening, not a formality — ``dispatch``
+        validates against the published schema, and ``@mcp_heavy`` carries the
+        *host's* ``input_schema``, so a host that asked for strictness lost it.
+        """
         base = {
             "type": "object",
             "properties": {},
             "additionalProperties": False,
         }
         merged = _merge_negotiation_schema(base)
-        assert "additionalProperties" not in merged
+        assert merged["additionalProperties"] is False
+        # ...and the negotiation fields are still reachable alongside it.
+        assert "continuation_token" in merged["properties"]
+        assert "mode" in merged["properties"]
 
     def test_preserves_required_array(self) -> None:
         """Required array from original schema is preserved unchanged."""
@@ -337,6 +355,93 @@ class TestServeHeavyMode:
         assert served["items"] == list(range(10, 15))
         assert served["has_more"] is False
 
+    def test_paginated_rejects_non_numeric_page_values_as_caller_error(self) -> None:
+        """
+        Bad ``page`` / ``page_size`` must be a caller error, not a 500.
+
+        Redemption short-circuits schema validation by design — call 2 needs
+        only the token and a mode — so these arrive unvalidated, and the
+        redemption path catches only ``ToolInputError``.  A non-numeric value
+        escaped ``int()`` as TypeError/ValueError and surfaced as a server
+        error for what is plainly a malformed request.
+        """
+        for bad in ({"page": "abc"}, {"page_size": None}, {"page": [1]}):
+            with pytest.raises(ToolInputError):
+                _serve_heavy_mode([1, 2, 3], "paginated", bad)
+
+    def test_paginated_honours_page_size_on_a_list_envelope(self) -> None:
+        """
+        H23, the reported bug: asked for 2 records, received the whole page.
+
+        A paginated list envelope is a **dict**, so T18's "a non-list result is
+        already bounded" guard sent the single most common heavy case — a large
+        list endpoint — straight down the return-whole path with ``page_size``
+        never read.  T18 enumerated the write result and the single-object
+        retrieve and missed the envelope, which is the dominant shape in
+        production.
+
+        Worse than the behaviour it replaced: before T18 a dict was chunked into
+        fixed-width slices — unusable, but *bounded*.  After, it was parseable
+        and *unbounded*, on exactly the case the package exists to bound.
+        """
+        envelope = {
+            "count": 114,
+            "next": "http://host/api/thing/?page=2",
+            "previous": None,
+            "results": [{"id": i} for i in range(50)],
+        }
+        served = _serve_heavy_mode(envelope, "paginated", {"page": 1, "page_size": 2})
+        assert len(served["items"]) == 2, "page_size was ignored on a list envelope"
+        assert served["total"] == 50
+        assert served["has_more"] is True
+
+    def test_paginated_envelope_walks_pages(self) -> None:
+        """``page`` selects a slice of the envelope's payload, not of the envelope."""
+        envelope = {"count": 9, "results": [{"id": i} for i in range(9)]}
+        served = _serve_heavy_mode(envelope, "paginated", {"page": 2, "page_size": 3})
+        assert [item["id"] for item in served["items"]] == [3, 4, 5]
+
+    def test_paginated_envelope_nests_the_hosts_own_numbers(self) -> None:
+        """
+        The host's pagination keys are preserved but NOT merged with ours.
+
+        ``count`` describes the host's full result set, ``total`` describes the
+        cached page we are slicing, and ``items`` is the slice — three numbers
+        measuring three different things.  Side by side at one level they read
+        as contradictory, so the host's are nested under ``envelope`` and the
+        payload key is named rather than assumed.
+        """
+        envelope = {"count": 114, "next": "http://host/x?page=2", "results": [{"id": 1}]}
+        served = _serve_heavy_mode(envelope, "paginated", {"page": 1, "page_size": 1})
+        assert served["envelope"] == {"count": 114, "next": "http://host/x?page=2"}
+        assert served["envelope_payload_key"] == "results"
+        assert "count" not in served, "host and continuation numbers must not sit side by side"
+
+    def test_paginated_ambiguous_envelope_returns_whole(self) -> None:
+        """
+        Two list-valued keys is not an envelope we can safely paginate.
+
+        Guessing which list is the payload would silently return a slice of the
+        wrong collection, which is worse than returning too much.  This is the
+        pre-H23 behaviour, kept deliberately for the shape that cannot be
+        resolved without naming a host field.
+        """
+        ambiguous = {"a": [1, 2, 3], "b": [4, 5, 6]}
+        assert _serve_heavy_mode(ambiguous, "paginated", {"page": 1, "page_size": 1}) == ambiguous
+
+    def test_paginated_envelope_detection_names_no_host_field(self) -> None:
+        """
+        Detection is structural, so a host using any payload key works.
+
+        Asserted across three vocabularies to pin that no field name is
+        hard-coded — ``results`` is DRF's convention, not this package's.
+        """
+        for key in ("results", "items", "records"):
+            envelope = {"count": 3, key: [{"id": i} for i in range(3)]}
+            served = _serve_heavy_mode(envelope, "paginated", {"page": 1, "page_size": 1})
+            assert len(served["items"]) == 1, f"payload key {key!r} not detected"
+            assert served["envelope_payload_key"] == key
+
     def test_paginated_non_list_returns_it_whole(self) -> None:
         """
         Paginated mode returns a non-list result whole, chunking nothing.
@@ -487,6 +592,7 @@ class TestMcpHeavyIntegration:
                     "result": stored,
                     "owner_key": expected_owner,
                     "tool_name": "int.heavy2",
+                    "resolved_target": "int.heavy2",
                 }
                 response = _call_tool(
                     rf, "int.heavy2", {"continuation_token": token, "mode": "full"}
@@ -526,6 +632,7 @@ class TestMcpHeavyIntegration:
                     "result": stored,
                     "owner_key": expected_owner,
                     "tool_name": "int.heavy3",
+                    "resolved_target": "int.heavy3",
                 }
                 response = _call_tool(
                     rf, "int.heavy3", {"continuation_token": token, "mode": "summary"}
@@ -564,9 +671,37 @@ class TestMcpHeavyIntegration:
         assert "expired" in text["error"].lower() or "not found" in text["error"].lower()
 
     @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=50)
-    def test_threshold_backstop_wraps_large_response(self, rf: RequestFactory) -> None:
-        """FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD wraps large non-heavy tool responses."""
+    def test_threshold_backstop_returns_a_non_disclosing_tool_whole(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        CR-2: an over-threshold ``@mcp_tool`` response comes back WHOLE, and pins nothing.
+
+        This test asserted the opposite until CR-2 — that the backstop wrapped
+        any large response, including an ordinary tool's.  That behaviour is
+        what H2 then had to pay for by disclosing the continuation call on every
+        schema.  Reversing it is the point of CR-2: ``@mcp_tool`` no longer
+        discloses, ``schema_discloses_continuation()`` gates the mint, so the
+        backstop declines rather than issuing a token the caller's published
+        schema never mentioned.
+
+        "Declines" has to mean the full payload, and this is the assertion that
+        pins it.  A backstop that quietly truncated or dropped an over-threshold
+        response it had decided not to negotiate would be a worse defect than
+        the schema bloat CR-2 removes, and it would be invisible to any
+        assertion that only checked for the absence of a token.  So both halves
+        are checked: the exact bytes come back, and nothing is written to the
+        heavy cache — measured off ``django_cache.set`` rather than
+        reconstructed, because an entry pinned for 300s in the shared default
+        cache is a cost even when no caller ever sees the token.
+
+        The backstop is NOT disabled by this.  It still mints for every shape
+        that discloses — ``@mcp_heavy`` and the dispatchers — which the tests
+        around this one cover.
+        """
         from frisian_mcp.decorators import mcp_tool
+
+        payload = {"data": "x" * 1000}  # ~1 KB, far over the 50-byte threshold
 
         isolated = ToolRegistry()
         with (
@@ -580,15 +715,30 @@ class TestMcpHeavyIntegration:
                 input_schema={"type": "object", "properties": {}},
             )
             def _light(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
-                return {"data": "x" * 1000}  # ~1 KB > 50-byte threshold
+                return dict(payload)
+
+            entry = isolated.get_entry("int.light")
+            assert entry is not None
+            # The precondition the mint gate reads.  Asserted here so that if a
+            # future change re-disclosed on this path, this test fails on the
+            # cause rather than on the consequence.
+            assert schema_discloses_continuation(entry.input_schema) is False
 
             with patch("frisian_mcp.views.django_cache") as mock_cache:
                 mock_cache.get.return_value = None
                 mock_cache.set = MagicMock()
                 response = _call_tool(rf, "int.light", {})
 
+                heavy_writes = [
+                    call
+                    for call in mock_cache.set.call_args_list
+                    if str(call.args[0]).startswith(_HEAVY_CACHE_PREFIX)
+                ]
+
         result = _tool_result(response)
-        assert "continuation_token" in result, "Expected probe envelope from threshold backstop"
+        assert "continuation_token" not in result, "Undisclosed shape must not be handed a token"
+        assert result == payload, "Over-threshold non-disclosing response must be returned WHOLE"
+        assert heavy_writes == [], f"Nothing may be pinned in the heavy cache: {heavy_writes}"
 
     @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=100000)
     def test_threshold_backstop_passthrough_for_small_response(self, rf: RequestFactory) -> None:
@@ -687,6 +837,7 @@ class TestHeavyContinuationOwnerBinding:
                 # Deliberately-foreign owner — different tier.
                 "owner_key": "tool=sec3.heavy2:auth=anon:tier=admin",
                 "tool_name": "sec3.heavy2",
+                "resolved_target": "sec3.heavy2",
             }
             response = _call_tool(
                 rf,
@@ -746,6 +897,7 @@ class TestHeavyContinuationOwnerBinding:
                 "result": {"sensitive": "data"},
                 "owner_key": owner_for_heavy3,
                 "tool_name": "sec3.heavy3",
+                "resolved_target": "sec3.heavy3",
             }
             # … but the call-2 names sec3.evil.
             response = _call_tool(
@@ -802,6 +954,7 @@ class TestHeavyContinuationOwnerBinding:
                 "result": {"ok": True},
                 "owner_key": owner,
                 "tool_name": "sec3.heavy5",
+                "resolved_target": "sec3.heavy5",
             }
             response = _call_tool(
                 rf,
@@ -852,6 +1005,7 @@ class TestHeavyContinuationOwnerBinding:
                 "result": {"ok": True},
                 "owner_key": owner,
                 "tool_name": "sec3.heavy6",
+                "resolved_target": "sec3.heavy6",
             }
             response = _view(redeem_req)
 
@@ -1013,6 +1167,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": "matrix.paginated",
+                "resolved_target": "matrix.paginated",
             }
             response = _call_tool(
                 rf,
@@ -1044,6 +1199,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": "matrix.filtered",
+                "resolved_target": "matrix.filtered",
             }
             response = _call_tool(
                 rf,
@@ -1099,6 +1255,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": tool_name,
+                "resolved_target": tool_name,
             }
             response = _view(redeem_req)
 
@@ -1151,6 +1308,7 @@ class TestIssue53AcceptanceMatrix:
                 "result": stored,
                 "owner_key": owner,
                 "tool_name": "matrix.anon",
+                "resolved_target": "matrix.anon",
             }
             response = _view(redeem_req)
 
@@ -1402,3 +1560,81 @@ class TestIssue53AcceptanceMatrix:
             result = _tool_result(_view(redeem_req))
 
         assert result == stored
+
+
+class TestHeavyClosedSchemaKeepsItsStrictness:
+    """
+    H20: ``@mcp_heavy`` carries the HOST's schema, so its strictness is theirs.
+
+    H18 fixed ``merge_continuation_branch`` and left this site, on the argument
+    that ``_merge_negotiation_schema`` applies to *"argument shapes that are
+    ours"*.  Only half true: ``@mcp_dispatcher`` and the group builder produce
+    ours, but a host applies ``@mcp_heavy`` to its own tool with its own
+    ``input_schema``.  Same consent problem, same runtime effect, different
+    decorator — the consumer-enumeration lesson recurring inside the fix for it.
+
+    Unlike the conditional branch, nothing had to be given up here: the flat
+    merge declares its fields in the same object ``additionalProperties`` is
+    evaluated against, so strictness and negotiation coexist.
+    """
+
+    CLOSED: dict[str, Any] = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "additionalProperties": False,
+    }
+
+    def _registry(self) -> ToolRegistry:
+        reg = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_heavy(
+                name="item_search",
+                description="host-authored closed schema",
+                input_schema=dict(self.CLOSED),
+            )
+            def _fn(arguments: dict[str, Any], _request: Any) -> Any:
+                return {"got": sorted(arguments)}
+
+            _ = _fn
+        return reg
+
+    def test_published_schema_stays_closed(self) -> None:
+        """The host's restriction survives registration."""
+        entry = self._registry().get_entry("item_search")
+        assert entry is not None
+        assert entry.input_schema.get("additionalProperties") is False
+
+    def test_unknown_field_still_rejected_on_call_one(self) -> None:
+        """
+        Asserted at ``dispatch`` — where the weakening actually bit.
+
+        A schema-shape assertion alone would not have caught the consequence.
+        """
+        reg = self._registry()
+        request = RequestFactory().post("/mcp/")
+        request.user = AnonymousUser()
+
+        with pytest.raises(ToolInputError) as exc:
+            reg.dispatch(request, "item_search", {"q": "x", "unexpected_field": "smuggled"})
+        assert "unexpected_field" in str(exc.value)
+
+        # The host's own field still works — strictness, not breakage.
+        assert reg.dispatch(request, "item_search", {"q": "x"}) == {"got": ["q"]}
+
+    def test_negotiation_still_reachable_on_a_closed_schema(self) -> None:
+        """
+        And unlike the conditional-branch case, the tool still negotiates.
+
+        Preserving the restriction cost nothing here, so a heavy tool with a
+        closed schema keeps both its strictness and its continuation call.
+        """
+        entry = self._registry().get_entry("item_search")
+        assert entry is not None
+        assert schema_discloses_continuation(entry.input_schema) is True
+
+        # A continuation-shaped call validates against the published schema,
+        # even though that schema still rejects everything undeclared.
+        validator = jsonschema.Draft7Validator(entry.input_schema)
+        assert not list(validator.iter_errors({"continuation_token": "t", "mode": "full"}))
+        assert list(validator.iter_errors({"continuation_token": "t", "smuggled": 1}))

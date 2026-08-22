@@ -461,6 +461,36 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                 },
             }
 
+            # H2 (narrowed, CR-2): the generated action schema is published as
+            # built.  Auto-discovered actions deliberately do not disclose the
+            # continuation call.
+            #
+            # H2 disclosed here because this is the population the size backstop
+            # exists for — high-cardinality reads on ViewSets nobody reviewed,
+            # with no decorator to annotate — and the backstop was minting
+            # tokens against schemas that could not legally return them.  That
+            # defect is real, but it is closed on the *mint* side, not by
+            # publishing the shape everywhere:
+            # ``schema_discloses_continuation()`` gates the backstop in
+            # ``views.py`` against this same schema, so an action that stays
+            # silent never mints.  Disclosure is the expensive half of the pair
+            # and the unnecessary one — it added ~382 tokens to every
+            # auto-discovered action's published schema (measured, CR-1), and
+            # this population is the most numerous on a real host, so it is
+            # where universal disclosure cost the most.
+            #
+            # The fallback is pre-existing and documented: ``@mcp_heavy``'s
+            # ``merge_continuation_branch`` has always left a schema declaring
+            # ``"additionalProperties": false`` alone (H18), stating that an
+            # over-threshold response from such a tool "is returned whole".
+            # CR-2 widens that path to all auto-discovered actions.  Whole means
+            # the complete payload, with nothing pinned in the heavy cache.
+            #
+            # Hosts that want negotiation on a discovered resource still have
+            # it: mounting the resource behind a dispatcher, or decorating a
+            # hand-registered tool with ``@mcp_heavy``, both keep the flat merge
+            # and keep minting.  Negotiation became opt-in, not absent.
+
             tools.append(
                 ToolDefinition(
                     name=tool_name,

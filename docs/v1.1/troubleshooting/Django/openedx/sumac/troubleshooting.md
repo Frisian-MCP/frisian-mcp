@@ -134,7 +134,7 @@ FRISIAN_MCP_AUTHENTICATION_CLASSES = [
 
 **Cause:** `@mcp_heavy` is a frisian-mcp decorator applied to functions you control. Open edX ViewSets are part of the platform source code and cannot be decorated without forking or patching.
 
-**Fix:** Use `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` as a backstop instead:
+**Fix:** Use `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` as a byte-size backstop, and register explicit heavy tools for reads that must negotiate:
 
 ```python
 # lms/envs/private.py
@@ -143,7 +143,7 @@ FRISIAN_MCP_AUTHENTICATION_CLASSES = [
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 8_000
 ```
 
-**Scope and response shape.** This backstop is a byte-size threshold, so it applies to *any* tool response — read, write, or retrieve — whose serialized size exceeds the limit, not only large lists. When it triggers, frisian-mcp does not return the inline result: it caches the full result and returns the same negotiation **probe envelope** that `@mcp_heavy` produces, carrying `total_size`, `available_modes` (`summary`, `paginated`, `filtered`, `full`), and a `continuation_token`. The agent re-invokes the same tool with that token and a chosen mode to fetch the data; responses are not silently replaced with a bare token.
+**Scope and response shape.** This backstop is a byte-size threshold for read responses. It mints a negotiation probe only when the published schema already discloses the continuation call, such as an explicit `@mcp_heavy` tool or dispatcher. Plain auto-discovered actions do not disclose that call; if one exceeds the threshold, frisian-mcp returns the complete inline result instead of truncating it, minting a token, or caching a result the caller cannot legally redeem.
 
 ---
 

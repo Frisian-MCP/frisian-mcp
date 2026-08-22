@@ -223,14 +223,14 @@ def search_devices(arguments, request):
     return DeviceSerializer(qs, many=True).data
 ```
 
-**For auto-discovered ViewSets** — which is what the rest of this guide is about — you usually don't need to decorate anything. Set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` instead: any auto-discovered tool whose response exceeds the byte threshold is auto-wrapped in the same probe envelope, with no per-ViewSet code change required:
+**For auto-discovered ViewSets** — which is what the rest of this guide is about — the threshold backstop watches response size but does not publish continuation fields on every action. A plain auto-discovered action whose response exceeds the byte threshold returns the complete result inline. Register an explicit `@mcp_heavy` tool when a known-large read should use the probe envelope:
 
 ```python
 # settings.py — ships active at 25_000 bytes by default; set a value only to override, or None to disable
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)
 ```
 
-An agent calling a heavy tool — explicit or threshold-wrapped — receives the preview, total size, available modes, and a continuation token. The agent decides whether to paginate, filter, or pull the full payload. The context window is not pre-filled with records the agent may not need.
+An agent calling an explicit heavy tool receives the preview, total size, available modes, and a continuation token. The agent decides whether to paginate, filter, or pull the full payload. The context window is not pre-filled with records the agent may not need.
 
 Measured impact on a 65-device Nautobot instance: 23% token reduction on the list call. At 500 devices: 90% reduction. At 2,000 devices: 97% reduction. At production scale, an un-paginated device list would exhaust the context window before the agent could do any actual work.
 
@@ -238,7 +238,7 @@ Measured impact on a 65-device Nautobot instance: 23% token reduction on the lis
 
 ## Write-Path Token Efficiency (@mcp_light)
 
-Write operations — create, update, delete — return a lean confirmation envelope by default rather than echoing the full serialized object back. No decorator or configuration is required; this is the package-level default for all write tools.
+Write operations — create, update, delete — return a lean confirmation envelope by default rather than echoing the full serialized object back. No decorator or configuration is required; this is the package-level default for write calls whose published schema discloses the continuation call. A write whose schema does not disclose it returns the full serialized object instead.
 
 **Single-object create or update:**
 

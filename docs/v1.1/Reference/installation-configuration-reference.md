@@ -235,7 +235,18 @@ An agent sends the **raw** key as `Authorization: Bearer <raw-key>`; the package
 **Type:** `str`  
 **Default:** `'read'`
 
-The maximum permission tier for callers who provide no credentials. Set to `None` to require authentication for all tool access.
+The maximum permission tier for callers who provide no credentials.
+
+Four cases are distinguished. Two grant access — an absent setting, which uses the compatibility default, and an explicitly configured tier. The other two deny:
+
+| Value | Effect |
+|---|---|
+| setting absent | `read` — the documented default, so a host that never set it keeps working |
+| `'read'` / `'read_write'` / `'admin'` | that tier |
+| `None` or `'none'` | denied below `read` — no tool is listed and none can be invoked without credentials |
+| any other value | denied below `read`, **and** a startup error is raised naming the setting |
+
+The last row matters: a misspelled tier is a configuration error, not a silent downgrade. It is reported at startup rather than discovered in production.
 
 ```python
 # Public read access (default)
@@ -244,6 +255,8 @@ FRISIAN_MCP_UNAUTHENTICATED_TIER = 'read'
 # Require auth for everything
 FRISIAN_MCP_UNAUTHENTICATED_TIER = None
 ```
+
+> **Correction — this setting did not deny access in releases before this one.** Earlier documentation, including two install configurations distributed as production examples, stated that `None` requires authentication for all tools. It did not: an unrecognised tier — which `None` and `'none'` both were — ranked equal to `read`, so anonymous callers kept the full read surface. The setting was present, spelled plausibly, and had no effect. If you deployed against that guidance, treat the read surface of those deployments as having been reachable without credentials, and confirm what was mounted there. The behaviour described in the table above is what this release does.
 
 ---
 
@@ -278,20 +291,20 @@ FRISIAN_MCP_EXPOSE_ERRORS = True  # development only
 **Type:** `int` (bytes), or `None` to disable  
 **Default:** `25000` (bytes)
 
-Response size threshold above which frisian-mcp automatically applies `@mcp_heavy` probe-first behavior, even on ViewSets and tools that are not explicitly decorated. **Any successful non-write tool response** whose serialized JSON exceeds this size is returned as a small probe envelope (size + retrieval modes + continuation token) instead of the full payload, so the agent negotiates how much to retrieve rather than receiving a context-blowing response. This is byte-size-keyed and not limited to list actions — it covers **reads (both list and detail/retrieve) and any custom `@mcp_tool` output** over the threshold. Writes return their lean confirmation envelope before the backstop, and explicitly `@mcp_heavy`-decorated tools use their own probe path. Prevents large responses from exhausting agent context windows without requiring manual decoration of every ViewSet.
+Response size threshold for the read-response negotiation backstop. When a successful non-write response exceeds this byte size, frisian-mcp returns a small probe envelope only if the tool's published schema already discloses the continuation call. That includes explicitly registered `@mcp_heavy` tools, class dispatchers, and group dispatchers. It does not include ordinary `@mcp_tool` registrations or plain auto-discovered ViewSet actions. For those non-disclosing tools, an over-threshold response is returned complete: no truncation, no continuation token, and no cache entry pinned.
 
-**The default is active** (`25000` bytes ≈ ~6k `cl100k_base` tokens — above a normal small filtered read, well below a large list page). Any qualifying response over the threshold therefore probes first out of the box, with no per-host configuration; high-cardinality lists are the common trigger.
+**The default is active** (`25000` bytes ≈ ~6k `cl100k_base` tokens — above a normal small filtered read, well below a large list page). Any qualifying response over the threshold therefore takes the schema-disclosed negotiation path out of the box; high-cardinality lists are the common trigger.
 
 - **Raise** the value to probe less often (larger responses returned in full); **lower** it to probe sooner.
-- Set **`FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None`** to fully disable the backstop and return every response in full regardless of size.
+- Set **`FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None`** to fully disable the backstop and return every read response in full regardless of size.
 
-`@mcp_heavy` remains the preferred **explicit** mechanism for known-heavy tools; this threshold is the automatic backstop for everything else. See the [Read-Response Filtering](../Guide/read-response-filtering.md) guide and [ADR-005](../../ADR/adr-005-read-response-filtering.md).
+This disclosure gate is deliberate. The old universal disclosure branch added 380 tokens to an empty ordinary `@mcp_tool` schema and 382 tokens to an auto-discovered action schema. On a production-shaped registry, removing that always-on schema contribution changed `tools/list` from 5,292 to 2,625 tokens, saving 2,667 tokens (50.4%). `@mcp_heavy` remains the preferred **explicit** mechanism for known-heavy tools that must negotiate instead of returning whole. See the [Read-Response Filtering](../Guide/read-response-filtering.md) guide and [ADR-005](../../ADR/adr-005-read-response-filtering.md).
 
-> **Upgrade note.** Earlier releases shipped this setting as `None` (dormant), so the backstop only fired when an operator set a value. It now defaults to `25000`, so every host gains probe-first behavior for large responses on upgrade with no config change. To preserve the old always-full behavior, set it explicitly to `None`.
+> **Upgrade note.** Earlier releases shipped this setting as `None` (dormant), so the backstop only fired when an operator set a value. It now defaults to `25000`, so schema-disclosing heavy tools and dispatchers gain probe-first behavior for large responses on upgrade with no config change. To preserve always-full read responses, set it explicitly to `None`.
 
 ```python
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25000  # bytes (this is also the shipped default)
-# FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None  # opt out: always return full responses
+# FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None  # opt out: always return full read responses
 ```
 
 ---
@@ -542,7 +555,7 @@ def search_devices(arguments, request):
     return DeviceSerializer(qs, many=True).data
 ```
 
-**For auto-discovered ViewSets**, set [`FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`](#frisian_mcp_auto_negotiate_threshold) instead — any auto-discovered tool whose response exceeds the byte threshold is auto-wrapped in the same probe envelope without a per-ViewSet code change.
+For auto-discovered ViewSets, [`FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`](#frisian_mcp_auto_negotiate_threshold) still observes response size, but plain auto-discovered actions do not publish the continuation call. An over-threshold response from one of those actions is returned complete. Register an explicit `@mcp_heavy` tool when a known-large read should negotiate.
 
 The agent is not prevented from paginating — it receives the metadata it needs to make that decision. `@mcp_heavy` ensures the context window is not pre-filled with data the agent may never use.
 

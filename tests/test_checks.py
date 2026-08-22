@@ -11,21 +11,33 @@ W012 — FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False while contrib.oauth is install
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+from django.core.checks import Error
 from django.test import modify_settings, override_settings
 
 from frisian_mcp.checks import (
+    E007_INVALID_UNAUTHENTICATED_TIER,
+    E008_DISPATCHER_WITHOUT_MEMBERSHIP,
+    E009_HEAVY_CACHE_ALIAS_MISSING,
+    E010_INVALID_MAX_TIER,
     W001_NO_PERMISSION_CLASSES,
     W002_PLAINTEXT_API_KEYS,
     W003_PRIVILEGED_SERVICE_ACCOUNT,
     W012_OAUTH_DISCOVERY_HIDDEN,
     W013_MALFORMED_RATE_LIMIT,
+    W016_HEAVY_CACHE_NOT_ISOLATED,
     check_api_keys_are_hashed,
+    check_dispatcher_membership,
+    check_heavy_cache_isolation,
+    check_max_tier_value,
     check_oauth_discovery_not_hidden,
     check_oauth_token_rate_limit_format,
     check_permission_classes_in_production,
     check_service_account_user,
+    check_unauthenticated_tier_value,
+    raise_on_invalid_max_tier,
 )
 
 # ---------------------------------------------------------------------------
@@ -390,3 +402,547 @@ class TestMalformedRateLimit:
         assert parse_rate_limit("0/minute") is None
         assert parse_rate_limit("-1/hour") is None
         assert parse_rate_limit("1/minute") == (1, 60)
+
+
+# ---------------------------------------------------------------------------
+# H7 — E007: an unrecognised FRISIAN_MCP_UNAUTHENTICATED_TIER must be loud
+# ---------------------------------------------------------------------------
+
+
+class TestUnauthenticatedTierCheck:
+    """
+    This check is for the operator; the runtime already denies.
+
+    Denying silently is its own trap: a host that meant ``read_write`` and typed
+    ``readwrite`` would lose anonymous access with nothing explaining why.  The
+    original defect was undetectable by reading the config — the setting was
+    present and spelled plausibly — so the fix has to be detectable by reading
+    the startup output.
+    """
+
+    def test_absent_setting_is_silent(self, settings: Any) -> None:
+        """Absence is the documented default, not a misconfiguration."""
+        if hasattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER"):
+            del settings.FRISIAN_MCP_UNAUTHENTICATED_TIER
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER=None)
+    def test_explicit_none_is_silent(self) -> None:
+        """An explicit ``None`` is a deliberate lockdown, not an error."""
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="none")
+    def test_canonical_none_string_is_silent(self) -> None:
+        """The canonical ``"none"`` is a deliberate lockdown, not an error."""
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="read_write")
+    def test_valid_tier_is_silent(self) -> None:
+        """A recognised tier raises nothing."""
+        assert check_unauthenticated_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="readwrite")
+    def test_typo_raises_error_not_warning(self) -> None:
+        """
+        A typo is an ``Error``, deliberately, not a ``Warning``.
+
+        Warnings are routinely ignored; this one changes whether anonymous
+        callers can reach the server at all, so it fails ``manage.py check``
+        and CI rather than scrolling past in a log stream.
+        """
+        errors = check_unauthenticated_tier_value()
+        assert len(errors) == 1
+        assert errors[0].id == E007_INVALID_UNAUTHENTICATED_TIER
+        assert isinstance(errors[0], Error)
+
+    @override_settings(FRISIAN_MCP_UNAUTHENTICATED_TIER="readwrite")
+    def test_error_names_the_value_and_the_accepted_set(self) -> None:
+        """
+        The message must let the operator fix it without reading the source.
+
+        It names what they typed, states that anonymous access is now DENIED
+        (the consequence they will otherwise be debugging), and lists every
+        accepted value including how to deny deliberately.
+        """
+        msg = check_unauthenticated_tier_value()[0]
+        assert "readwrite" in msg.msg
+        assert "DENIED" in msg.msg
+        for accepted in ("read", "read_write", "admin", "none"):
+            assert accepted in msg.hint
+
+    def test_check_is_registered_with_django(self) -> None:
+        """Registered under the security tag, so ``check --deploy`` runs it."""
+        from django.core.checks import registry as checks_registry
+
+        assert any(
+            c is check_unauthenticated_tier_value for c in checks_registry.registry.get_checks()
+        )
+
+
+# ---------------------------------------------------------------------------
+# H5 — E008: a group dispatcher registered without membership is an Error
+# ---------------------------------------------------------------------------
+
+
+class TestDispatcherMembershipCheck:
+    """
+    ``group_tool_names`` is a security-mechanism input, not a negotiation hint.
+
+    Both consumers in ``views.py`` fail closed on a falsy membership set, so a
+    host in this state is safe — it is simply never told that ``@mcp_heavy``
+    negotiation and the dispatcher-routed lean write envelope have gone inert.
+    The runtime is deliberately unchanged here; this check exists so the
+    operator learns.
+    """
+
+    def _group(self, reg: Any, *, members: Any) -> None:
+        """Register a group dispatcher the way ``apps.py`` does."""
+        reg.register(
+            name="catalog",
+            fn=lambda a, r: {},
+            description="Group dispatcher.",
+            input_schema={"type": "object"},
+            permission_classes=[],
+            permission_tier="read",
+            is_dispatcher=True,
+            **({} if members is None else {"group_tool_names": members}),
+        )
+
+    def test_membership_less_group_raises_error(self) -> None:
+        """The reported defect: a hand-registered group with no membership."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        self._group(reg, members=None)
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            errors = check_dispatcher_membership()
+        assert len(errors) == 1
+        assert errors[0].id == E008_DISPATCHER_WITHOUT_MEMBERSHIP
+        assert isinstance(errors[0], Error)
+
+    def test_empty_membership_also_raises(self) -> None:
+        """An empty frozenset is as unroutable as an absent one."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        self._group(reg, members=frozenset())
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert len(check_dispatcher_membership()) == 1
+
+    def test_populated_group_is_silent(self) -> None:
+        """A package-constructed group never fires — apps.py always sets it."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        reg.register("item_list", lambda a, r: {}, "member", {"type": "object"})
+        self._group(reg, members=frozenset({"item_list"}))
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert check_dispatcher_membership() == []
+
+    def test_class_dispatcher_never_fires(self) -> None:
+        """
+        ⚠️ The blast-radius guard: a class dispatcher must never fire.
+
+        A ``@mcp_dispatcher`` class legitimately has no membership set — its
+        actions are methods, not registry entries — so firing on it would break
+        startup for every correctly-configured host.
+
+        The two kinds are mutually exclusive at registration: ``decorators.py``
+        sets ``dispatcher_meta`` and never ``group_tool_names``; ``apps.py``
+        and ``route_views.py`` do the reverse.  This asserts the discriminator,
+        not merely that the happy path is quiet.
+        """
+        from frisian_mcp.decorators import mcp_action, mcp_dispatcher
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        with patch("frisian_mcp.decorators.tool_registry", reg):
+
+            @mcp_dispatcher("tasks", description="Class dispatcher.")
+            class _Tasks:
+                """Synthetic class dispatcher."""
+
+                @mcp_action("list", description="List.", params={})
+                def list(self, request: Any, params: dict[str, Any]) -> Any:
+                    """Return nothing."""
+                    return {}
+
+            _ = _Tasks
+
+        entry = reg.get_entry("tasks")
+        assert entry.is_dispatcher and entry.dispatcher_meta is not None
+        assert not entry.group_tool_names, "premise: a class dispatcher has no membership"
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert check_dispatcher_membership() == []
+
+    def test_flat_tool_never_fires(self) -> None:
+        """Non-dispatcher entries are out of scope entirely."""
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        reg.register("item_list", lambda a, r: {}, "flat", {"type": "object"})
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            assert check_dispatcher_membership() == []
+
+    def test_message_names_what_is_lost_and_how_to_silence(self) -> None:
+        """
+        The message must say what the host LOSES, not that something is odd.
+
+        An operator hitting a startup failure needs the consequence (negotiation
+        and the lean write envelope are inert, the membership gate has nothing
+        to check) and both exits: supply the field, or silence the ID.
+        """
+        from frisian_mcp.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        self._group(reg, members=None)
+        with patch("frisian_mcp.checks.tool_registry", reg):
+            err = check_dispatcher_membership()[0]
+        assert "group_tool_names" in err.msg
+        assert "@mcp_heavy" in err.msg
+        assert "global registry" in err.msg
+        assert "SILENCED_SYSTEM_CHECKS" in err.hint
+        assert E008_DISPATCHER_WITHOUT_MEMBERSHIP in err.hint
+
+    def test_check_is_registered_with_django(self) -> None:
+        """Registered under the security tag, so ``manage.py check`` runs it."""
+        from django.core.checks import registry as checks_registry
+
+        assert any(c is check_dispatcher_membership for c in checks_registry.registry.get_checks())
+
+
+class TestW016HeavyCacheIsolation:
+    """
+    H6: continuation state must not share an eviction domain with security state.
+
+    The check reports the two unseparated arrangements it can see from settings.
+    It deliberately cannot prove the converse — see
+    ``test_distinct_location_is_silent_even_though_it_may_still_share_an_instance``.
+    """
+
+    _DEFAULT_ONLY = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "redis://cache:6379/1",
+        }
+    }
+
+    def test_unset_alias_warns_because_nothing_was_separated(self) -> None:
+        """The pre-H6 arrangement every host already runs: one pool, everything in it."""
+        with override_settings(CACHES=self._DEFAULT_ONLY):
+            results = check_heavy_cache_isolation()
+        assert len(results) == 1
+        assert results[0].id == W016_HEAVY_CACHE_NOT_ISOLATED
+        # The operator needs to know the exposure is reachable from outside.
+        assert "unauthenticated" in results[0].msg
+        assert "fails OPEN" in results[0].msg
+
+    def test_alias_pointing_at_the_same_location_warns(self) -> None:
+        """
+        The exact mistake the ruling names: renaming the pool instead of dividing it.
+
+        An alias alone is not a boundary, so a config that merely *looks*
+        separated must not read as compliant.
+        """
+        caches_setting = dict(self._DEFAULT_ONLY)
+        caches_setting["heavy"] = {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "redis://cache:6379/1",  # identical to default
+        }
+        with override_settings(CACHES=caches_setting, FRISIAN_MCP_HEAVY_CACHE_ALIAS="heavy"):
+            results = check_heavy_cache_isolation()
+        assert len(results) == 1
+        assert results[0].id == W016_HEAVY_CACHE_NOT_ISOLATED
+        assert "renames the pool" in results[0].msg
+
+    def test_distinct_location_is_silent_even_though_it_may_still_share_an_instance(
+        self,
+    ) -> None:
+        """
+        Silence is NOT proof of isolation, and this test exists to say so.
+
+        Two logical Redis DBs on one instance have distinct ``LOCATION`` strings
+        and still share that instance's memory, so exhausting one takes the
+        other down.  The check cannot see that from settings; the independent
+        *budget* is an operator obligation.  Pinned so nobody later reads a
+        silent check as a verified boundary.
+        """
+        caches_setting = dict(self._DEFAULT_ONLY)
+        caches_setting["heavy"] = {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "redis://cache:6379/2",  # same instance, different DB
+        }
+        with override_settings(CACHES=caches_setting, FRISIAN_MCP_HEAVY_CACHE_ALIAS="heavy"):
+            results = check_heavy_cache_isolation()
+        assert results == []
+
+    def test_check_is_registered_with_django(self) -> None:
+        """Registered under the security tag, so ``manage.py check`` runs it."""
+        from django.core.checks import registry as checks_registry
+
+        assert any(c is check_heavy_cache_isolation for c in checks_registry.registry.get_checks())
+
+
+class TestE009HeavyCacheAliasMissing:
+    """
+    H19: an alias naming no configured cache is the case where silence is wrong.
+
+    Every other branch of :func:`check_heavy_cache_isolation` falls through
+    quietly for it — ``CACHES.get(alias)`` is ``None``, so the LOCATION
+    comparison never fires and the check reports clean while the runtime has
+    dropped continuation state back into the cache holding OAuth codes.  The
+    operator reads that silence as confirmation.
+    """
+
+    def _run(self, settings: Any, alias: str) -> list[Any]:
+        settings.FRISIAN_MCP_HEAVY_CACHE_ALIAS = alias
+        settings.CACHES = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "default-loc",
+            },
+            "heavy_continuation": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "heavy-loc",
+            },
+        }
+        return check_heavy_cache_isolation()
+
+    def test_a_typod_alias_is_an_error_not_silence(self, settings: Any) -> None:
+        """The named missing case: a configured alias that ``CACHES`` does not define."""
+        results = self._run(settings, "heavy_continuations")
+
+        assert len(results) == 1
+        assert results[0].id == E009_HEAVY_CACHE_ALIAS_MISSING
+        assert isinstance(results[0], Error), (
+            "Warning is the wrong level here: the Warning rationale is that the "
+            "unseparated arrangement predates the setting, which a typo cannot"
+        )
+
+    def test_the_error_names_the_alias_the_operator_wrote(self, settings: Any) -> None:
+        """An operator scanning startup output must see their own typo, not a generic line."""
+        results = self._run(settings, "hevy")
+
+        assert "'hevy'" in results[0].msg
+        assert "hevy" in results[0].hint
+
+    def test_a_correctly_spelled_alias_is_silent(self, settings: Any) -> None:
+        """The control — E009 must not fire on the arrangement it is asking for."""
+        assert self._run(settings, "heavy_continuation") == []
+
+
+# ---------------------------------------------------------------------------
+# E010: an unrecognised FRISIAN_MCP_MAX_TIER must be loud
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTierValueCheck:
+    """
+    E007's argument applied to the second tier setting.
+
+    Route ``highest_tier`` is parser-validated; the global cap was read raw.
+    The runtime fails closed but *asymmetrically*, which is what makes silence
+    dangerous: anonymous read keeps working while every privileged caller is
+    denied, so the symptom points away from this setting.
+    """
+
+    def test_absent_is_silent(self, settings: Any) -> None:
+        """No global cap is the documented default."""
+        if hasattr(settings, "FRISIAN_MCP_MAX_TIER"):
+            del settings.FRISIAN_MCP_MAX_TIER
+        assert check_max_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="read_write")
+    def test_valid_tier_is_silent(self) -> None:
+        """A recognised tier raises nothing."""
+        assert check_max_tier_value() == []
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_typo_raises_error(self) -> None:
+        """A typo is an Error, matching E007's treatment of the sibling setting."""
+        errors = check_max_tier_value()
+        assert len(errors) == 1
+        assert errors[0].id == E010_INVALID_MAX_TIER
+        assert isinstance(errors[0], Error)
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_message_names_the_asymmetry(self) -> None:
+        """
+        The message must describe the *asymmetric* consequence.
+
+        An operator seeing "admins denied, anonymous fine" would not otherwise
+        suspect a global cap, so the message says exactly that.
+        """
+        err = check_max_tier_value()[0]
+        assert "readwrite" in err.msg
+        assert "DENIED" in err.msg
+        assert "'read' callers are unaffected" in err.msg
+
+    def test_runtime_really_is_asymmetric(self) -> None:
+        """
+        Pins the behaviour the message describes, so the two cannot drift.
+
+        Asserted on the rank rather than end-to-end: ranking is what every gate
+        compares, and the clamp returns the invalid string itself.
+        """
+        from unittest.mock import MagicMock
+
+        from frisian_mcp.registry import _apply_max_tier_cap, _caller_rank
+
+        req = MagicMock(_mcp_max_tier="reed")
+        assert _apply_max_tier_cap("read", req) == "read"
+        assert _caller_rank(_apply_max_tier_cap("read_write", req)) < _caller_rank("read")
+        assert _caller_rank(_apply_max_tier_cap("admin", req)) < _caller_rank("read")
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="  READ_WRITE  ")
+    def test_non_canonical_value_is_accepted_by_both_check_and_runtime(self) -> None:
+        """
+        The check must not bless a value the runtime rejects.
+
+        This check normalised with ``strip().lower()`` while the request stamp
+        used the raw value, so ``"  READ_WRITE  "`` passed here and then denied
+        every privileged caller at runtime.  A control that *certifies* a broken
+        config is worse than one that stays silent, and this was that control.
+
+        Both sides now share ``normalize_tier_setting``, so agreement is
+        structural rather than a coincidence of two matching expressions.
+        """
+        from unittest.mock import MagicMock
+
+        from frisian_mcp.registry import _apply_max_tier_cap, _caller_rank
+        from frisian_mcp.views import McpView
+
+        assert check_max_tier_value() == []
+        stamped = McpView()._effective_max_tier()  # noqa: SLF001
+        capped = _apply_max_tier_cap("admin", MagicMock(_mcp_max_tier=stamped))
+        assert _caller_rank(capped) == _caller_rank(
+            "read_write"
+        ), "the check accepted this value; the runtime must too"
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_a_real_typo_still_denies_and_still_fires(self) -> None:
+        """Normalising must not turn a genuine typo into a silent pass."""
+        from unittest.mock import MagicMock
+
+        from frisian_mcp.registry import _apply_max_tier_cap, _caller_rank
+        from frisian_mcp.views import McpView
+
+        assert len(check_max_tier_value()) == 1
+        stamped = McpView()._effective_max_tier()  # noqa: SLF001
+        capped = _apply_max_tier_cap("admin", MagicMock(_mcp_max_tier=stamped))
+        assert _caller_rank(capped) < _caller_rank("read")
+
+
+# ---------------------------------------------------------------------------
+# E010 boot refusal: a checks.Error alone does not gate a WSGI server
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def fresh_app_config() -> Any:
+    """Yield the live app config with ``ready()``'s idempotency flags reset."""
+    from django.apps import apps as django_apps
+    from django.core.signals import request_started
+
+    from frisian_mcp.apps import _DEFERRED_DISCOVERY_UID
+
+    config = django_apps.get_app_config("frisian_mcp")
+    original_ready = config._mcp_ready  # noqa: SLF001
+    original_discovered = config._mcp_discovered  # noqa: SLF001
+    config._mcp_ready = False  # noqa: SLF001
+    config._mcp_discovered = False  # noqa: SLF001
+    request_started.disconnect(dispatch_uid=_DEFERRED_DISCOVERY_UID)
+    try:
+        yield config
+    finally:
+        config._mcp_ready = original_ready  # noqa: SLF001
+        config._mcp_discovered = original_discovered  # noqa: SLF001
+        request_started.disconnect(dispatch_uid=_DEFERRED_DISCOVERY_UID)
+
+
+class TestMaxTierBootRefusal:
+    """
+    E010 must bite under a WSGI server, not only under ``manage.py check``.
+
+    ``route_audit.raise_on_fatal_route_config`` records the standard this class
+    enforces for the second setting: *a* ``checks.Error`` *alone does not stop a
+    WSGI server from booting and serving traffic — only an exception raised out
+    of* ``ready()`` *does.*  Without the raise, E010 was a correct, tested
+    control that nobody running gunicorn would ever consult — the exact shape
+    this branch has spent its time removing.
+    """
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_invalid_cap_refuses(self) -> None:
+        """A typo'd cap must stop the process rather than half-serve."""
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(ImproperlyConfigured) as exc:
+            raise_on_invalid_max_tier()
+        assert "FRISIAN_MCP_MAX_TIER" in str(exc.value)
+        assert "readwrite" in str(exc.value)
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="read_write")
+    def test_valid_cap_boots(self) -> None:
+        """A recognised tier must not refuse."""
+        raise_on_invalid_max_tier()
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="  READ_WRITE  ")
+    def test_non_canonical_cap_boots(self) -> None:
+        """Whitespace and case are accepted, matching the check and the stamp."""
+        raise_on_invalid_max_tier()
+
+    def test_absent_cap_boots(self, settings: Any) -> None:
+        """No cap is the documented default and must never refuse a boot."""
+        if hasattr(settings, "FRISIAN_MCP_MAX_TIER"):
+            del settings.FRISIAN_MCP_MAX_TIER
+        raise_on_invalid_max_tier()
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["read", "read_write", "admin", "  ADMIN  ", "readwrite", "reed", "none", ""],
+    )
+    def test_refusal_and_report_never_disagree(self, raw: str) -> None:
+        """
+        The boot refusal and the E010 report must be the same decision.
+
+        Two call sites deciding validity independently is how this setting
+        produced a check that certified a config the runtime rejected.  Both
+        now go through ``_invalid_max_tier``; this pins that they cannot drift
+        back apart, including on ``"none"`` — the deny sentinel is not a
+        legal *cap*.
+        """
+        from django.core.exceptions import ImproperlyConfigured
+
+        with override_settings(FRISIAN_MCP_MAX_TIER=raw):
+            reported = bool(check_max_tier_value())
+            try:
+                raise_on_invalid_max_tier()
+                refused = False
+            except ImproperlyConfigured:
+                refused = True
+        assert reported == refused, f"{raw!r}: check and boot refusal disagree"
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite")
+    def test_ready_actually_calls_it(self, fresh_app_config: Any) -> None:
+        """
+        The refusal must be *wired*, not merely available.
+
+        Asserted by driving ``ready()`` rather than by patching, because
+        "the function exists and is correct" is precisely the standard E010
+        already met while doing nothing on the path that matters.
+        """
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(ImproperlyConfigured, match="FRISIAN_MCP_MAX_TIER"):
+            fresh_app_config.ready()
+
+    @override_settings(FRISIAN_MCP_MAX_TIER="readwrite", FRISIAN_MCP_ENABLED=False)
+    def test_disabled_gateway_still_boots(self, fresh_app_config: Any) -> None:
+        """
+        A disabled gateway must not refuse to start over a cap it never applies.
+
+        Same placement rule as ``raise_on_fatal_route_config``: after the
+        ENABLED guard, because a gateway that mounts nothing enforces nothing.
+        """
+        fresh_app_config.ready()

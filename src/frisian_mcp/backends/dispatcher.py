@@ -14,9 +14,7 @@ import jsonschema.exceptions
 from django.http import HttpRequest
 
 from frisian_mcp.negotiation import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
-from frisian_mcp.registry import ToolInputError
-
-_TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
+from frisian_mcp.registry import _TIER_RANK, ToolInputError, _caller_rank
 
 
 @dataclasses.dataclass
@@ -65,7 +63,7 @@ def _visible_actions(
     if max_tier is None:
         candidates = dict(meta.actions)
     else:
-        max_rank = _TIER_RANK.get(max_tier, 0)
+        max_rank = _caller_rank(max_tier)
         candidates = {
             name: entry
             for name, entry in meta.actions.items()
@@ -101,13 +99,20 @@ def _build_dispatcher_input_schema(
         f"{name}: {{{', '.join(entry.params.keys())}}}" if entry.params else f"{name}: (no params)"
         for name, entry in visible.items()
     )
+    # The 'continuation_token' placement rule is NOT repeated here:
+    # _NEGOTIATION_PROPERTIES already publishes "Place at the TOP LEVEL of
+    # arguments — NOT inside 'params'." into this same schema via the flat
+    # merge, so the reader was being told twice (CR-7).
+    #
+    # What follows is NOT redundant and must stay: nothing else in the schema
+    # says these four keys are top-level *only* on a continuation call.  The
+    # negotiation field descriptions are deliberately shape-neutral and cannot
+    # carry it, and all four collide with real host data.
     params_description = (
         f"Action-specific parameters. {param_hints}."
-        " 'continuation_token' is never an action parameter — it is always a"
-        " top-level sibling of 'action' and 'params'. 'mode', 'page',"
-        " 'page_size' and 'filter_keys' are top-level ONLY on a continuation"
-        " call (i.e. alongside a 'continuation_token'); otherwise they are"
-        " ordinary action parameters and belong here."
+        " 'mode', 'page', 'page_size' and 'filter_keys' are top-level ONLY on a"
+        " continuation call (i.e. alongside a 'continuation_token'); otherwise"
+        " they are ordinary action parameters and belong here."
     )
     schema: dict[str, Any] = {
         "type": "object",
@@ -204,33 +209,39 @@ def _build_perm_action_filter_from_request(
     """
     Build a Django-permission action filter for *tool_name* using capabilities cached on *request*.
 
-    Returns ``None`` when permission-aware discovery is disabled, the user is unrestricted,
-    or the tool has no ``perm_app_label``/``perm_model`` metadata.
-    Called by the ``action="help"`` branch of dispatcher ``invoke`` so that help responses
-    respect the same permission filtering as the ``tools/list`` action enum.
+    Returns ``None`` — meaning *publish every action* — only when permission-aware
+    discovery is disabled or the user is unrestricted, i.e. when there is no
+    filtering to do at all.  Everything else goes through the shared lens.
+
+    Called by the ``action="help"`` branch of dispatcher ``invoke``, by the
+    unknown-action suggestion candidates, and by the per-request schema re-emit,
+    so all three agree with the ``tools/list`` action enum.
+
+    H3: this used to end ``return None`` when the entry had no
+    ``perm_app_label``/``perm_model`` — so on an indeterminate dispatcher
+    ``tools/list`` denied every action while these three published every action.
+    Not a gap: the exact inverse of the ruling, on the same request.  It also
+    had no ``universal_discovery`` branch and no ``capability`` fallback, so an
+    operator following W015's own advice got a filtered ``tools/list`` and an
+    unfiltered ``action="help"`` on the same dispatcher.
     """
     caps: Container[str] | None = getattr(request, "_mcp_capabilities", None)
     if caps is None:
         return None
     # Local imports avoid circular deps (registry imports dispatcher lazily).
     from frisian_mcp.contrib.permissions.base import (  # pylint: disable=import-outside-toplevel
-        _DRF_ACTION_TO_PERM_VERB,
+        build_action_filter,
+        deny_all_actions,
     )
     from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
         tool_registry,
     )
 
     entry = tool_registry.get_entry(tool_name)
-    if entry is None or not entry.perm_app_label or not entry.perm_model:
-        return None
-    app_label: str = entry.perm_app_label
-    model: str = entry.perm_model
-
-    def action_filter(action_name: str, action_entry: ActionEntry) -> bool:
-        verb = action_entry.backend_action or _DRF_ACTION_TO_PERM_VERB.get(action_name, "view")
-        return f"{app_label}.{verb}_{model}" in caps
-
-    return action_filter
+    if entry is None:
+        # An unresolvable tool is indeterminate, not unrestricted.
+        return deny_all_actions
+    return build_action_filter(entry, caps)
 
 
 def _reject_misplaced_continuation_token(arguments: dict[str, Any]) -> None:
@@ -315,12 +326,22 @@ def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., di
             # full map would name a hidden action back to the caller inside
             # the very error that denies it exists (V11-20/F3).  Uncapped
             # legacy hosts keep the full-map hint unchanged.
-            if getattr(request, "_mcp_max_tier", None) is not None:
+            #
+            # H3: the CAPABILITY lens applies on every mount, not only capped
+            # ones.  Gating it on `_mcp_max_tier` meant a perm-aware host on an
+            # uncapped mount still suggested actions the caller cannot see —
+            # the same shape as the group 404 hint, which fires before its own
+            # tier check.  Tier filtering keeps the legacy uncapped behaviour
+            # (max_tier=None returns every tier), so only the capability half
+            # changes here.
+            _capped = getattr(request, "_mcp_max_tier", None) is not None
+            _perm_filter = _build_perm_action_filter_from_request(request, meta.name)
+            if _capped or _perm_filter is not None:
                 candidates = list(
                     _visible_actions(
                         meta,
-                        _resolve_request_tier(request),
-                        action_filter=_build_perm_action_filter_from_request(request, meta.name),
+                        _resolve_request_tier(request) if _capped else None,
+                        action_filter=_perm_filter,
                     )
                 )
             else:
@@ -350,7 +371,7 @@ def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., di
         # truthy, which silently let unauthenticated callers invoke write/admin
         # actions — a critical authorisation bypass.
         caller_tier = _resolve_request_tier(request)
-        caller_rank = _TIER_RANK.get(caller_tier, 0)
+        caller_rank = _caller_rank(caller_tier)
         action_rank = _TIER_RANK.get(entry.permission_tier, 0)
         if caller_rank < action_rank:
             if getattr(request, "_mcp_max_tier", None) is not None:

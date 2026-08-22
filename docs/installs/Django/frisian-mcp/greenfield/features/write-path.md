@@ -19,7 +19,7 @@ See [Write-Path Response Filtering](../../../../../v1.1/Guide/write-path-respons
 
 ## How it works
 
-Write-path filtering is **automatic** — no decorator, no ViewSet change, no opt-in.  Every tool whose underlying action is a write (`create`, `update`, `partial_update`, `destroy`, or any `@action` declared with `methods=['POST', 'PUT', 'PATCH', 'DELETE']`) routes through the MCP gateway with a lean confirmation envelope by default.  Standard DRF clients calling the same ViewSet directly receive the conventional full-echo response; only MCP-routed calls receive the lean envelope.
+Write-path filtering is **automatic** for write calls whose published schema discloses the continuation call — no decorator, no ViewSet change, no opt-in.  A write action (`create`, `update`, `partial_update`, `destroy`, or any `@action` declared with `methods=['POST', 'PUT', 'PATCH', 'DELETE']`) routed through a schema-disclosing MCP gateway entry returns a lean confirmation envelope by default.  Standard DRF clients calling the same ViewSet directly receive the conventional full-echo response; only eligible MCP-routed calls receive the lean envelope.
 
 ```python
 # No decorator needed.  The ViewSet remains a plain DRF ModelViewSet.
@@ -28,7 +28,7 @@ class DeviceViewSet(ModelViewSet):
     serializer_class = DeviceSerializer
 ```
 
-When a write operation routed through the MCP gateway completes, the response is a lean confirmation envelope instead of the full serialized object.  Customise the envelope via the serializer's `Meta.mcp_light_key` attribute (see below) or override per call via `verify=True`.
+When an eligible write operation routed through the MCP gateway completes, the response is a lean confirmation envelope instead of the full serialized object.  Customise the envelope via the serializer's `Meta.mcp_light_key` attribute (see below) or override per call via `verify=True`.
 
 > **Naming note.** This feature is referred to as `@mcp_light` in design notes and ADRs, mirroring `@mcp_heavy` for read paths.  Despite the name, there is no `mcp_light` decorator in the package — the behaviour is package-level by design (ADR-004).  Earlier draft docs that showed `from frisian_mcp import mcp_light` and `@mcp_light` on a ViewSet were inaccurate; ignore them.
 
@@ -127,14 +127,14 @@ Fields listed in `mcp_light_key` appear in every lean envelope for that serializ
 
 ## Precedence
 
-If a tool carries both `@mcp_heavy` decoration and write semantics, `@mcp_heavy` probe behaviour takes precedence on the read path.  Pure write paths always use the lean envelope.
+If a tool carries both `@mcp_heavy` decoration and write semantics, `@mcp_heavy` probe behaviour takes precedence on the read path.  Pure write paths use the lean envelope where the published schema discloses continuation.
 
-For a backstop that applies to all tools — including unannotated read tools — set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`:
+For a read-response backstop on schema-disclosing heavy tools and dispatchers, set `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`:
 
 ```python
 # settings.py
 
-# Cap all tool responses at 10 KB
+# Negotiate eligible read responses over 10 KB
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 10_000
 ```
 

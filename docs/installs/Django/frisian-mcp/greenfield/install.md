@@ -144,7 +144,12 @@ A common minimum configuration:
 # settings.py
 
 # Expose read-tier tools to unauthenticated callers.
-# Set to None or "none" to require authentication for all tools.
+# Set to None or "none" to deny unauthenticated callers entirely, so every
+# tool requires credentials.  Any unrecognised value also denies, and raises
+# a startup error naming the setting.
+# NOTE: in releases before this one the deny values had no effect — see the
+# correction under FRISIAN_MCP_UNAUTHENTICATED_TIER in the configuration
+# reference before relying on this on an existing deployment.
 FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 
 # Optional: name your server

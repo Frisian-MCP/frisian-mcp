@@ -20,8 +20,12 @@ def _echo(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
 
 
 def _req() -> Any:
-    """Return a minimal mock request."""
-    return MagicMock()
+    """Return a minimal mock request with no fabricated MCP tier context."""
+    # A bare MagicMock auto-creates `_mcp_effective_tier` / `_mcp_max_tier` /
+    # `auth`, so it presents a Mock object where a tier string belongs.  H7
+    # ranks an unrecognised tier BELOW read, so such a request is now denied —
+    # correctly.  Pin the MCP attributes to their real "no context" values.
+    return MagicMock(_mcp_effective_tier=None, _mcp_max_tier=None, auth=None)
 
 
 # ---------------------------------------------------------------------------

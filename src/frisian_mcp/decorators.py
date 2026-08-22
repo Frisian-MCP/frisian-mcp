@@ -23,6 +23,8 @@ def mcp_tool(
     permission_classes: list[type[BasePermission]] | None = None,
     write: bool = False,
     admin: bool = False,
+    capability: str | None = None,
+    universal_discovery: bool = False,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Register the decorated callable as a named MCP tool.
@@ -55,6 +57,17 @@ def mcp_tool(
             Pass ``None`` or ``[]`` for unrestricted access.
         write: Set ``True`` to assign ``permission_tier="read_write"``.
         admin: Set ``True`` to assign ``permission_tier="admin"``.
+        capability: The Django permission string a caller must hold for this
+            tool to appear in ``tools/list`` under
+            ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` (e.g.
+            ``"orders.view_order"``).  Decorator tools have no ViewSet queryset
+            for discovery to derive this from, so declaring it is the only way
+            they participate in capability filtering.
+        universal_discovery: Declare this tool intentionally visible to every
+            caller.  Without either this or *capability*, the tool's capability
+            is indeterminate and it is **hidden** when permission-aware
+            discovery is on — visibility to everyone must be stated, never
+            inherited from missing metadata.
 
     Returns:
         The original callable, unchanged, registered as a side-effect.
@@ -66,6 +79,36 @@ def mcp_tool(
             name=name,
             fn=fn,
             description=description,
+            capability=capability,
+            universal_discovery=universal_discovery,
+            # H2 (narrowed, CR-2): the caller's schema is published EXACTLY as
+            # handed to us.  ``@mcp_tool`` deliberately does not disclose the
+            # continuation call.
+            #
+            # H2 originally disclosed here, reasoning that anything reachable by
+            # the size backstop must publish the shape the backstop mints
+            # against.  The premise was right; the direction was wrong.  The
+            # invariant to preserve is "never mint a token the caller cannot
+            # legally return", and it is enforced on the *mint* side:
+            # ``schema_discloses_continuation()`` gates the backstop in
+            # ``views.py`` against this same object, so a schema that stays
+            # silent never mints.  Disclosing universally bought that invariant
+            # by inflating every ordinary tool's published schema by ~380 tokens
+            # (measured, CR-1) — an additive cost, paid on every ``tools/list``,
+            # by hosts that never asked for negotiation.
+            #
+            # This is not a new fallback.  ``merge_continuation_branch`` already
+            # refused to disclose for any schema declaring
+            # ``"additionalProperties": false`` (H18), and already documented
+            # the consequence: an over-threshold response "is returned whole".
+            # CR-2 widens that existing, documented path from closed schemas to
+            # every ordinary ``@mcp_tool`` registration.  Whole is literally
+            # whole — the full payload, with nothing pinned in the heavy cache.
+            #
+            # A host that wants negotiation on a hand-registered tool has an
+            # explicit way to ask for it: ``@mcp_heavy``, which still discloses
+            # via ``_merge_negotiation_schema`` below and is the purpose of this
+            # PR.  Negotiation is opt-in for ordinary tools, not imposed on them.
             input_schema=input_schema,
             permission_classes=permission_classes,
             permission_tier="admin" if admin else "read_write" if write else "read",
@@ -125,6 +168,8 @@ def mcp_dispatcher(
     name: str,
     description: str,
     permission_classes: list[type[BasePermission]] | None = None,
+    capability: str | None = None,
+    universal_discovery: bool = False,
 ) -> Callable[[_ClassT], _ClassT]:
     """
     Register a class as a named MCP dispatcher tool.
@@ -139,6 +184,16 @@ def mcp_dispatcher(
         description: Human-readable description shown in ``tools/list``.
         permission_classes: DRF permission classes that guard this dispatcher.
             Pass ``None`` or ``[]`` for unrestricted access.
+        capability: The ``"app_label.model"`` base this dispatcher's per-action
+            verbs resolve against under
+            ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` (e.g.
+            ``"catalog.item"``, which combines with each action's verb to give
+            ``"catalog.add_item"``).  A class dispatcher has no ViewSet queryset
+            to derive this from; without it every action is hidden and the
+            dispatcher is dropped as an empty navigation entry point.
+        universal_discovery: Publish this dispatcher and its full action enum
+            to every caller.  Must be stated explicitly — an indeterminate
+            dispatcher is hidden, not universally visible.
 
     Returns:
         The original class, unchanged, registered as a side-effect.
@@ -190,6 +245,8 @@ def mcp_dispatcher(
             is_dispatcher=True,
             permission_tier="read",
             dispatcher_meta=meta,
+            capability=capability,
+            universal_discovery=universal_discovery,
         )
         return cls
 
@@ -241,6 +298,8 @@ def mcp_heavy(
     permission_classes: list[type[BasePermission]] | None = None,
     write: bool = False,
     admin: bool = False,
+    capability: str | None = None,
+    universal_discovery: bool = False,
 ) -> Callable[[_CallableT], _CallableT]:
     """
     Register the decorated callable as a heavy MCP tool with response-negotiation.
@@ -271,14 +330,24 @@ def mcp_heavy(
     ``inputSchema`` so that ``tools/list`` exposes the protocol to clients.
 
     **Secondary backstop (v2):** ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` — a byte-count
-    integer; any successful **non-write** response above that size is automatically wrapped
-    in a probe envelope, even on tools not decorated with ``@mcp_heavy``.  (Writes return
-    their lean confirmation envelope *before* this backstop is reached, and ``@mcp_heavy``
-    tools use their own probe path — so the backstop covers reads, list and detail, plus
-    custom tool output.)  It defaults to ``25000`` bytes (~25 KB) so high-cardinality reads
-    probe-first out of the box; set it to ``None`` in Django settings to disable the
-    backstop, or to a larger value to probe less often.  This setting is secondary; prefer
-    ``@mcp_heavy`` for explicit heavy tools.
+    integer; a successful **non-write** response above that size is automatically wrapped
+    in a probe envelope **when the tool's published schema discloses the continuation
+    call**.  Since CR-2 that means ``@mcp_heavy`` and the dispatchers; it is deliberately
+    not universal.
+
+    The gate is disclosure, not decoration — a group or class dispatcher carries no
+    ``@mcp_heavy`` decorator and still probes, because its published schema declares the
+    protocol.  Conversely an ordinary ``@mcp_tool`` registration or a plain auto-discovered
+    action publishes the host schema unchanged, so however large its response, it is
+    **returned whole** and mints nothing.  A host wanting probe-first behaviour on such a
+    tool asks for it by decorating with ``@mcp_heavy`` or mounting behind a dispatcher.
+
+    (Writes return their lean confirmation envelope *before* this backstop is reached, and
+    ``@mcp_heavy`` tools use their own probe path — so the backstop covers disclosing
+    reads, list and detail, plus custom tool output.)  It defaults to ``25000`` bytes
+    (~25 KB) so high-cardinality reads on those shapes probe-first out of the box; set it
+    to ``None`` in Django settings to disable the backstop, or to a larger value to probe
+    less often.  This setting is secondary; prefer ``@mcp_heavy`` for explicit heavy tools.
 
     Args:
         name: Unique MCP tool name (e.g. ``"enterprise.list_all_tools"``).
@@ -288,6 +357,14 @@ def mcp_heavy(
         permission_classes: DRF permission classes that guard this tool.
         write: Set ``True`` to assign ``permission_tier="read_write"``.
         admin: Set ``True`` to assign ``permission_tier="admin"``.
+        capability: Django permission string the caller must hold for this tool
+            to appear under ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` (H3).
+            Omitted leaves the tool indeterminate, which fails closed — it is
+            hidden, and ``W015`` names it at startup.
+        universal_discovery: Set ``True`` to declare the tool intentionally
+            visible to every caller, exempting it from capability filtering.
+            Explicit by design: intent must be stated, never inferred from
+            absent metadata.
 
     Returns:
         The original callable, unchanged, registered as a side-effect.
@@ -315,6 +392,8 @@ def mcp_heavy(
             description=description,
             input_schema=_merge_negotiation_schema(input_schema),
             permission_classes=permission_classes,
+            capability=capability,
+            universal_discovery=universal_discovery,
             is_heavy=True,
             permission_tier="admin" if admin else "read_write" if write else "read",
         )

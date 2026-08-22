@@ -64,7 +64,7 @@ class Command(BaseCommand):
         self._check_installed_apps(errors)
         self._check_url_mounting(warnings)
         self._check_auth_wiring(warnings)
-        self._check_security_settings(warnings)
+        self._check_security_settings(errors, warnings)
         self._check_cache_backend(warnings)
         # Discovery must run before any check that reads the tool registry.  A
         # management command serves no HTTP request, so the `request_started`
@@ -368,7 +368,7 @@ class Command(BaseCommand):
         if not auth_classes and not perm_classes:
             self._ok("Auth classes empty — gateway is open (intentional for demo/internal use)")
 
-    def _check_security_settings(self, warnings: list[str]) -> None:
+    def _check_security_settings(self, errors: list[str], warnings: list[str]) -> None:
         """Check security-relevant settings."""
         debug: bool = getattr(settings, "DEBUG", False)
         if debug:
@@ -390,30 +390,53 @@ class Command(BaseCommand):
                 " Set FRISIAN_MCP_HMAC_KEY to decouple them.",
             )
 
+        # H13: classify via the registry, never by re-reading the setting here.
+        # This block previously used getattr(..., None), which cannot tell an
+        # ABSENT setting from one explicitly set to None — so a deliberate
+        # lockdown was reported as "not set" with a green tick while the server
+        # denied every anonymous caller.  It also claimed an unrecognised value
+        # "defaults to read at runtime", which H7 made false: the same boot then
+        # emitted E007 saying it denies, and an operator reading both had no way
+        # to tell which was true.  A diagnostic that contradicts the runtime is
+        # worse than no diagnostic, because it is the tool you reach for to check.
+        from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
+            UNAUTH_TIER_ABSENT,
+            UNAUTH_TIER_EXPLICIT_NONE,
+            UNAUTH_TIER_INVALID,
+            classify_unauthenticated_tier,
+        )
+
+        _unauth_case, unauth_tier = classify_unauthenticated_tier()
         _unauth_raw = getattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER", None)
-        unauth_tier: str = str(_unauth_raw) if _unauth_raw is not None else "read"
-        if _unauth_raw is None:
+        if _unauth_case == UNAUTH_TIER_ABSENT:
             self._ok(
                 "FRISIAN_MCP_UNAUTHENTICATED_TIER not set — defaulting to 'read'"
                 " (anonymous callers see only read-tier tools)"
+            )
+        elif _unauth_case == UNAUTH_TIER_EXPLICIT_NONE:
+            self._ok(
+                f"FRISIAN_MCP_UNAUTHENTICATED_TIER={_unauth_raw!r} — anonymous callers are"
+                " DENIED all access, including read-tier tools. This is a deliberate"
+                " lockdown, not the default."
+            )
+        elif _unauth_case == UNAUTH_TIER_INVALID:
+            self._fail(
+                errors,
+                f"FRISIAN_MCP_UNAUTHENTICATED_TIER={_unauth_raw!r} is not a recognised tier"
+                " (expected 'read', 'read_write', 'admin', or 'none') — anonymous callers"
+                " are being DENIED all access. See startup check frisian_mcp.E007.",
             )
         elif unauth_tier == "read":
             self._ok(
                 "FRISIAN_MCP_UNAUTHENTICATED_TIER='read'"
                 " — anonymous callers see only read-tier tools"
             )
-        elif unauth_tier in ("read_write", "admin"):
+        else:
             self._warn_msg(
                 warnings,
                 f"FRISIAN_MCP_UNAUTHENTICATED_TIER='{unauth_tier}' — anonymous callers can invoke"
                 f" {unauth_tier}-tier tools without authentication."
                 " Acceptable for internal or demo deployments; not recommended for production.",
-            )
-        else:
-            self._warn_msg(
-                warnings,
-                f"FRISIAN_MCP_UNAUTHENTICATED_TIER='{unauth_tier}' is not a recognised tier"
-                " (expected 'read', 'read_write', or 'admin') — defaulting to 'read' at runtime",
             )
 
         proxy_count: int = getattr(settings, "FRISIAN_MCP_TRUSTED_PROXY_COUNT", 0)

@@ -24,6 +24,132 @@ logger = logging.getLogger(__name__)
 _TIER_RANK: dict[str, int] = {"read": 0, "read_write": 1, "admin": 2}
 _VALID_PERMISSION_TIERS: frozenset[str] = frozenset(_TIER_RANK)
 
+#: The caller tier meaning "no access at all" (H7).
+#:
+#: Deliberately NOT a member of ``_TIER_RANK``, and therefore not of
+#: ``_VALID_PERMISSION_TIERS`` or ``route_config.PERMISSION_TIERS``.  Those
+#: vocabularies govern what a *tool* may be registered at and what a *route
+#: ceiling* may be set to, and neither may be ``"none"``: a tool nobody can
+#: ever reach is a configuration error, not a tier.  ``"none"`` describes only
+#: what a **caller** was granted.
+DENY_TIER = "none"
+
+#: Caller-tier ranks.  Identical to :data:`_TIER_RANK` plus :data:`DENY_TIER`
+#: below every real tier, so ``caller_rank < entry_rank`` denies *every* tool
+#: including ``read`` ones without any comparison site needing a special case.
+_CALLER_TIER_RANK: dict[str, int] = {DENY_TIER: -1, **_TIER_RANK}
+
+
+def _caller_rank(tier: str | None) -> int:
+    """
+    Return the access rank of a **caller** tier.
+
+    Use this wherever the value being ranked is what the *caller* was granted;
+    keep :data:`_TIER_RANK` for what a *tool or route* requires.  The two
+    vocabularies differ by exactly :data:`DENY_TIER`, and collapsing them would
+    make ``"none"`` a registerable tool tier.
+
+    Unrecognised values rank as ``DENY_TIER``, not as ``read``.  That inversion
+    is the H7 fix: ``_TIER_RANK.get(tier, 0)`` previously gave an unknown
+    string the same rank as ``read``, so a typo'd or explicitly-``None``
+    ``FRISIAN_MCP_UNAUTHENTICATED_TIER`` silently granted the full read
+    surface.  The setting was present, spelled plausibly, and did nothing.
+    """
+    if tier is None:
+        return _CALLER_TIER_RANK[DENY_TIER]
+    return _CALLER_TIER_RANK.get(str(tier), _CALLER_TIER_RANK[DENY_TIER])
+
+
+#: The four states ``FRISIAN_MCP_UNAUTHENTICATED_TIER`` can be in (H7).
+#: ``ABSENT`` and ``EXPLICIT_NONE`` are deliberately distinct: absence is the
+#: documented ``read`` default and must keep working, while an explicit ``None``
+#: is a lockdown.  Collapsing them is the bug this vocabulary exists to prevent.
+UNAUTH_TIER_ABSENT = "absent"
+UNAUTH_TIER_EXPLICIT_NONE = "explicit_none"
+UNAUTH_TIER_VALID = "valid"
+UNAUTH_TIER_INVALID = "invalid"
+
+#: Sentinel distinguishing "attribute missing" from "attribute set to None".
+#: ``getattr(settings, NAME, None)`` cannot tell those apart, and every H7
+#: consumer needs to.
+_UNSET = object()
+
+
+def normalize_tier_setting(raw: Any) -> str | None:
+    """
+    Return the canonical tier for a settings value, or ``None`` if unrecognised.
+
+    **One normalisation, shared by the runtime and the startup check.**  The two
+    previously disagreed on ``FRISIAN_MCP_MAX_TIER``: ``check_max_tier_value``
+    compared ``str(raw).strip().lower()`` while the request stamp used the raw
+    value, so ``"  READ_WRITE  "`` passed the check and then denied every
+    privileged caller at runtime — a check that actively *certified* a broken
+    configuration, which is worse than one that stays silent.
+
+    Accepting surrounding whitespace and case matches
+    :func:`classify_unauthenticated_tier`, so the two tier settings behave the
+    same way rather than one being forgiving and the other exact.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip().lower()
+    return value if value in _VALID_PERMISSION_TIERS else None
+
+
+def classify_unauthenticated_tier() -> tuple[str, str]:
+    """
+    Return ``(case, effective_tier)`` for ``FRISIAN_MCP_UNAUTHENTICATED_TIER``.
+
+    **The single source of truth for this setting (H13).**  Three consumers ask
+    about it — the runtime resolver, the ``E007`` startup check, and
+    ``mcp_doctor`` — and each previously derived the answer itself.  The doctor's
+    copy drifted: it reported *"defaulting to 'read' at runtime"* for an
+    unrecognised value after H7 had made that deny, and it read the setting with
+    ``getattr(..., None)``, so a deliberate lockdown was reported as *"not
+    set"* with a green tick while the server denied every anonymous caller.
+
+    That is the standing failure of this project in miniature — a gate fixed in
+    the consumer the task named while the other consumers keep the old
+    semantics.  The classification is therefore computed **once**, here, and the
+    *case* is returned alongside the tier so a caller that needs to explain
+    itself does not have to re-derive why.
+
+    Cases:
+
+    * ``UNAUTH_TIER_ABSENT`` → ``"read"``.  The documented default; every host
+      that never set it keeps working.
+    * ``UNAUTH_TIER_EXPLICIT_NONE`` → :data:`DENY_TIER`.  ``None`` or the
+      canonical string ``"none"`` — a deliberate lockdown.
+    * ``UNAUTH_TIER_VALID`` → the tier itself.
+    * ``UNAUTH_TIER_INVALID`` → :data:`DENY_TIER`, and ``E007`` fires.  Denying
+      is correct; denying *silently* would strand an operator who typed
+      ``readwrite`` for ``read_write``, which is why the case is distinguished
+      rather than folded into the one above.
+    """
+    raw = getattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER", _UNSET)
+    if raw is _UNSET:
+        return UNAUTH_TIER_ABSENT, "read"
+    if raw is None:
+        return UNAUTH_TIER_EXPLICIT_NONE, DENY_TIER
+    value = str(raw).strip().lower()
+    if value == DENY_TIER:
+        return UNAUTH_TIER_EXPLICIT_NONE, DENY_TIER
+    if value in _VALID_PERMISSION_TIERS:
+        return UNAUTH_TIER_VALID, value
+    return UNAUTH_TIER_INVALID, DENY_TIER
+
+
+def _resolve_unauthenticated_tier() -> str:
+    """
+    Return the caller tier for an unauthenticated request (H7).
+
+    Thin wrapper over :func:`classify_unauthenticated_tier` so the runtime and
+    every diagnostic answer from one derivation.  Fails closed on purpose: a
+    host relying on the previous fail-open behaviour loses anonymous access
+    when this lands, which is the intended outcome and carries a release note.
+    """
+    return classify_unauthenticated_tier()[1]
+
 
 #: Single-key argument dicts whose value is a list are treated as bulk-create
 #: (or bulk-update/destroy) bodies.  When detected in :meth:`ToolRegistry.dispatch`
@@ -103,7 +229,9 @@ def _resolve_tier_from_role_map(request: Any) -> str | None:
 def _apply_max_tier_cap(tier: str, request: Any) -> str:
     """Clamp *tier* to ``request._mcp_max_tier`` when the cap is stricter."""
     cap: str | None = getattr(request, "_mcp_max_tier", None)
-    if cap is not None and _TIER_RANK.get(tier, 0) > _TIER_RANK.get(cap, 0):
+    # Caller-side rank on the left: a denied caller ranks below every ceiling,
+    # so a route cap can only ever lower a tier, never raise a denial to read.
+    if cap is not None and _caller_rank(tier) > _TIER_RANK.get(cap, 0):
         return cap
     return tier
 
@@ -176,7 +304,7 @@ def _resolve_request_tier(request: Any) -> str:
         return _apply_max_tier_cap(role_tier, request)
 
     if auth_obj is None:
-        tier = str(getattr(settings, "FRISIAN_MCP_UNAUTHENTICATED_TIER", "read"))
+        tier = _resolve_unauthenticated_tier()
     else:
         tier = "read"
     return _apply_max_tier_cap(tier, request)
@@ -252,8 +380,109 @@ class ToolInvocationError(Exception):
         super().__init__(str(content))
 
 
+def shape_tools_listing(  # pylint: disable=too-many-branches
+    entries: Any,
+    *,
+    max_rank: int,
+    max_tier: str | None,
+    entry_filter: Callable[[Any], bool] | None,
+    action_filter_factory: Callable[[Any], Callable[[str, Any], bool] | None] | None,
+) -> list[dict[str, Any]]:
+    """
+    Shape *entries* into MCP ``tools/list`` format — the only implementation.
+
+    Both listing paths call this: :meth:`ToolRegistry.list_tools` over the whole
+    registry, and ``route_views._list_entries`` over one route's already
+    deny-carved mapping.  They differ only in which mapping is passed, which is
+    why child lookups resolve against *entries* rather than a global registry.
+
+    H15: these used to be two implementations, the second documented as
+    *"Mirrors ToolRegistry.list_tools"*.  The group-dispatcher fix landed in one
+    of them, so on a per-route mount — what a real deployment serves from —
+    every group dispatcher vanished from ``tools/list`` for every non-superuser
+    while remaining fully invocable.  A mirror is a copy, and a copy drifts the
+    moment one side is fixed.
+    """
+    # Lazy-import to avoid a circular dependency with backends.dispatcher,
+    # which itself imports from this module.
+    # pylint: disable=import-outside-toplevel
+    from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
+
+    tools: list[dict[str, Any]] = []
+    for entry in entries.values():
+        if entry.hidden:
+            continue
+        if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
+            continue
+
+        # A group dispatcher is judged by its children, not by its own
+        # (necessarily absent) capability metadata — see below.  Running the
+        # generic filter on it first would hide every group unconditionally now
+        # that the filter fails closed.
+        if entry_filter is not None and not entry.group_tool_names and not entry_filter(entry):
+            continue
+
+        # Group dispatcher: hide when the caller has capabilities for none of
+        # its children, so an agent never sees a group it cannot use at all and
+        # the existence of other groups is not leaked.
+        #
+        # Every child is considered, not only perm-aware ones.  This branch used
+        # to pre-filter to children carrying `perm_app_label` AND `perm_model`,
+        # because perm-less children "always pass the filter regardless of the
+        # user's capabilities".  That premise died when the filter began failing
+        # closed: a perm-less child now passes only if it declares a capability
+        # or universal discovery, which is a legitimate reason to show the
+        # group.  Keeping the pre-filter left a group assembled ENTIRELY from
+        # perm-less tools universally visible, having no perm-aware children for
+        # the guard to test.
+        #
+        # This IS the group's capability determination, which is why it REPLACES
+        # the generic entry filter above rather than stacking on it.
+        if entry.group_tool_names and entry_filter is not None:
+            children = [entries[t] for t in entry.group_tool_names if t in entries]
+            if not any(entry_filter(c) for c in children):
+                continue
+
+        # Plain (non-dispatcher) tool: include the registered schema verbatim —
+        # the entry's own permission_tier already gated it above.
+        if not entry.is_dispatcher or entry.dispatcher_meta is None:
+            tools.append(
+                {
+                    "name": entry.name,
+                    "description": entry.description,
+                    "inputSchema": entry.input_schema,
+                    "tier": entry.permission_tier,
+                }
+            )
+            continue
+
+        # Dispatcher: rebuild the action enum filtered to the caller's tier and
+        # capabilities, and omit a dispatcher with nothing left to call.
+        action_filter = action_filter_factory(entry) if action_filter_factory is not None else None
+        filtered_schema = _build_dispatcher_input_schema(
+            entry.dispatcher_meta, max_tier=max_tier, action_filter=action_filter
+        )
+        visible_actions = filtered_schema["properties"]["action"]["enum"]
+        # Drop when *capability* filtering emptied the enum, not only tier
+        # filtering — an empty navigation shell is the same either way.  Still
+        # gated on filtering having been applied, so an unfiltered listing keeps
+        # its legacy shape.
+        if not visible_actions and (max_tier is not None or action_filter is not None):
+            continue
+        tools.append(
+            {
+                "name": entry.name,
+                "description": entry.description,
+                "inputSchema": filtered_schema,
+                "tier": entry.permission_tier,
+            }
+        )
+    return tools
+
+
 class _ToolEntry:  # pylint: disable=too-many-instance-attributes
     __slots__ = (
+        "capability",
         "description",
         "dispatcher_meta",
         "fn",
@@ -269,6 +498,7 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         "perm_model",
         "permission_classes",
         "permission_tier",
+        "universal_discovery",
         "view_class",
     )
 
@@ -289,6 +519,8 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         perm_model: str | None = None,
         perm_drf_action: str | None = None,
         group_tool_names: frozenset[str] | None = None,
+        capability: str | None = None,
+        universal_discovery: bool = False,
     ) -> None:
         self.name = name
         self.fn = fn
@@ -310,10 +542,28 @@ class _ToolEntry:  # pylint: disable=too-many-instance-attributes
         self.hidden = hidden
         # Permission metadata extracted from DRF discovery.  Used by
         # FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY to filter tools/list.
-        # ``None`` for decorator tools and group dispatchers (always visible).
+        # ``None`` for decorator tools, which must instead declare ``capability``
+        # or ``universal_discovery`` — see below.
         self.perm_app_label = perm_app_label
         self.perm_model = perm_model
         self.perm_drf_action = perm_drf_action
+        # H3: the two explicit halves of the capability descriptor, for
+        # registrations DRF discovery cannot derive one for.
+        #
+        # ``capability`` is the Django permission string the caller must hold
+        # (``"app_label.verb_model"``) for a flat tool, or the
+        # ``"app_label.model"`` base a dispatcher's per-action verbs resolve
+        # against.  ``universal_discovery`` marks a tool as intentionally
+        # visible to every caller.
+        #
+        # Under FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY an entry with neither a
+        # derived nor a declared capability is INDETERMINATE and is HIDDEN.  It
+        # used to be universally visible, which made a discovery control fail
+        # open — the same defect class as the unauthenticated-tier fallback, and
+        # fixed the same way.  Universal visibility is now reachable only by
+        # stating it, never by omitting metadata.
+        self.capability = capability
+        self.universal_discovery = universal_discovery
         # For group dispatchers: frozenset of the flat tool names bundled inside.
         # Used by ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide the group
         # dispatcher when the requesting user has no capabilities for any of its
@@ -371,6 +621,8 @@ class ToolRegistry:
         perm_model: str | None = None,
         perm_drf_action: str | None = None,
         group_tool_names: frozenset[str] | None = None,
+        capability: str | None = None,
+        universal_discovery: bool = False,
     ) -> None:
         """
         Register a callable as a named MCP tool.
@@ -418,6 +670,20 @@ class ToolRegistry:
                 ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY`` to hide the group
                 dispatcher from ``tools/list`` when none of its child tools are
                 accessible to the requesting user.
+            capability: H3 — the capability descriptor for registrations DRF
+                discovery cannot derive one for.  For a flat tool, the full
+                Django permission string the caller must hold
+                (``"app_label.verb_model"``).  For a dispatcher, the
+                ``"app_label.model"`` base its per-action verbs resolve
+                against.  Ignored when *perm_app_label* / *perm_model* are
+                present, since those already describe the same fact.
+            universal_discovery: H3 — declare this tool intentionally visible
+                to every caller under
+                ``FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY``.  Required to be
+                explicit: an entry with neither a derived nor a declared
+                capability is treated as indeterminate and **hidden**, so
+                universal visibility can no longer be the accidental result of
+                missing metadata.
 
         """
         permission_tier = _validate_permission_tier(permission_tier)
@@ -438,6 +704,8 @@ class ToolRegistry:
                 perm_model=perm_model,
                 perm_drf_action=perm_drf_action,
                 group_tool_names=group_tool_names,
+                capability=capability,
+                universal_discovery=universal_discovery,
             )
 
     def get_entry(self, name: str) -> _ToolEntry | None:
@@ -521,84 +789,20 @@ class ToolRegistry:
 
         """
         # ``max_tier is None`` means "no cap" (rank 2, show all).  A non-None but
-        # UNRECOGNISED tier string fails CLOSED (rank 0 = read) so a garbled cap
-        # can never widen visibility to admin-tier tools.  Kept identical to
+        # UNRECOGNISED tier string fails CLOSED — via ``_caller_rank`` it now
+        # ranks BELOW read (H7), so a garbled cap hides everything rather than
+        # exposing the read surface.  Kept identical to
         # frisian_mcp.route_views._list_entries — the two must not diverge.
-        max_rank = 2 if max_tier is None else _TIER_RANK.get(max_tier, 0)
-
-        # Lazy-import to avoid a circular dependency with backends.dispatcher,
-        # which itself imports from this module.
-        # pylint: disable=import-outside-toplevel
-        from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
+        max_rank = 2 if max_tier is None else _caller_rank(max_tier)
 
         with self._lock:
-            tools: list[dict[str, Any]] = []
-            for entry in self._tools.values():
-                if entry.hidden:
-                    continue
-                if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
-                    continue
-                if entry_filter is not None and not entry_filter(entry):
-                    continue
-
-                # Group dispatcher: hide when the user has no capabilities for
-                # any of its child tools.  Without this check every group tool
-                # (dcim, bgp, ipam, …) would always appear in tools/list even
-                # when the user's ObjectPermissions cover only one group (e.g.
-                # dns), leaking the existence of every other group dispatcher.
-                #
-                # Only perm-aware child tools (those with perm_app_label AND
-                # perm_model) are considered.  Perm-less children (e.g. napalm,
-                # notes) always pass _make_perm_entry_filter regardless of the
-                # user's capabilities; counting them would make the group
-                # visible even when the user has no real permissions for it.
-                if entry.group_tool_names and entry_filter is not None:
-                    perm_children = [
-                        self._tools[t]
-                        for t in entry.group_tool_names
-                        if t in self._tools
-                        and self._tools[t].perm_app_label is not None
-                        and self._tools[t].perm_model is not None
-                    ]
-                    if perm_children and not any(entry_filter(c) for c in perm_children):
-                        continue
-
-                # Plain (non-dispatcher) tool: include the registered schema
-                # verbatim — the entry's own permission_tier already gated it
-                # above, so the schema does not need filtering.
-                if not entry.is_dispatcher or entry.dispatcher_meta is None:
-                    tools.append(
-                        {
-                            "name": entry.name,
-                            "description": entry.description,
-                            "inputSchema": entry.input_schema,
-                            "tier": entry.permission_tier,
-                        }
-                    )
-                    continue
-
-                # Dispatcher: rebuild the inputSchema with the action enum
-                # filtered to the caller's tier.  Hide the dispatcher entirely
-                # when no actions remain visible (avoids exposing an empty
-                # navigation tool that can only return help with zero actions).
-                action_filter = (
-                    action_filter_factory(entry) if action_filter_factory is not None else None
-                )
-                filtered_schema = _build_dispatcher_input_schema(
-                    entry.dispatcher_meta, max_tier=max_tier, action_filter=action_filter
-                )
-                visible_actions = filtered_schema["properties"]["action"]["enum"]
-                if max_tier is not None and not visible_actions:
-                    continue
-                tools.append(
-                    {
-                        "name": entry.name,
-                        "description": entry.description,
-                        "inputSchema": filtered_schema,
-                        "tier": entry.permission_tier,
-                    }
-                )
-            return tools
+            return shape_tools_listing(
+                self._tools,
+                max_rank=max_rank,
+                max_tier=max_tier,
+                entry_filter=entry_filter,
+                action_filter_factory=action_filter_factory,
+            )
 
     def dispatch(
         self,
@@ -664,7 +868,7 @@ class ToolRegistry:
         # rejects unauthorised sub-actions.
         if not entry.is_dispatcher:
             caller_tier = _resolve_request_tier(request)
-            if _TIER_RANK.get(caller_tier, 0) < _TIER_RANK.get(entry.permission_tier, 0):
+            if _caller_rank(caller_tier) < _TIER_RANK.get(entry.permission_tier, 0):
                 if getattr(request, "_mcp_max_tier", None) is not None:
                     # On a max-tier-capped endpoint the tool must appear
                     # nonexistent — returning a tier error leaks that the tool

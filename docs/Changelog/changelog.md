@@ -5,6 +5,21 @@
 
 ---
 
+## Unreleased
+
+> Version number to be assigned at release. Under this project's convention a contract change on a security setting is a MINOR bump.
+
+### Changed
+
+- **`FRISIAN_MCP_UNAUTHENTICATED_TIER` now fails closed, and a documented control that did not work now works.** Previous releases ranked any unrecognised tier value equal to `read`. Both `None` and `"none"` were unrecognised, so the documented lockdown was a no-op: the setting was present, spelled plausibly, and anonymous callers kept the full read surface. Three cases are now distinguished — **absent** uses the `read` default so hosts that never configured it are unaffected; **`None` or `"none"`** denies below `read`, meaning no tool is listed and none can be invoked; **any other value** denies *and* raises a startup error naming the setting, so a misspelled tier is reported rather than silently applied.
+- **This is a behaviour change on a security setting, in the direction of denying.** A deployment that set `None` or `"none"` and has been serving anonymous read traffic will stop serving it on upgrade. That is the intended outcome — the configuration always asked for it — but it will look like a regression to anyone who did not know the setting was inert. A deployment that genuinely wants anonymous read access must set `"read"` explicitly.
+
+### Fixed — documentation
+
+- **Corrected a false claim that a configuration requires authentication for all tools.** The claim appeared in the configuration reference, the greenfield install and configuration guides, and **two install configurations distributed as production examples**. It was not true in any released version: operators who followed those files believed they had a control they did not have. The affected pages now describe what the setting actually does, and carry an explicit correction rather than a silent edit, because deployment decisions were made on the old text. Operators who deployed against it should confirm what was mounted and reachable on those routes. The reference page for the earlier release carries the same correction, since the behaviour cannot be fixed retroactively for hosts still running it.
+
+---
+
 ## v1.1.0 — 2026-07
 
 ### Added
@@ -33,10 +48,10 @@
 - **`@mcp_heavy` now fires for grouped calls.** Heaviness was resolved on the outer group tool name, and a dispatcher entry is never itself heavy — so only the size backstop negotiated. Hosts running `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None` got no negotiation at all: the same tool probed when called flat and returned its full payload when called through a group.
 - **A `continuation_token` misplaced inside `params` on a group call is now rejected** instead of silently minting a second token and re-running the query.
 - A continuation token redeemed with `mode="paginated"` on a non-collection result is returned whole rather than as a truncated fragment of its serialization.
+- **The size backstop no longer mints continuation tokens for non-disclosing schemas.** `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` now mints only when the published schema discloses the continuation call, such as `@mcp_heavy` tools and dispatchers. If an ordinary `@mcp_tool`, imperatively registered tool, or plain auto-discovered action exceeds the threshold without publishing that call shape, frisian-mcp returns the complete result inline with no continuation token and no cached entry. This preserves the old invariant — callers are never handed a token their schema gives them no legal slot to return — without adding negotiation fields to every ordinary schema.
 
 ### Known issues
 
-- **The size backstop can mint a continuation token for tools whose published schema does not declare the negotiation fields.** `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` (default 25,000 bytes, active unless explicitly set to `None`) applies to any over-threshold read response, including tools registered with `@mcp_tool`, registered imperatively with `register_tool()`, or discovered automatically from the host's API. Clients that send the token back anyway redeem it normally, but a client that validates its calls against the published schema has no legal slot for it and cannot complete the second call; each such probe also holds a cached copy of the full response for 300 seconds with no possibility of redemption. Only `@mcp_heavy` tools and dispatcher tools publish the negotiation fields. Not addressed in this release.
 - **`FRISIAN_MCP_PERMISSION_AWARE_DISCOVERY` filters auto-discovered tools only.** The capability check is derived from ViewSet metadata — app label, model, DRF action — which decorator-registered tools do not have. Tools registered with `@mcp_tool`, `@mcp_heavy`, or `@mcp_dispatcher` therefore carry no permission metadata and are always visible in `tools/list` to any caller whose route `allow_list` matches them; for a class dispatcher the `action` enum is likewise unfiltered. **Route `allow_list` and tier gating are the only discovery controls on those tools** — size the route configuration accordingly rather than relying on the discovery setting to narrow them. Group dispatchers are still hidden when the caller has no capability for any of their permission-aware children, but a group assembled entirely from decorator-registered tools has none to check and stays visible. This is by construction: the metadata is derived from ViewSets, and hand-registered tools have none.
 
 ### Documentation

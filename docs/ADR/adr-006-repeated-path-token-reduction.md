@@ -62,6 +62,8 @@ The actual operation result — the data returned by the tool implementation —
 
 The `@mcp_light` lean envelope (write-path confirmation) is returned unchanged in lite mode. The `@mcp_heavy` probe envelope (`continuation_token`, `preview`, `total_size`, `available_modes`) is returned unchanged in lite mode. Both envelopes are response-content mechanisms, not orientation metadata, and suppressing them would break their respective workflows.
 
+**Amendment, 2026-08-22.** Threshold-triggered read negotiation follows the same preservation rule only when the published schema already discloses the continuation call, such as explicit heavy tools and dispatchers. The threshold no longer adds continuation disclosure to ordinary tools. If a non-disclosing read exceeds the threshold, its complete result is returned as the operation result; lite mode has no probe envelope to preserve or suppress.
+
 On failure — dispatch error, bad parameters, unknown action — the error response includes the tool's `inputSchema` from the registry. Lite mode suppresses the teaching on success; a failure re-teaches. An agent operating in bulk lite mode that makes a malformed call receives the schema it needs to correct itself in the same response that reports the error. The agent cannot get stuck without a recovery path.
 
 `lite: true` on `/mcp` is the only behavior. There is no separate path.

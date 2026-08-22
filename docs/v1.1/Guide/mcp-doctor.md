@@ -52,6 +52,33 @@ Audits `DEBUG`, `FRISIAN_MCP_HMAC_KEY`, `FRISIAN_MCP_UNAUTHENTICATED_TIER`, and 
 - `UNAUTHENTICATED_TIER` set to `read_write` or `admin` (anonymous write/admin grants)
 - `TRUSTED_PROXY_COUNT=0` in non-debug mode when a reverse proxy is in play
 
+#### `FRISIAN_MCP_UNAUTHENTICATED_TIER` — five reports over four runtime cases
+
+The doctor reads the same classifier the runtime does, so the two cannot
+disagree about what a setting means. It emits five reports rather than four
+because it splits the one *granting* case in two: an explicitly configured
+`read` is reported separately from an elevated `read_write` / `admin`, since
+only the latter warrants a warning.
+
+| Setting | Report | Meaning |
+|---|---|---|
+| absent | ✓ `not set — defaulting to 'read'` | The documented default. Anonymous callers see read-tier tools. |
+| `None` or `"none"` | ✓ `DENIED all access … deliberate lockdown` | Anonymous callers get **nothing**, including read. Intentional. |
+| `read` | ✓ | Anonymous callers see read-tier tools. |
+| `read_write` / `admin` | ⚠ | Anonymous callers can invoke write/admin tools without authenticating. |
+| anything else | ✗ **error, non-zero exit** | Not a recognised tier — anonymous callers are **denied**. See `frisian_mcp.E007`. |
+
+Two of these changed in 1.1.0 and are worth calling out:
+
+- **An unrecognised value is an error, not a warning, and it denies.** It used
+  to report *"defaulting to 'read' at runtime"*. That is no longer true — an
+  unrecognised value now fails closed. If you see this, the fix is a typo
+  correction (`readwrite` → `read_write`) or removing the setting entirely.
+- **An explicit `None` is reported as a lockdown, not as "not set".** The doctor
+  previously could not tell an absent setting from one explicitly set to `None`,
+  so a deliberately locked-down host got a green tick saying anonymous callers
+  saw read-tier tools while the server was denying every one of them.
+
 ### 5. Cache backend
 
 Warns when `CACHES['default']` is `LocMemCache` and `contrib.oauth` is installed. Per-process caches break OAuth authorization codes in multi-worker deployments (gunicorn/uWSGI workers don't share LocMem).

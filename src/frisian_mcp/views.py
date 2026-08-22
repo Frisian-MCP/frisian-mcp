@@ -46,9 +46,9 @@ from collections.abc import AsyncGenerator, Container, Generator
 from typing import Any
 
 from django.conf import settings
-from django.core.cache import cache as django_cache
-from django.core.exceptions import ImproperlyConfigured
-from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.cache import DEFAULT_CACHE_ALIAS, cache as django_cache, caches
+from django.core.cache.backends.base import InvalidCacheBackendError
+from django.core.exceptions import ImproperlyConfigured, ValidationError as DjangoValidationError
 from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.utils.module_loading import import_string
@@ -58,9 +58,13 @@ from rest_framework.request import Request as DRFRequest
 from rest_framework.views import APIView
 
 from frisian_mcp.backends.base import ToolResult
-from frisian_mcp.contrib.permissions.base import _DRF_ACTION_TO_PERM_VERB
+from frisian_mcp.contrib.permissions.base import build_action_filter, entry_is_visible
 from frisian_mcp.middleware import build_middleware_chain, get_middleware_instances
-from frisian_mcp.negotiation import DEFAULT_NEGOTIATION_MODE, NEGOTIATION_MODES
+from frisian_mcp.negotiation import (
+    DEFAULT_NEGOTIATION_MODE,
+    NEGOTIATION_MODES,
+    schema_discloses_continuation,
+)
 from frisian_mcp.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -75,6 +79,8 @@ from frisian_mcp.registry import (
     ToolInputError,
     ToolInvocationError,
     ToolNotFoundError,
+    _caller_rank,
+    normalize_tier_setting,
     tool_registry,
 )
 from frisian_mcp.resources import ResourceNotFoundError, resource_registry
@@ -91,19 +97,124 @@ audit_logger = logging.getLogger("frisian_mcp.audit")
 
 _TOOLS_LIST_CACHE_KEY = "frisian_mcp:tools_list"
 _HEAVY_CACHE_PREFIX = "frisian_mcp:heavy:"
-_HEAVY_CACHE_TTL: int = 300  # seconds; tokens expire after 5 minutes
+
+#: Default TTL for a continuation entry, in seconds.  Overridable via
+#: ``FRISIAN_MCP_HEAVY_CACHE_TTL`` (H6): a blast-radius control, **not** a
+#: substitute for isolation — a caller can mint many short-lived entries.
+_DEFAULT_HEAVY_CACHE_TTL: int = 300
+
+
+def _heavy_cache_ttl() -> int:
+    """Return the continuation-entry TTL in seconds (``FRISIAN_MCP_HEAVY_CACHE_TTL``)."""
+    return int(getattr(settings, "FRISIAN_MCP_HEAVY_CACHE_TTL", _DEFAULT_HEAVY_CACHE_TTL))
+
+
+#: Guard so a misconfigured alias logs once per process rather than once per
+#: request.  The condition is static — it cannot resolve itself between calls —
+#: so repeating it per request would bury the one line that matters.
+_missing_heavy_alias_logged: set[str] = set()
+
+
+def _log_missing_heavy_cache_alias(alias: str) -> None:
+    """Report an unusable continuation-cache alias, once per process."""
+    if alias in _missing_heavy_alias_logged:
+        return
+    _missing_heavy_alias_logged.add(alias)
+    logger.error(
+        "heavy_cache_alias_unavailable",
+        extra={
+            "alias": alias,
+            "detail": (
+                f"FRISIAN_MCP_HEAVY_CACHE_ALIAS={alias!r} names no configured cache. "
+                "Heavy-response negotiation is DISABLED: over-threshold responses are "
+                "returned whole rather than minting continuation state into the "
+                "'default' cache, which holds OAuth codes and the brute-force counter."
+            ),
+        },
+    )
+
+
+def _heavy_cache() -> Any | None:
+    """
+    Return the cache holding continuation entries, or ``None`` if unavailable.
+
+    H6: continuation state is **attacker-amplifiable** — an unauthenticated
+    caller can mint entries — while OAuth authorization codes, the consumed-code
+    gate and the token-endpoint rate counter are authentication and
+    brute-force-control state.  Sharing one eviction domain lets the first
+    displace the second.
+
+    ``FRISIAN_MCP_HEAVY_CACHE_ALIAS`` selects the alias.  It defaults to
+    ``default`` because the package cannot conjure a second cache for a host
+    that has not configured one; the startup check reports that unseparated
+    state rather than letting it pass silently.
+
+    A **separate alias is not by itself a boundary.**  Two aliases addressing
+    the same Redis instance — including two logical DBs on one instance — share
+    that instance's memory and therefore its failure.  The boundary required is
+    an *independent eviction domain*: a separate instance, or a per-instance
+    memory budget.  The startup check catches the collisions it can see; the
+    rest is an operator obligation and is documented as one.
+
+    An alias naming a cache that does not exist returns ``None``: negotiation is
+    **unavailable**, not relocated.  Callers skip the mint and return the whole
+    response instead, which is the same answer H2 gives a tool whose schema
+    cannot safely carry the continuation branch — if it cannot be done safely,
+    the response is not eligible for negotiation.
+
+    This used to fall back to ``default`` on the grounds that a misconfiguration
+    should not deny service and the startup check would surface it.  Both halves
+    were wrong.  The check did not catch a missing alias at all, and — measured,
+    not assumed — ``get_wsgi_application()`` calls only ``django.setup()``, so
+    **system checks do not run on a gunicorn/uWSGI boot**.  A check cannot be the
+    safety net for a production process that never executes it.  What the
+    fallback preserved was writing attacker-amplifiable state into the cache
+    holding OAuth codes and the brute-force counter — service continuity bought
+    with the exact exposure the setting exists to remove.
+    """
+    alias = getattr(settings, "FRISIAN_MCP_HEAVY_CACHE_ALIAS", DEFAULT_CACHE_ALIAS)
+    if alias == DEFAULT_CACHE_ALIAS:
+        # Resolve through the module-level binding rather than ``caches[...]``.
+        # They are the same object in production, but this is the seam the test
+        # suite injects on, and routing the default case around it would make
+        # every heavy-path test assert against a cache the code no longer used.
+        return django_cache
+    try:
+        return caches[alias]
+    except (InvalidCacheBackendError, ImproperlyConfigured, ImportError):
+        # Django wraps an *unimportable* BACKEND path in InvalidCacheBackendError,
+        # but backend construction happens outside that wrapper: a backend whose
+        # ``__init__`` raises ImproperlyConfigured (bad LOCATION, missing option)
+        # or ImportError (missing client library) propagates out of ``caches[...]``
+        # untouched.  Every one of these means the same thing operationally —
+        # this alias cannot hold continuation state — so they get the same
+        # answer.  Letting them escape turned a misconfigured cache into an
+        # HTTP 500 on any over-threshold read, which is a worse failure than
+        # declining to negotiate.
+        _log_missing_heavy_cache_alias(alias)
+        return None
+
 
 #: Default byte threshold for the auto-negotiate backstop
-#: (``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD``).  A tool response whose serialized
-#: JSON exceeds this many bytes is returned as a probe envelope so the caller can
-#: negotiate how much to retrieve, instead of a context-blowing full payload.
+#: (``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD``).  A response from a tool **whose
+#: published schema discloses the continuation call** is returned as a probe
+#: envelope once its serialized JSON exceeds this many bytes, so the caller can
+#: negotiate how much to retrieve instead of taking a context-blowing full
+#: payload.
+#:
+#: Size alone is not sufficient: the gate is ``schema_discloses_continuation()``
+#: on the outer entry, so the backstop covers ``@mcp_heavy`` and both
+#: dispatchers.  An over-threshold response from a tool that does not disclose
+#: is returned WHOLE and mints nothing (CR-2) — the threshold is a ceiling on
+#: what may probe, never on what may be returned.
 #:
 #: This ships non-``None`` (the historical default was ``None`` = dormant) so
-#: high-cardinality list actions probe-first on every host without the operator
-#: having to discover the knob.  ~25 KB is on the order of ~6k cl100k_base tokens:
-#: above a normal small filtered read, well below a large list page (a 114-row
-#: device list serialized to ~145 KB on the Nautobot test box and probes cleanly
-#: at this value).  Operators raise it to probe less often, or set
+#: high-cardinality list actions on those shapes probe-first on every host
+#: without the operator having to discover the knob.  ~25 KB is on the order of
+#: ~6k cl100k_base tokens: above a normal small filtered read, well below a
+#: large list page (a 114-row device list serialized to ~145 KB on the Nautobot
+#: test box and probes cleanly at this value).  Operators raise it to probe less
+#: often, or set
 #: ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None`` to disable the backstop.
 _DEFAULT_AUTO_NEGOTIATE_THRESHOLD: int = 25_000
 
@@ -314,13 +425,206 @@ def _heavy_owner_key(request: Any, tool_name: str) -> str:
     return f"tool={tool_name}:auth={auth_id}:tier={tier}{user_part}{conn_part}"
 
 
-def _build_heavy_cache_entry(result: Any, request: Any, tool_name: str) -> dict[str, Any]:
-    """Wrap *result* with the SEC-3 owner-binding metadata for the cache."""
-    return {
+def _build_heavy_cache_entry(
+    result: Any,
+    request: Any,
+    tool_name: str,
+    resolved_target: str | None = None,
+    resolved_action: str | None = None,
+) -> dict[str, Any]:
+    """
+    Wrap *result* with the SEC-3 owner-binding metadata for the cache.
+
+    ADR-011 §5: entries also record ``resolved_target`` — the child tool the
+    *server* resolved for this call, not the outer name the caller sent.  For a
+    flat call the two are the same; for a grouped call the child is what
+    `_dispatcher_target_entry` routed to.
+
+    Recording only the outer name would leave the §4 re-authorization with
+    nothing to evaluate: the dispatcher is mounted, so a membership check
+    against *it* always passes, while the child — the thing whose route
+    containment actually matters — would be unrepresented.  The re-check would
+    look correct and be vacuous.
+
+    ``resolved_action`` is the same argument one level down, for **class**
+    dispatchers.  They route by ``action`` rather than by member tool, so
+    ``_dispatcher_target_entry`` — which resolves group membership — returns
+    ``None`` for them and ``resolved_target`` falls back to the dispatcher
+    itself.  A class dispatcher registers as ``read`` precisely so it stays
+    visible as a navigation entry-point, and its per-action authorization lives
+    in the action lens, so re-authorizing the *outer* entry passes trivially:
+    the vacuous re-check §5 exists to prevent, one shape over.
+
+    Recorded at mint because that is the action the server actually dispatched.
+    The redemption call's own ``action`` argument is caller-supplied and is
+    deliberately **not** consulted.
+    """
+    entry: dict[str, Any] = {
         "result": result,
         "owner_key": _heavy_owner_key(request, tool_name),
         "tool_name": tool_name,
+        "resolved_target": resolved_target or tool_name,
     }
+    if resolved_action is not None:
+        entry["resolved_action"] = resolved_action
+    return entry
+
+
+def _dispatched_action(entry: Any, arguments: dict[str, Any]) -> str | None:
+    """
+    Return the action a **class** dispatcher just dispatched, else ``None``.
+
+    Keyed on ``dispatcher_meta``, which is what distinguishes a class dispatcher
+    from a group one: groups carry ``group_tool_names`` and resolve to a member
+    tool, so they are covered by ``resolved_target`` and record no action here.
+    """
+    if entry is None or getattr(entry, "dispatcher_meta", None) is None:
+        return None
+    action = arguments.get("action")
+    return str(action) if isinstance(action, str) and action else None
+
+
+def _redemption_action_authorized(request: Any, tool_name: str, action_name: str) -> bool:
+    """
+    ADR-011 §4, class-dispatcher case: may this caller still invoke *action_name*?
+
+    Re-runs the **same action lens** ``tools/list`` and ``action="help"`` apply,
+    against the caller's *current* capabilities — plus the action's own tier,
+    which ordinary dispatch enforces inside the invoke callable but redemption
+    never reaches, because it serves from cache instead of re-dispatching.
+
+    Resolves the dispatcher through the route view for the same reason
+    :func:`_redemption_target_authorized` does: the route's entry is the
+    authoritative one, and a rebuilt per-route dispatcher may expose fewer
+    actions than the global registry's.
+
+    Returns ``False`` on anything it cannot affirmatively authorize, including
+    an action that has since been removed from the dispatcher.
+    """
+    rv: RouteView | None = getattr(request, "_mcp_route_view", None)
+    outer = rv.entries.get(tool_name) if rv is not None else tool_registry.get_entry(tool_name)
+    if outer is None:
+        return False
+
+    meta = getattr(outer, "dispatcher_meta", None)
+    action_entry = getattr(meta, "actions", {}).get(action_name) if meta is not None else None
+    if action_entry is None:
+        return False  # action no longer declared on this dispatcher
+
+    if _caller_rank(_get_token_permission(request)) < _TIER_RANK.get(
+        getattr(action_entry, "permission_tier", "read"), 0
+    ):
+        return False
+
+    caps: Container[str] | None = getattr(request, "_mcp_capabilities", None)
+    if caps is None:
+        # Permission-aware discovery off, or an unrestricted caller: the tier
+        # check above is the whole gate, exactly as it is for discovery.
+        return True
+
+    action_filter = build_action_filter(outer, caps)
+    if action_filter is None:
+        return True  # explicit universal_discovery — publishes every action
+    return bool(action_filter(action_name, action_entry))
+
+
+def _redemption_target_authorized(request: Any, tool_name: str, target_name: str) -> bool:
+    """
+    ADR-011 §4: may the *current* route serve a continuation for *target_name*?
+
+    Re-evaluates the cached, server-resolved target against the **current**
+    :class:`~frisian_mcp.route_views.RouteView` of the route the redemption
+    arrived on — not the route recorded at mint time, and deliberately not the
+    tier ceiling alone.
+
+    **A ceiling comparison would be insufficient.**  Two routes may declare the
+    same ``FRISIAN_MCP_MAX_TIER`` and expose entirely different resources,
+    because ADR-010's allow/deny grammar carves the surface independently of
+    tier.  A control that compared ceilings would look correct, pass a
+    plausible test, and permit exactly the cross-route service it exists to
+    refuse.  So all four dimensions of the surface are evaluated:
+
+    * **mounted membership + deny carve-outs** — the outer tool must be present
+      in this route's ``entries``, and for a grouped call the child must be in
+      that route's *pruned* ``group_tool_names``.  Pruning is per route, so a
+      group whose members were partly denied here yields a narrower set than
+      the one the token was minted against.
+    * **effective tier ceiling** — the caller's tier as already clamped to
+      ``request._mcp_max_tier``, compared against the *target's* required tier
+      rather than the dispatcher's (dispatchers register as ``read`` to stay
+      visible as navigation entry-points, so checking the outer entry's tier
+      would pass everything).
+    * **capability / permission visibility** — the same per-user entry filter
+      ``tools/list`` applies under ``PERMISSION_AWARE_DISCOVERY``.
+
+    Returns ``False`` on anything it cannot affirmatively authorize; the caller
+    maps that to §6's existing refusal outcome.
+    """
+    rv: RouteView | None = getattr(request, "_mcp_route_view", None)
+    # No per-route mount means the global registry *is* this route's surface.
+    outer = rv.entries.get(tool_name) if rv is not None else tool_registry.get_entry(tool_name)
+    if outer is None:
+        return False  # outer tool unmounted or denied on this route
+
+    target = outer
+    if target_name != tool_name:
+        members = getattr(outer, "group_tool_names", None)
+        if members is None or target_name not in members:
+            return False  # child not a member of this route's pruned group
+        # Membership is the route-scoped fact; the tier/permission metadata
+        # still lives on the member's own entry.  Resolve it against the
+        # registry the view was materialised from — in production the global
+        # singleton, but threading it keeps the check honest about its backing
+        # store rather than reaching past the view to a global.
+        #
+        # Deliberate protected access: the view's own backing store is the
+        # honest source here, and RouteView exposes no public accessor for it.
+        # pylint: disable-next=protected-access
+        source = rv._registry if rv is not None else tool_registry
+        # Narrowed in its own name so `target` stays a non-Optional entry; the
+        # earlier `target = outer` already fixed its type.
+        resolved = source.get_entry(target_name)
+        if resolved is None:
+            return False
+        target = resolved
+
+    if _caller_rank(_get_token_permission(request)) < _TIER_RANK.get(target.permission_tier, 0):
+        return False
+
+    perm_filter = getattr(request, "_mcp_perm_entry_filter", None)
+    if perm_filter is not None and not perm_filter(target):
+        return False
+
+    return True
+
+
+#: ADR-011 §6: every non-ownership redemption refusal returns *this* string.
+#: Expiry, a pre-SEC-3 legacy entry, an entry minted before §5, and a
+#: route-containment failure are operationally distinct and are distinguished in
+#: the audit reason — never on the wire.  Redemption already exposes two
+#: client-visible outcomes (this one and the owner mismatch), which is a
+#: token-validity oracle; tolerable only because tokens are 128-bit.  A third
+#: outcome meaning "valid token, wrong route" would additionally disclose server
+#: deploy state — that this host serves some other mount where the token would
+#: work — to any token holder, anonymous callers on open mounts included.
+_CONTINUATION_REFUSED_ERROR: str = (
+    "Continuation token expired or not found."
+    " Re-invoke without continuation_token"
+    " to start a new negotiation."
+)
+
+
+def _continuation_refused(request_id: Any) -> JsonResponse:
+    """Return the single client-visible refusal envelope shared by §6's cases."""
+    return _jsonrpc_success(
+        request_id,
+        {
+            "content": [
+                {"type": "text", "text": json.dumps({"error": _CONTINUATION_REFUSED_ERROR})}
+            ],
+            "isError": True,
+        },
+    )
 
 
 def _dispatcher_target_entry(entry: Any, arguments: dict[str, Any]) -> Any | None:
@@ -402,6 +706,19 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
         # therefore wrong for the flat shape, which has none of them.  `params`
         # is the only key the shapes that have one share, and the only place
         # the fields must never go, so naming just it is true everywhere.
+        #
+        # CR-15: the companion fields are described here rather than in the
+        # schema.  They are meaningful ONLY on a continuation call, which
+        # requires a token, which only ever arrives in this envelope — so the
+        # agent always reads this before it could use them.  Describing them in
+        # the schema instead cost every caller on every call, forever, to say
+        # something only a token-holder can act on.  `available_modes` above
+        # advertises `filtered`; without the `filter_keys` clause that mode is
+        # visible and unusable, which is the T6 failure one level down.
+        #
+        # The two `mode` sentences below are pinned byte-for-byte by
+        # `test_bare_token_clause_is_unchanged` (B2).  Append beside them;
+        # rewording them is a ruling, not an edit.
         "usage": (
             "Re-invoke this same tool with 'continuation_token' at the TOP LEVEL"
             " of arguments, not inside 'params'. 'mode' is optional and goes"
@@ -409,8 +726,31 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
             f" Omitting 'mode' returns ONE PAGE of the {len(serialized.encode())}-byte"
             " result if it is a list, or the whole object if it is not;"
             " pass mode='full' explicitly for the complete dataset."
+            " For 'paginated', 'page' is 1-based and 'page_size' defaults to"
+            " FRISIAN_MCP_HEAVY_PAGE_SIZE. For 'filtered', supply 'filter_keys':"
+            " the top-level keys of the result to keep. These sit beside 'mode'."
         ),
     }
+
+
+def _envelope_payload_key(result: Any) -> str | None:
+    """
+    Return the key holding a paginated envelope's list payload, or ``None``.
+
+    Host-agnostic **by construction**: an envelope is recognised as a dict with
+    exactly one list-valued key, and that key is the payload.  No field name is
+    hard-coded, so a host using ``results``, ``items``, ``data`` or anything
+    else is handled identically and no vendor vocabulary enters ``src/``.
+
+    ``None`` is returned when the shape is not unambiguous — no list value, or
+    more than one.  Two lists could each plausibly be the payload and guessing
+    would silently paginate the wrong one; the caller keeps the whole result,
+    which is the pre-H23 behaviour for that shape.
+    """
+    if not isinstance(result, dict):
+        return None
+    list_keys = [k for k, v in result.items() if isinstance(v, list)]
+    return list_keys[0] if len(list_keys) == 1 else None
 
 
 def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
@@ -463,26 +803,62 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
         # place.  A caller who genuinely needs a large object bounded still has
         # `summary` and `filtered`, both of which stay meaningful on a dict;
         # what is removed is only an option that produced unusable output.
-        if not isinstance(result, list):
+        # H23: a *paginated list envelope* is a dict, and the T18 guard above
+        # sent it down the "already bounded" path — so the single most common
+        # heavy case (a large list endpoint) returned in full, ignoring
+        # `page_size` entirely.  T18 enumerated two non-list shapes, the write
+        # result and the single-object retrieve, and missed the third, which is
+        # the dominant one in production.
+        #
+        # `_envelope_payload_key` finds the list to paginate WITHOUT naming a
+        # host field: an envelope is a dict with exactly one list-valued key.
+        # Ambiguity is not guessed at — zero or several lists means we cannot
+        # tell which is the payload, and the result is returned whole as before.
+        payload_key = None if isinstance(result, list) else _envelope_payload_key(result)
+        if not isinstance(result, list) and payload_key is None:
             return result
-        page: int = max(1, int(arguments.get("page", 1)))
+
+        items: list[Any] = result if isinstance(result, list) else result[payload_key]
         _default_page_size: int = getattr(settings, "FRISIAN_MCP_HEAVY_PAGE_SIZE", 20)
         _max_page_size: int = getattr(
             settings, "FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE", _default_page_size
         )
-        page_size: int = max(
-            1,
-            min(int(arguments.get("page_size", _default_page_size)), _max_page_size),
-        )
+        # Redemption deliberately short-circuits schema validation (call-2 needs
+        # only the token and a mode), so `page` / `page_size` arrive UNVALIDATED
+        # and the redemption path catches only ToolInputError.  A non-numeric
+        # value therefore escaped `int()` as TypeError/ValueError and surfaced as
+        # a 500 rather than a caller error.  Converting here keeps the one
+        # exception type the redemption path already handles.
+        try:
+            page: int = max(1, int(arguments.get("page", 1)))
+            page_size: int = max(
+                1,
+                min(int(arguments.get("page_size", _default_page_size)), _max_page_size),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ToolInputError(
+                f"'page' and 'page_size' must be integers; got page="
+                f"{arguments.get('page')!r}, page_size={arguments.get('page_size')!r}."
+            ) from exc
         start = (page - 1) * page_size
         end = start + page_size
-        return {
-            "items": result[start:end],
+        served: dict[str, Any] = {
+            "items": items[start:end],
             "page": page,
             "page_size": page_size,
-            "total": len(result),
-            "has_more": end < len(result),
+            "total": len(items),
+            "has_more": end < len(items),
         }
+        if payload_key is not None:
+            # The envelope's own keys describe the HOST's pagination over the
+            # host's full result set; ours describe this slice of the cached
+            # page.  `count: 114` beside `total: 50` beside two returned records
+            # is three numbers meaning three different things, so the host's are
+            # nested rather than merged — nothing is dropped, and nothing sits
+            # side by side pretending to be the same measurement.
+            served["envelope"] = {k: v for k, v in result.items() if k != payload_key}
+            served["envelope_payload_key"] = payload_key
+        return served
 
     if mode == "filtered":
         filter_keys: list[str] = list(arguments.get("filter_keys") or [])
@@ -626,7 +1002,7 @@ def _request_visible_entry(request: Any, tool_name: str) -> Any:
     entry = route_view.entries.get(tool_name)
     if entry is None:
         return None
-    caller_rank = _TIER_RANK.get(_get_token_permission(request), 0)
+    caller_rank = _caller_rank(_get_token_permission(request))
     if _TIER_RANK.get(entry.permission_tier, 0) > caller_rank:
         return None
     return entry
@@ -937,27 +1313,14 @@ def _make_perm_entry_filter(capabilities: Container[str]) -> Any:
     """
     Return a ``_ToolEntry`` filter callable for the given capability set.
 
-    A tool is included when:
-
-    * It has no ``perm_app_label`` / ``perm_model`` metadata (decorator tools,
-      group dispatchers) — always visible.
-    * It is a dispatcher — always visible (per-action enforcement happens at
-      invocation time inside the dispatcher's own permission tier checks).
-    * Its derived capability string (``"app_label.verb_model"``) is present in
-      *capabilities*.
-
-    Unknown DRF action names default to ``"view"`` (conservative inclusion —
-    if the user can view the resource they can see the tool).
+    A thin adapter over :func:`entry_is_visible`, which is the single place the
+    "what can this caller see" question is answered.  The logic deliberately
+    does not live here: it used to, and three other consumers kept a sibling
+    copy whose indeterminate branch meant the opposite.
     """
 
     def _filter(entry: Any) -> bool:
-        if not entry.perm_app_label or not entry.perm_model:
-            return True
-        if entry.is_dispatcher:
-            return True
-        verb = _DRF_ACTION_TO_PERM_VERB.get(entry.perm_drf_action or "", "view")
-        cap = f"{entry.perm_app_label}.{verb}_{entry.perm_model}"
-        return cap in capabilities
+        return entry_is_visible(entry, capabilities)
 
     return _filter
 
@@ -968,31 +1331,14 @@ def _make_perm_action_filter_factory(
     """
     Build an ``action_filter_factory`` for permission-filtered dispatcher action enums.
 
-    The factory receives a dispatcher ``_ToolEntry`` and returns either
-    ``None`` (no filtering — the dispatcher has no perm metadata) or a
-    ``(action_name, action_entry) -> bool`` predicate.
-
-    For each action the predicate resolves the required Django permission verb:
-
-    * Non-CRUD actions use ``action_entry.backend_action`` when set.
-    * All other action names are looked up in ``_DRF_ACTION_TO_PERM_VERB``
-      (defaulting to ``"view"`` for unknowns).
-
-    An action is hidden when the derived
-    ``"app_label.verb_model"`` string is absent from *capabilities*.
+    A thin adapter over :func:`build_action_filter`.  ``None`` from the factory
+    means "publish every action" and is reached only via an explicit
+    ``universal_discovery`` declaration; an indeterminate dispatcher gets
+    :func:`deny_all_actions` so its enum empties and ``list_tools`` drops it.
     """
 
     def factory(entry: Any) -> Any:
-        if not entry.perm_app_label or not entry.perm_model:
-            return None
-        app_label: str = entry.perm_app_label
-        model: str = entry.perm_model
-
-        def action_filter(action_name: str, action_entry: Any) -> bool:
-            verb = action_entry.backend_action or _DRF_ACTION_TO_PERM_VERB.get(action_name, "view")
-            return f"{app_label}.{verb}_{model}" in capabilities
-
-        return action_filter
+        return build_action_filter(entry, capabilities)
 
     return factory
 
@@ -1459,12 +1805,30 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 },
             )
 
+    # ADR-011 §4 requires redemption to re-evaluate capability visibility, and
+    # that lens lives on the request.  Resolve it BEFORE the continuation branch:
+    # the branch returns without reaching the dispatch-time call further down, so
+    # leaving it there made `_redemption_target_authorized` read an attribute
+    # that did not exist yet and skip the capability check silently — the gate
+    # was present, tested, and inert on every real redemption.
+    #
+    # This is not the G4 short-circuit being weakened.  G4 forbids re-*dispatch*
+    # — re-running the tool's query — and resolving permission context is not
+    # dispatch.  The call is idempotent, so the existing one below becomes a
+    # no-op rather than a second resolution.
+    _ensure_perm_context_on_request(request)
+
     # Heavy response negotiation: if continuation_token is present, serve the cached
     # result without dispatching to the tool again.  This short-circuits schema
     # validation, which is intentional — call-2 arguments only need the token + mode.
     cont_token: str | None = arguments.get("continuation_token")
     if cont_token is not None:
-        cached = django_cache.get(f"{_HEAVY_CACHE_PREFIX}{cont_token}")
+        # A missing alias means no continuation store at all, so every token is
+        # a miss and falls to the ordinary expired-or-not-found outcome below.
+        # No new client-visible result (ADR-011 §6), and nothing is served from
+        # the cache the isolation setting was pointed away from.
+        _hc = _heavy_cache()
+        cached = _hc.get(f"{_HEAVY_CACHE_PREFIX}{cont_token}") if _hc is not None else None
         # SEC-3: legacy raw-result entries (pre-fix deploys) lack the owner
         # binding and are treated as expired — better a brief disruption
         # during cutover than serving cross-caller data.
@@ -1490,26 +1854,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 decision="deny",
                 reason="continuation_expired" if cached is None else "continuation_unbound_legacy",
             )
-            return _jsonrpc_success(
-                request_id,
-                {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(
-                                {
-                                    "error": (
-                                        "Continuation token expired or not found."
-                                        " Re-invoke without continuation_token"
-                                        " to start a new negotiation."
-                                    )
-                                }
-                            ),
-                        }
-                    ],
-                    "isError": True,
-                },
-            )
+            return _continuation_refused(request_id)
         # SEC-3: refuse to serve when the current caller does not match the
         # caller that issued the continuation.  Owner key composes auth
         # identity, tier, user, agent connection, and tool name; any drift
@@ -1550,6 +1895,48 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     "isError": True,
                 },
             )
+        # ADR-011 §4: SEC-3 answers *who minted this token*; it does not answer
+        # *may it be served here, now*.  Route containment is an authorization
+        # check at use time, deliberately NOT an owner-key dimension — folding
+        # it into the owner key would invalidate every outstanding token
+        # whenever a route's configuration changed, and callers would
+        # experience that mass invalidation as ordinary expiry.
+        #
+        # Evaluated against the CURRENT route surface, so a mount change takes
+        # effect on tokens already outstanding without invalidating them.
+        _target: str = cached.get("resolved_target", "")
+        # Class dispatchers resolve no child, so containment alone would
+        # re-authorize the navigation entry-point.  When an action was recorded
+        # at mint, the action lens has to agree as well — and the action comes
+        # from the cache entry, never from this call's arguments, which are
+        # caller-supplied.
+        _action: str | None = cached.get("resolved_action")
+        _action_ok = _action is None or _redemption_action_authorized(request, tool_name, _action)
+        if (
+            not _target
+            or not _action_ok
+            or not _redemption_target_authorized(request, tool_name, _target)
+        ):
+            logger.warning(
+                "heavy_continuation_route_not_authorized",
+                extra={"tool": tool_name, "target": _target or "<unrecorded>"},
+            )
+            _log_audit_context(
+                request,
+                tool_name,
+                arguments,
+                decision="deny",
+                # §5: an entry minted before the shape change has no resolved
+                # target, so it cannot be authorized and is refused rather than
+                # served on trust — same posture as the pre-SEC-3 legacy entries
+                # above, and visible as a refusal wave across the deploy.
+                reason=(
+                    "continuation_route_not_authorized"
+                    if _target
+                    else "continuation_target_unrecorded"
+                ),
+            )
+            return _continuation_refused(request_id)
         # ADR-005 item (b), ruled B2: a bare continuation_token is bounded, not
         # complete.  `full` is still available and still returns everything —
         # it just has to be asked for, so an omitted or mistyped `mode` cannot
@@ -1634,10 +2021,23 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # absence error that wraps it.  The route/tier lens is already applied
         # via the route view + max_tier; this adds the per-user capability lens.
         _perm_filter = getattr(request, "_mcp_perm_entry_filter", None)
+        # The ACTION lens has to come too, not just the entry lens.  A dispatcher
+        # whose every action the caller lacks permission for still passes
+        # ``entry_filter`` — the entry itself is visible, it is the actions that
+        # are not — so it stayed in ``known_names`` and a near-match handed its
+        # name back inside the very error that denies it exists.  ``tools/list``
+        # drops that dispatcher because the empty action enum makes it an empty
+        # shell; passing the same factory here makes the two agree.  Same
+        # disagreement class as H3's four consumers: one lens applied in one
+        # consumer is not the lens applied.
+        _caps = getattr(request, "_mcp_capabilities", None)
+        _action_factory = _make_perm_action_filter_factory(_caps) if _caps is not None else None
         known_names = [
             t["name"]
             for t in _known_lister(
-                max_tier=_get_token_permission(request), entry_filter=_perm_filter
+                max_tier=_get_token_permission(request),
+                entry_filter=_perm_filter,
+                action_filter_factory=_action_factory,
             )
         ]
         suggestions = difflib.get_close_matches(tool_name, known_names, n=3, cutoff=0.6)
@@ -1821,10 +2221,46 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         _w_token = secrets.token_urlsafe(16)
         _lean = _extract_lean_envelope(result, _w_token, _http_status, tool_name=tool_name)
         if "continuation_token" in _lean:
-            django_cache.set(
+            _hc = _heavy_cache()
+            # Two ways the token cannot be redeemed, one outcome: return the
+            # write result whole rather than a lean envelope advertising a
+            # token nothing can redeem.
+            #
+            #   _hc is None                 no continuation store to redeem from
+            #   schema does not disclose    the caller cannot legally send it back
+            #
+            # CR-9: the second is the same condition as the first and was
+            # missing.  This path minted on ``is_write`` alone, and ``is_write``
+            # is set only by auto-discovery, so the affected population is
+            # auto-discovered ``*_create``/``*_update``/``*_partial_update`` —
+            # the production-dominant write path.
+            #
+            # It is worse here than the read-side defect the mint gate was
+            # written for.  There an undisclosed token was merely redundant: the
+            # payload came back anyway.  Here ``_extract_lean_envelope`` returns
+            # id + status_code + data_size + token and NOTHING else, so the
+            # written object is reachable ONLY by redeeming.  A schema-validating
+            # client cannot send an undeclared field, so it does not lose a
+            # negotiation nicety — it loses the write result, and pays for a
+            # pinned entry in the shared default cache to do it.
+            #
+            # The outer entry's schema is authoritative, matching the size
+            # backstop: it is the schema this caller validated against.
+            #
+            # This costs tokens — affected writes now return the full result
+            # instead of a lean envelope.  That is the correct trade.  The lean
+            # envelope's "saving" was achieved by making the data unreachable,
+            # and a larger response beats a lost one.
+            if _hc is None or not schema_discloses_continuation(
+                getattr(_write_entry, "input_schema", None)
+            ):
+                return _usage_success(
+                    request, request_id, result, tool_name=tool_name, usage_args=_usage_args
+                )
+            _hc.set(
                 f"{_HEAVY_CACHE_PREFIX}{_w_token}",
                 _build_heavy_cache_entry(result, request, tool_name),
-                _HEAVY_CACHE_TTL,
+                _heavy_cache_ttl(),
             )
         elif _lean.get("deleted") is True:
             # Delete: enrich with the pk from original arguments.
@@ -1859,10 +2295,21 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             # change, not a refactor — left for a follow-up.)
             _d_lean = _extract_lean_envelope(result, _w_token, _http_status, tool_name=tool_name)
             if "continuation_token" in _d_lean:
-                django_cache.set(
+                _hc = _heavy_cache()
+                if _hc is None:
+                    # Same as the flat write path: no store, so no envelope
+                    # promising a redemption that cannot happen.
+                    return _usage_success(
+                        request, request_id, result, tool_name=tool_name, usage_args=_usage_args
+                    )
+                _hc.set(
                     f"{_HEAVY_CACHE_PREFIX}{_w_token}",
-                    _build_heavy_cache_entry(result, request, tool_name),
-                    _HEAVY_CACHE_TTL,
+                    # ADR-011 §5: bind the server-resolved child, not the outer
+                    # dispatcher name, so redemption has something to re-authorize.
+                    _build_heavy_cache_entry(
+                        result, request, tool_name, getattr(_d_entry, "name", None)
+                    ),
+                    _heavy_cache_ttl(),
                 )
             elif _d_lean.get("deleted") is True:
                 pk_val = _d_params.get("pk") or _d_params.get("id")
@@ -1888,7 +2335,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         if _entry is not None and _entry.is_dispatcher
         else _entry
     )
-    if _heavy_entry is not None and _heavy_entry.is_heavy:
+    # A missing continuation store disables negotiation rather than
+    # relocating it: the full response is returned instead of a probe
+    # advertising a token that was never stored.
+    _hc = _heavy_cache()
+    if _heavy_entry is not None and _heavy_entry.is_heavy and _hc is not None:
         _token = secrets.token_urlsafe(16)
         # SEC-3: bind the cache entry to the current caller so a leaked
         # continuation_token cannot be replayed by a different agent.
@@ -1902,31 +2353,72 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # mint to the inner name while redeem stays outer, and every grouped
         # redemption would fail owner-mismatch.  That is the unredeemable-token
         # bug this change exists to fix, reintroduced from the other side.
-        django_cache.set(
+        _hc.set(
             f"{_HEAVY_CACHE_PREFIX}{_token}",
-            _build_heavy_cache_entry(result, request, tool_name),
-            _HEAVY_CACHE_TTL,
+            # ADR-011 §5: bind the server-resolved child, not the outer
+            # dispatcher name, so redemption has something to re-authorize.
+            _build_heavy_cache_entry(
+                result, request, tool_name, getattr(_heavy_entry, "name", None)
+            ),
+            _heavy_cache_ttl(),
         )
         probe = _build_probe_envelope(result, _token)
         return _usage_success(
             request, request_id, probe, tool_name=tool_name, usage_args=_usage_args
         )
 
-    # Threshold backstop (secondary, v2): auto-negotiate any tool response that exceeds
-    # FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD bytes.  Prefer @mcp_heavy for explicit control.
-    # Defaults to _DEFAULT_AUTO_NEGOTIATE_THRESHOLD (on) so high-cardinality lists probe
-    # first without per-host config; an explicit None in settings disables the backstop.
+    # Threshold backstop (secondary, v2): auto-negotiate an over-threshold response from
+    # any tool whose published schema DISCLOSES the continuation call — @mcp_heavy and the
+    # dispatchers.  A non-disclosing tool is returned whole no matter its size (CR-2); see
+    # the disclosure gate below.  Prefer @mcp_heavy for explicit control.
+    # Defaults to _DEFAULT_AUTO_NEGOTIATE_THRESHOLD (on) so high-cardinality lists on those
+    # shapes probe first without per-host config; an explicit None in settings disables the
+    # backstop entirely.
     _threshold: int | None = getattr(
         settings, "FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD", _DEFAULT_AUTO_NEGOTIATE_THRESHOLD
     )
-    if _threshold is not None:
+    #
+    # H2: size alone is not sufficient grounds to mint.  The token is only
+    # worth issuing if the caller can legally send it back, and that is decided
+    # by the schema they were handed in `tools/list` — so the gate reads that
+    # same schema rather than a flag recorded beside it.  Disclosure and mint
+    # eligibility are therefore one fact read twice and cannot drift apart,
+    # which is how tokens came to be minted for shapes no schema-validating
+    # caller could return.
+    #
+    # The OUTER entry's schema is authoritative, deliberately.  `_heavy_entry`
+    # above resolves inward to decide *whether* a routed tool negotiates; this
+    # decides whether the *caller* can reply, and the caller validated against
+    # the outer tool — the same reason the owner key binds the outer name (G1).
+    if (
+        _threshold is not None
+        and _hc is not None
+        and schema_discloses_continuation(getattr(_entry, "input_schema", None))
+    ):
         _serialized = json.dumps(result)
         if len(_serialized.encode()) > _threshold:
             _token = secrets.token_urlsafe(16)
-            django_cache.set(
+            _hc.set(
                 f"{_HEAVY_CACHE_PREFIX}{_token}",
-                _build_heavy_cache_entry(result, request, tool_name),
-                _HEAVY_CACHE_TTL,
+                # ADR-011 §5: the outer name governs schema disclosure and the
+                # owner key (both above); route containment is a third fact and
+                # takes the server-resolved child.  Binding the outer name here
+                # would make §4's membership re-check trivially pass for every
+                # grouped token minted through this backstop.
+                #
+                # A class dispatcher resolves no child at all, so it records the
+                # dispatched *action* instead — otherwise the re-check
+                # authorizes the navigation entry-point rather than the thing
+                # that produced the payload.  This backstop is the only mint
+                # path a class dispatcher reaches.
+                _build_heavy_cache_entry(
+                    result,
+                    request,
+                    tool_name,
+                    getattr(_heavy_entry, "name", None),
+                    _dispatched_action(_entry, arguments),
+                ),
+                _heavy_cache_ttl(),
             )
             probe = _build_probe_envelope(result, _token)
             return _usage_success(
@@ -2175,8 +2667,17 @@ class McpView(APIView):
         to pin a different cap (or ``None`` to disable it) without touching
         global settings — the auto-registered protected endpoint does exactly
         this so that authenticated callers receive their full tier there.
+
+        Normalised through the same helper the ``E010`` startup check uses, so
+        the check cannot bless a value the runtime then rejects.  An
+        unrecognised value stays unrecognised — it is **not** coerced to a tier
+        — so it still fails closed; what changes is that ``"  READ_WRITE  "``
+        now means what the operator plainly intended instead of denying every
+        privileged caller while the check reported the config clean.
         """
-        return getattr(settings, "FRISIAN_MCP_MAX_TIER", None)
+        return normalize_tier_setting(getattr(settings, "FRISIAN_MCP_MAX_TIER", None)) or getattr(
+            settings, "FRISIAN_MCP_MAX_TIER", None
+        )
 
     def get_authenticators(self) -> list[Any]:
         """

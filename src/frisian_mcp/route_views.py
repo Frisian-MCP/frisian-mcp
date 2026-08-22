@@ -80,7 +80,9 @@ from rest_framework.permissions import (
 from frisian_mcp.registry import (
     _TIER_RANK,
     ToolNotFoundError,
+    _caller_rank,
     _normalize_argument_keys,
+    shape_tools_listing,
     tool_registry,
 )
 from frisian_mcp.route_config import RouteConfig, parse_route_configs
@@ -319,61 +321,21 @@ def _list_entries(
     dispatcher with zero visible actions is omitted.  Child lookups resolve
     against *entries*, so a denied child is never counted.
     """
-    # pylint: disable=import-outside-toplevel
-    from frisian_mcp.backends.dispatcher import _build_dispatcher_input_schema
-
-    # ``max_tier is None`` means "no cap" (rank 2, show all) — the intentional
-    # legacy/internal path.  A non-None but UNRECOGNISED tier string fails
-    # CLOSED (rank 0 = read), matching this module's _min_tier convention, so a
-    # garbled cap can never widen visibility to admin-tier tools.
-    max_rank = 2 if max_tier is None else _TIER_RANK.get(max_tier, 0)
-    tools: list[dict[str, Any]] = []
-    for entry in entries.values():
-        if entry.hidden:
-            continue
-        if _TIER_RANK.get(entry.permission_tier, 0) > max_rank:
-            continue
-        if entry_filter is not None and not entry_filter(entry):
-            continue
-
-        if entry.group_tool_names and entry_filter is not None:
-            perm_children = [
-                entries[t]
-                for t in entry.group_tool_names
-                if t in entries
-                and entries[t].perm_app_label is not None
-                and entries[t].perm_model is not None
-            ]
-            if perm_children and not any(entry_filter(c) for c in perm_children):
-                continue
-
-        if not entry.is_dispatcher or entry.dispatcher_meta is None:
-            tools.append(
-                {
-                    "name": entry.name,
-                    "description": entry.description,
-                    "inputSchema": entry.input_schema,
-                    "tier": entry.permission_tier,
-                }
-            )
-            continue
-
-        action_filter = action_filter_factory(entry) if action_filter_factory is not None else None
-        filtered_schema = _build_dispatcher_input_schema(
-            entry.dispatcher_meta, max_tier=max_tier, action_filter=action_filter
-        )
-        visible_actions = filtered_schema["properties"]["action"]["enum"]
-        if max_tier is not None and not visible_actions:
-            continue
-        tools.append(
-            {
-                "name": entry.name,
-                "description": entry.description,
-                "inputSchema": filtered_schema,
-                "tier": entry.permission_tier,
-            }
-        )
-    return tools
+    # H15: ONE implementation, shared with ``ToolRegistry.list_tools``.
+    #
+    # This function used to carry its own copy of the shaping loop, documented
+    # as mirroring the registry's.  H3's group-dispatcher fix landed only in the
+    # registry copy, so on a per-route mount — what a real deployment uses —
+    # every group dispatcher disappeared from ``tools/list`` for every
+    # non-superuser while staying fully invocable.  A mirror is a copy.
+    max_rank = 2 if max_tier is None else _caller_rank(max_tier)
+    return shape_tools_listing(
+        entries,
+        max_rank=max_rank,
+        max_tier=max_tier,
+        entry_filter=entry_filter,
+        action_filter_factory=action_filter_factory,
+    )
 
 
 # ---------------------------------------------------------------------------

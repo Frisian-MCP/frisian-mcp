@@ -27,6 +27,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 
 from frisian_mcp.backends.invocation import _extract_lean_envelope
+from frisian_mcp.negotiation import merge_continuation_branch
 from frisian_mcp.registry import ToolRegistry
 from frisian_mcp.views import McpView
 
@@ -68,6 +69,7 @@ def _build_write_registry(
     name: str,
     handler: Any,
     is_heavy: bool = False,
+    discloses: bool = True,
 ) -> ToolRegistry:
     """
     Return an isolated registry with a single write-marked tool.
@@ -75,13 +77,27 @@ def _build_write_registry(
     Uses permission_tier='read' so tests work with the default anonymous
     unauthenticated tier — this isolates write-path filtering behaviour
     from permission enforcement (tested separately in test_permission_tiers.py).
+
+    CR-9: the flat write path now mints its lean-envelope ``continuation_token``
+    only when the published schema discloses one.  This fixture registers
+    through ``ToolRegistry.register()``, which has never merged disclosure —
+    which is exactly why the suite was structurally blind to the defect CR-9
+    fixes — so it must now say what it means.
+
+    Default ``discloses=True`` keeps every lean-envelope test below exercising
+    the lean path it was written for.  Pass ``discloses=False`` for the CR-9
+    fallthrough: a write tool whose schema does not declare the token must get
+    its result back WHOLE rather than a lean envelope it cannot redeem.
     """
+    schema: dict[str, Any] = {"type": "object", "properties": {"name": {"type": "string"}}}
+    if discloses:
+        schema = merge_continuation_branch(schema)
     isolated = ToolRegistry()
     isolated.register(
         name=name,
         fn=handler,
         description="stub write tool",
-        input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+        input_schema=schema,
         permission_classes=[],
         is_write=True,
         is_heavy=is_heavy,
@@ -1288,7 +1304,11 @@ class TestMcpLightKeyEndToEnd:
             name=tool_name,
             fn=self._make_create(full_object, view_class),
             description="light-key e2e",
-            input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+            # CR-9: discloses, so the lean envelope this test is about is
+            # actually produced rather than falling through to the whole result.
+            input_schema=merge_continuation_branch(
+                {"type": "object", "properties": {"name": {"type": "string"}}}
+            ),
             permission_classes=[],
             is_write=True,
             permission_tier="read",
@@ -1309,6 +1329,164 @@ class TestMcpLightKeyEndToEnd:
         assert result["sku"] == "SKU-9"
         # ...but unlisted payload fields are not.
         assert "noise" not in result
+
+
+# ---------------------------------------------------------------------------
+# CR-9 — the flat write mint is gated on schema disclosure
+# ---------------------------------------------------------------------------
+
+
+class TestWriteMintRequiresDisclosure:
+    """
+    CR-9 (red-team F1): a write tool that does not disclose gets its result WHOLE.
+
+    The flat write path minted a lean-envelope ``continuation_token`` on
+    ``is_write`` alone.  ``is_write`` is set only by auto-discovery, and since
+    CR-2 auto-discovered schemas do not disclose — so the production-dominant
+    write population was handed a token its published schema did not declare.
+
+    That is worse than the read-side defect the mint gate was written for.  On
+    the read path an undisclosed token was redundant: the payload came back
+    anyway.  Here the lean envelope is id + status_code + data_size + token and
+    nothing else, so the written object is reachable ONLY by redeeming.  A
+    schema-validating client cannot send an undeclared field, so it does not
+    lose a negotiation nicety — it loses the write result.
+
+    The fix reuses the cannot-redeem branch that already existed for a missing
+    store.  These tests assert the outcome, not the mechanism.
+    """
+
+    OBJECT = {"id": "obj-1", "name": "n1", "bulk": "y" * 300}
+
+    def _handler(self) -> Any:
+        def _create(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
+            return dict(self.OBJECT)
+
+        return _create
+
+    def test_non_disclosing_write_returns_the_result_whole(self, rf: RequestFactory) -> None:
+        """No disclosure → the full written object, not a lean envelope."""
+        isolated = _build_write_registry("obj.create", self._handler(), discloses=False)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            response = _call_tool(rf, "obj.create", {"name": "n1"})
+
+        result = _tool_result(response)
+        assert not _is_error(response)
+        # The whole result, byte for byte — this is the data-loss assertion.
+        assert result == self.OBJECT
+        # ...and specifically NOT a lean envelope.
+        assert "continuation_token" not in result
+        assert "data_size" not in result
+
+    def test_non_disclosing_write_pins_nothing(self, rf: RequestFactory) -> None:
+        """
+        No mint means no shared-cache entry either.
+
+        Asserted off ``django_cache.set`` rather than reconstructed: a 300s
+        pinned entry in the shared default cache is a cost even when the caller
+        never sees the token it belongs to.
+        """
+        isolated = _build_write_registry("obj.create", self._handler(), discloses=False)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            _call_tool(rf, "obj.create", {"name": "n1"})
+            heavy_writes = [
+                call
+                for call in mock_cache.set.call_args_list
+                if str(call.args[0]).startswith("frisian_mcp:heavy:")
+            ]
+
+        assert heavy_writes == [], f"nothing may be pinned: {heavy_writes}"
+
+    def test_disclosing_write_still_gets_the_lean_envelope(self, rf: RequestFactory) -> None:
+        """
+        The contrast that makes this a gate rather than a removal.
+
+        Without this, deleting the write-side lean envelope entirely would also
+        pass the two assertions above.
+        """
+        isolated = _build_write_registry("obj.create", self._handler(), discloses=True)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            response = _call_tool(rf, "obj.create", {"name": "n1"})
+
+        result = _tool_result(response)
+        assert "continuation_token" in result
+        assert result["id"] == "obj-1"
+        assert "bulk" not in result
+
+    def test_deletes_are_unaffected(self, rf: RequestFactory) -> None:
+        """
+        A delete envelope carries no token, so the gate must not swallow it.
+
+        ``_extract_lean_envelope`` returns ``deleted: True`` without a
+        ``continuation_token``, which takes the ``elif`` rather than the mint
+        branch.  Deletes therefore keep their lean envelope whether or not the
+        schema discloses — worth pinning, because sweeping them into the
+        fallthrough would be an easy and silent mistake.
+        """
+
+        def _destroy(_arguments: dict[str, Any], _request: Any) -> Any:
+            return {"deleted": True, "status": 204}
+
+        isolated = _build_write_registry("obj.destroy", _destroy, discloses=False)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            response = _call_tool(rf, "obj.destroy", {"pk": "obj-1"})
+
+        result = _tool_result(response)
+        assert result.get("deleted") is True
+        assert result.get("id") == "obj-1"
+
+
+class TestDiscoveredWriteActionsAreGovernedByTheGate:
+    """
+    The structural fact that made the suite blind to F1 in the first place.
+
+    Every other test in this file builds its registry through
+    ``ToolRegistry.register()``, which has never merged disclosure — so a
+    fixture can be made to disclose (or not) at will and none of it says
+    anything about the population that actually carries ``is_write``.  That is
+    real auto-discovered ViewSet actions, and this asserts what they publish.
+    """
+
+    def test_auto_discovered_writes_do_not_disclose(self, settings: Any) -> None:
+        """
+        Post-CR-2 no discovered write action discloses, so the gate governs all of them.
+
+        If this ever goes green-to-red, the CR-9 gate has stopped applying to
+        the population it was written for and the tests above are measuring a
+        fixture rather than the product.
+        """
+        settings.ROOT_URLCONF = "tests.urls"
+        from frisian_mcp.backends.discovery import (  # pylint: disable=import-outside-toplevel
+            DRFSyncDiscovery,
+        )
+        from frisian_mcp.negotiation import (  # pylint: disable=import-outside-toplevel
+            schema_discloses_continuation,
+        )
+
+        writes = [t for t in DRFSyncDiscovery().discover_tools() if t.is_write]
+        assert writes, "premise: discovery produces write actions"
+        disclosing = [t.name for t in writes if schema_discloses_continuation(t.input_schema)]
+        assert disclosing == [], f"expected none to disclose post-CR-2, got {disclosing}"
 
 
 # ---------------------------------------------------------------------------
