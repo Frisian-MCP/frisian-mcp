@@ -29,11 +29,11 @@ The lean envelope approach is the right solution. It eliminates the default cost
 
 ## Decision
 
-frisian-mcp implements write-path response filtering as a package-level default, applied automatically to all tools whose underlying ViewSet actions are create, update, partial_update, destroy, or any `@action` decorated with `methods=['POST', 'PUT', 'PATCH', 'DELETE']`.
+frisian-mcp implements write-path response filtering as a package-level default for write calls whose published schema discloses continuation. Eligible actions include create, update, partial_update, destroy, or any `@action` decorated with `methods=['POST', 'PUT', 'PATCH', 'DELETE']` when routed through a schema-disclosing MCP tool entry.
 
 **Default behavior (lean envelope):**
 
-All write tools return a lean confirmation envelope without agent intervention. Three envelope shapes:
+Eligible write tools return a lean confirmation envelope without agent intervention. Three envelope shapes:
 
 - **Single-object create/update:** `{id, url?, name?, status_code, data_size, continuation_token}`
 - **Bulk create/update:** `{accepted, failed, status_code, data_size, continuation_token}`
@@ -41,7 +41,7 @@ All write tools return a lean confirmation envelope without agent intervention. 
 
 **Lean field extraction order:**
 
-The envelope always includes `status_code`, `data_size`, and `continuation_token`. The identifying fields are extracted in priority order from the serialized object: `id`/`pk` → `url` → `name`/`display` → any fields listed in the serializer's `Meta.mcp_light_key`.
+The envelope includes `status_code`, `data_size`, and `continuation_token` on create/update shapes. The identifying fields are extracted in priority order from the serialized object: `id`/`pk` → `url` → `name`/`display` → any fields listed in the serializer's `Meta.mcp_light_key`.
 
 **`Meta.mcp_light_key` annotation:**
 
@@ -75,7 +75,7 @@ The `verify` parameter is injected into every write tool's inputSchema automatic
 }
 ```
 
-This is useful when the agent has reason to validate the full serialized result before continuing (e.g., confirming computed fields, checking nested relationships). The agent opts in per call; the default for all other calls remains lean.
+This is useful when the agent has reason to validate the full serialized result before continuing (e.g., confirming computed fields, checking nested relationships). The agent opts in per call; the default for other eligible write calls remains lean.
 
 **Continuation token and retrieval:**
 
@@ -98,25 +98,33 @@ Read and list paths are unaffected. The `verify` parameter is a no-op on read to
 
 ## Consequences
 
-**Positive.** Write-heavy agent workflows no longer exhaust the context window on response echoes. The measured reduction for a 60-device bulk create is from ~10,798 tokens (full echo) to ~24 tokens (lean envelope) — a 99.8% reduction. The saving scales linearly with bulk size.
+**Positive.** Eligible write-heavy agent workflows no longer exhaust the context window on response echoes. The measured reduction for a 60-device bulk create is from ~10,798 tokens (full echo) to ~24 tokens (lean envelope) — a 99.8% reduction. The saving scales linearly with bulk size.
 
-**Positive.** No agent changes required for existing workflows that do not inspect the full write response. The lean envelope is the new default; agents that only need confirmation of success already have what they need.
+**Positive.** No agent changes required for existing eligible workflows that do not inspect the full write response. The lean envelope is the default on schema-disclosing write paths; agents that only need confirmation of success already have what they need.
 
 **Positive.** The `verify=True` opt-in preserves full access without a separate API. Agents that validate writes can do so per call with a single parameter, receiving the full response inline without a cache round-trip.
 
 **Positive.** The continuation token reuses tested infrastructure. No new caching layer is introduced; `@mcp_heavy`'s cache machinery handles retrieval for both read and write paths.
 
-**Negative.** Agents that have historically expected full echo responses on writes will receive lean envelopes instead. This is a behavior change for any agent implementation that parses the full write response body. The migration path is `verify=True` until the agent is updated to use the continuation token flow.
+**Negative.** Agents that have historically expected full echo responses on eligible schema-disclosing writes will receive lean envelopes instead. This is a behavior change for any agent implementation that parses the full write response body. The migration path is `verify=True` until the agent is updated to use the continuation token flow.
 
 **Negative.** The `@mcp_light_key` annotation adds a non-standard meta attribute to serializer `Meta` classes. While it follows the existing Django pattern for serializer metadata, it is frisian-mcp-specific and will not be understood by tools that inspect serializers for other purposes.
 
 **Negative.** The `data_size` field in the lean envelope reports bytes of the cached full response, not a parsed record count. For bulk operations, agents that want a record count must call the continuation token path to inspect the full response, or infer from `accepted` + `failed` in the bulk envelope.
 
-The write-path token savings are material enough to justify the behavior change. Agents building infrastructure across large datasets — the primary use case for the large Django application integrations this package targets — cannot sustain multi-step workflows without this optimization.
+The write-path token savings are material enough to justify the behavior change on eligible write paths. Agents building infrastructure across large datasets — the primary use case for the large Django application integrations this package targets — cannot sustain multi-step workflows without this optimization.
 
 ## Validation
 
-The 60-device bulk create measurement (10,798 tokens full echo → 24 tokens lean envelope, 99.8% reduction) was taken during a network automation integration session against a production system. A standalone full device representation is approximately 3,800 bytes (~603 tokens); within the bulk echo the per-device cost is lower, about 720 bytes (~180 tokens), consistent with the 10,798-token / 60-device figure above. The 99.8% reduction figure holds at any bulk size because the lean envelope size is constant regardless of the number of objects written.
+The 60-device bulk create measurement (10,798 tokens full echo → 24 tokens lean envelope, 99.8% reduction) was taken during a network automation integration session against a production system. A standalone full device representation is approximately 3,800 bytes (~603 tokens); within the bulk echo the per-device cost is lower, about 720 bytes (~180 tokens), consistent with the 10,798-token / 60-device figure above. For eligible write paths, the 99.8% reduction figure holds at any bulk size because the lean envelope size is constant regardless of the number of objects written.
+
+## Amendments
+
+### 2026-08-22 — write lean envelope now gates on published schema disclosure
+
+Carried by branch `feat/post-1.1.0-hardening` as part of the post-1.1.0 hardening CR. Status remains **Accepted** — this narrows where the package-level write filter applies without replacing the lean-envelope decision.
+
+The previous text said write-path response filtering was "applied automatically to all tools whose underlying ViewSet actions are create, update, partial_update, destroy..." That is no longer the complete contract. The flat write mint path now derives eligibility from the published schema, the same way the read-size backstop does: a write call receives the lean envelope only where the published schema discloses continuation. Dispatcher-routed writes still disclose through their outer entry and keep the lean envelope. The architectural invariant is that the package must not hand a caller a continuation token its published schema gives it no legal slot to return.
 
 ---
 

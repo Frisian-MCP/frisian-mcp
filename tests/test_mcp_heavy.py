@@ -16,6 +16,7 @@ from frisian_mcp.decorators import _merge_negotiation_schema, mcp_heavy
 from frisian_mcp.negotiation import schema_discloses_continuation
 from frisian_mcp.registry import ToolInputError, ToolRegistry
 from frisian_mcp.views import (
+    _HEAVY_CACHE_PREFIX,
     McpView,
     _build_probe_envelope,
     _serve_heavy_mode,
@@ -670,9 +671,37 @@ class TestMcpHeavyIntegration:
         assert "expired" in text["error"].lower() or "not found" in text["error"].lower()
 
     @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=50)
-    def test_threshold_backstop_wraps_large_response(self, rf: RequestFactory) -> None:
-        """FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD wraps large non-heavy tool responses."""
+    def test_threshold_backstop_returns_a_non_disclosing_tool_whole(
+        self, rf: RequestFactory
+    ) -> None:
+        """
+        CR-2: an over-threshold ``@mcp_tool`` response comes back WHOLE, and pins nothing.
+
+        This test asserted the opposite until CR-2 — that the backstop wrapped
+        any large response, including an ordinary tool's.  That behaviour is
+        what H2 then had to pay for by disclosing the continuation call on every
+        schema.  Reversing it is the point of CR-2: ``@mcp_tool`` no longer
+        discloses, ``schema_discloses_continuation()`` gates the mint, so the
+        backstop declines rather than issuing a token the caller's published
+        schema never mentioned.
+
+        "Declines" has to mean the full payload, and this is the assertion that
+        pins it.  A backstop that quietly truncated or dropped an over-threshold
+        response it had decided not to negotiate would be a worse defect than
+        the schema bloat CR-2 removes, and it would be invisible to any
+        assertion that only checked for the absence of a token.  So both halves
+        are checked: the exact bytes come back, and nothing is written to the
+        heavy cache — measured off ``django_cache.set`` rather than
+        reconstructed, because an entry pinned for 300s in the shared default
+        cache is a cost even when no caller ever sees the token.
+
+        The backstop is NOT disabled by this.  It still mints for every shape
+        that discloses — ``@mcp_heavy`` and the dispatchers — which the tests
+        around this one cover.
+        """
         from frisian_mcp.decorators import mcp_tool
+
+        payload = {"data": "x" * 1000}  # ~1 KB, far over the 50-byte threshold
 
         isolated = ToolRegistry()
         with (
@@ -686,15 +715,30 @@ class TestMcpHeavyIntegration:
                 input_schema={"type": "object", "properties": {}},
             )
             def _light(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
-                return {"data": "x" * 1000}  # ~1 KB > 50-byte threshold
+                return dict(payload)
+
+            entry = isolated.get_entry("int.light")
+            assert entry is not None
+            # The precondition the mint gate reads.  Asserted here so that if a
+            # future change re-disclosed on this path, this test fails on the
+            # cause rather than on the consequence.
+            assert schema_discloses_continuation(entry.input_schema) is False
 
             with patch("frisian_mcp.views.django_cache") as mock_cache:
                 mock_cache.get.return_value = None
                 mock_cache.set = MagicMock()
                 response = _call_tool(rf, "int.light", {})
 
+                heavy_writes = [
+                    call
+                    for call in mock_cache.set.call_args_list
+                    if str(call.args[0]).startswith(_HEAVY_CACHE_PREFIX)
+                ]
+
         result = _tool_result(response)
-        assert "continuation_token" in result, "Expected probe envelope from threshold backstop"
+        assert "continuation_token" not in result, "Undisclosed shape must not be handed a token"
+        assert result == payload, "Over-threshold non-disclosing response must be returned WHOLE"
+        assert heavy_writes == [], f"Nothing may be pinned in the heavy cache: {heavy_writes}"
 
     @override_settings(FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD=100000)
     def test_threshold_backstop_passthrough_for_small_response(self, rf: RequestFactory) -> None:

@@ -27,7 +27,7 @@ The probe-then-fetch pattern is the right solution. It gives the agent the infor
 
 ## Decision
 
-frisian-mcp implements read-path response filtering two ways: an explicit `@mcp_heavy` tool registration for hand-authored heavy tools, and the `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` byte-size backstop that applies the same probe behavior to auto-discovered ViewSet actions.
+frisian-mcp implements read-path response filtering through explicit `@mcp_heavy` tool registration for hand-authored heavy tools. The `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` byte-size backstop can also mint a probe envelope, but only for tools whose published schema already discloses the continuation call.
 
 **Decorator usage:**
 
@@ -45,11 +45,11 @@ def search_devices(arguments, request):
     ...
 ```
 
-Auto-discovered `ModelViewSet` actions are covered without a decorator by setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` (see below).
+Plain auto-discovered `ModelViewSet` actions are not made negotiable by setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` alone. Register an explicit `@mcp_heavy` tool when a known-large read should use the probe envelope.
 
 **Two-call pattern:**
 
-When a heavy tool (or an auto-discovered action over the negotiation threshold) returns a large result, the first call functions as a probe. The response is a probe envelope:
+When a schema-disclosing heavy tool or dispatcher-routed read returns a large result, the first call functions as a probe. The response is a probe envelope:
 
 - `preview` — a truncated preview of the result so the agent can see its shape
 - `total_size` — full serialized response size in bytes
@@ -63,7 +63,7 @@ Subsequent data is fetched by re-invoking the same tool with the `continuation_t
 
 **Automatic threshold negotiation:**
 
-The `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` setting (in bytes) triggers automatic `@mcp_heavy` behavior on any ViewSet action — even those not explicitly decorated — when the response size exceeds the threshold. This provides a safety net for large Django applications where not every ViewSet has been individually reviewed.
+The `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` setting (in bytes) checks serialized read-response size and mints a probe envelope only when the published schema discloses continuation. This includes explicit heavy tools and dispatchers. It does not add continuation fields to ordinary tools or plain auto-discovered ViewSet actions; when one of those non-disclosing reads exceeds the threshold, the complete result is returned inline.
 
 **The backstop is on by default.** With no setting present it applies at a built-in default of 25,000 bytes; the setting raises or lowers that threshold, and an explicit `None` **disables** the backstop entirely. It is not opt-in — an operator who adds the setting believing they are switching the backstop on is confirming a default that was already active, and one who sets `None` believing it is the default is switching it off.
 
@@ -72,7 +72,7 @@ FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50000  # bytes — raise the built-in def
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None   # disable the backstop entirely
 ```
 
-Disabling it is a deliberate act with a consequence worth stating: on a host with the backstop off, a tool that negotiates only via the backstop returns its full payload unbounded. The built-in default is deliberately conservative so that undecorated high-cardinality endpoints probe first without per-host configuration.
+Disabling it is a deliberate act with a consequence worth stating: on a host with the backstop off, a schema-disclosing read that negotiates only via the backstop returns its full payload unbounded. The built-in default is deliberately conservative so that heavy and dispatcher surfaces can probe first without per-host configuration.
 
 **Relationship to the discovery backend:**
 
@@ -139,11 +139,11 @@ Using both — DRF `PAGE_SIZE` plus `@mcp_heavy` annotation — is the recommend
 
 **Positive.** The decorator is additive. Applying `@mcp_heavy` to a ViewSet does not change its behavior for non-MCP callers. The standard DRF response path is unaffected; only MCP-routed calls receive the probe-first response.
 
-**Positive.** The auto-negotiate threshold provides a passive safety net. Large responses on undecorated ViewSets are automatically handled without requiring explicit decoration of every ViewSet in a large application.
+**Positive.** The auto-negotiate threshold provides a passive safety net for schema-disclosing read surfaces. Large responses on heavy tools and dispatchers can be handled without a per-call opt-in.
 
 **Negative.** List operations that previously returned results in one call now require two calls when the agent chooses to paginate: one probe, then one or more page fetches. For agents fetching small, known-bounded datasets — a filter that reliably returns only a handful of records — the probe call is overhead without benefit.
 
-**Negative.** The decorator requires the developer to identify which ViewSets serve large result sets. While auto-negotiation provides a fallback, the optimal configuration — explicit `@mcp_heavy` decoration on the right ViewSets — requires that review.
+**Negative.** The decorator requires the developer to identify which reads serve large result sets. Since plain auto-discovered actions do not publish continuation fields, the optimal configuration — explicit `@mcp_heavy` registration for known-heavy reads — requires that review.
 
 **Negative.** The two-call pattern introduces dependency on the server-side cache. If the cache is cleared or expires between the probe call and the first page fetch, the agent receives an error on the continuation call. Cache TTL must be set generously enough for realistic agent interaction pacing.
 
@@ -156,6 +156,16 @@ The `@mcp_heavy` pattern was validated against a large open-source Django applic
 The same cache infrastructure introduced for `@mcp_heavy` was subsequently reused for the write-path continuation token (ADR-004), confirming the design is general enough to serve both read and write response filtering needs.
 
 ## Amendments
+
+### 2026-08-22 — threshold backstop now gates on published schema disclosure
+
+Carried by branch `feat/post-1.1.0-hardening` as part of the post-1.1.0 hardening CR. Status remains **Accepted** — this narrows the threshold backstop contract without replacing the probe-then-fetch decision.
+
+The previous text said auto-discovered `ModelViewSet` actions were covered without a decorator by setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`, and described the two-call pattern as applying when "a heavy tool (or an auto-discovered action over the negotiation threshold)" returned a large result. That was the intended H2 remedy for a real defect: the size backstop must not mint a continuation token for a schema-validating caller whose published schema gives it no legal place to return that token.
+
+The amended contract keeps that invariant but changes the remedy. Negotiation eligibility is derived from the published schema. The threshold backstop mints only when that schema discloses continuation, such as explicit heavy tools and dispatchers. Ordinary tools and plain auto-discovered actions no longer receive universal continuation disclosure; if one of those non-disclosing reads exceeds the threshold, frisian-mcp returns the complete result inline with no continuation token and no cached result.
+
+The reason is token cost on the orientation path. Universal disclosure added about 380 tokens to an empty ordinary tool schema and 382 tokens to an auto-discovered action schema. On a production-shaped registry, removing that always-on disclosure changed `tools/list` from 5,292 to 2,625 tokens, saving 2,667 tokens (50.4%). The old failure mode remains prohibited; the implementation now prevents it by refusing to mint for non-disclosing schemas rather than by making every schema disclose.
 
 ### 2026-08-07 — negotiation contract, cache-token semantics, and continuation ownership
 

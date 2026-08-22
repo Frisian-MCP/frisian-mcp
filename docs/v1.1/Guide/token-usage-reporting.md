@@ -63,7 +63,7 @@ emitted, with no self-reference.
 |---|---|
 | `schema_tokens` | The tool `inputSchema` **as surfaced to this caller** — the tier/permission-filtered schema, or the constant group schema for a dispatcher. Serialized with `json.dumps` and counted. Never the full raw-registry schema. |
 | `request_tokens` | The original inbound tool arguments for this call, serialized and counted — what the agent actually spent to make the request. |
-| `result_tokens` | The exact emitted `content[0].text` for the exit path taken (lean envelope, probe, full result, served-heavy) — counted directly. On heavy/threshold paths this is the small **probe** actually returned, never the multi-MB cached blob. |
+| `result_tokens` | The exact emitted `content[0].text` for the exit path taken (lean envelope, probe, full result, served-heavy) — counted directly. On heavy or schema-disclosed threshold-negotiation paths this is the small **probe** actually returned, never the multi-MB cached blob; on non-disclosing over-threshold reads it is the complete inline result. |
 | `total_tokens` | The integer sum of the three counts above. |
 | `encoding` | Provenance of the counts: `"cl100k_base"` for real tokenizer counts, `"approx-char4"` for the character-based fallback (see [Encoding and the Optional Dependency](#encoding-and-the-optional-dependency)). |
 
@@ -342,9 +342,11 @@ the query parameter and inspect the block.
   surface is a signal the grouping is not doing its job.
 - `request_tokens` is what the agent spent phrasing the call.
 - `result_tokens` is what the response cost the agent's context. On a `@mcp_heavy`
-  or auto-negotiated path, a small `result_tokens` next to a large underlying
-  dataset is the read-filtering working as intended; on a `@mcp_light` write, a
-  small `result_tokens` is the lean envelope doing its job.
+  or schema-disclosed auto-negotiated path, a small `result_tokens` next to a
+  large underlying dataset is the read-filtering working as intended; on a
+  non-disclosing over-threshold read, the count reflects the complete inline
+  result; on a `@mcp_light` write, a small `result_tokens` is the lean envelope
+  doing its job.
 
 Read alongside [The Token Problem at MCP Scale](the-token-problem.md), the
 `_usage` block turns the package's context-saving claims into a number you can

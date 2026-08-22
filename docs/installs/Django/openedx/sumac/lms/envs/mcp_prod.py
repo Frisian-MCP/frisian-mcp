@@ -197,11 +197,10 @@ FRISIAN_MCP_DISPATCH_GROUPS = {
 # ---------------------------------------------------------------------------
 # Large Response Negotiation
 # ---------------------------------------------------------------------------
-# Open edX ViewSets cannot be decorated with @mcp_heavy without modifying
-# platform source files. FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD provides the
-# equivalent behavior at the gateway level: responses larger than this byte
-# threshold are cached and returned as a continuation token rather than
-# inline JSON, preventing context window exhaustion on large result sets.
+# Platform ViewSets cannot be decorated with @mcp_heavy without modifying
+# platform source files. FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD negotiates large
+# responses only for schema-disclosing heavy tools and dispatchers. Plain
+# non-disclosing actions over this threshold return complete inline JSON.
 
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 8_000  # bytes
 

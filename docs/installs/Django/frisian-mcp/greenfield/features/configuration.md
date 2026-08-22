@@ -192,7 +192,7 @@ FRISIAN_MCP_TOOL_ALLOWLIST = [
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `FRISIAN_MCP_HEAVY_PAGE_SIZE` | `20` | Default page size for `@mcp_heavy` tools in `paginated` mode. |
-| `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` | `None` | Integer byte count. When set, auto-wraps any tool response exceeding this size in a probe envelope, even tools not decorated with `@mcp_heavy`. Secondary backstop — prefer `@mcp_heavy` for explicit control. |
+| `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` | `25000` | Integer byte count, or `None` to disable. Mints a probe envelope only when an over-threshold read's published schema already discloses continuation, such as `@mcp_heavy` tools and dispatchers. Non-disclosing over-threshold reads return complete. Secondary backstop — prefer `@mcp_heavy` for explicit control. |
 
 ### Middleware
 

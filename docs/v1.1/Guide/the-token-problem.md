@@ -113,7 +113,7 @@ The 65-device numbers are from a validated production network automation integra
 
 ### The @mcp_heavy Solution
 
-`@mcp_heavy` enforces probe-first behavior. When a heavy tool — or an auto-discovered endpoint whose response exceeds the negotiation threshold — returns a large result, the agent first receives a small probe envelope instead of the full payload:
+`@mcp_heavy` enforces probe-first behavior. When a heavy tool returns a large result, the agent first receives a small probe envelope instead of the full payload:
 
 - `preview` — a truncated preview of the result so the agent can see its shape
 - `total_size` — full serialized response size in bytes
@@ -123,11 +123,11 @@ The 65-device numbers are from a validated production network automation integra
 The agent receives the metadata it needs to decide what to do — fetch the full result, pull one page, take a summary, or refine the filter. The context window is not pre-filled with records the agent may never need.
 
 ```python
-# Auto-discovered ModelViewSets negotiate large responses via a byte threshold —
-# no per-endpoint decorator required. This ships ACTIVE with a default of 25_000
-# bytes: any successful non-write response over the threshold (list, detail, or custom tool
-# output) probes first out of the box — high-cardinality lists are the common
-# case. Override to tune, or set None to disable. See the Configuration Reference.
+# The threshold backstop ships active at 25_000 bytes. It negotiates only for
+# schemas that disclose the continuation call, such as @mcp_heavy tools and
+# dispatchers. Plain auto-discovered actions over the threshold return the
+# complete result inline. Override to tune, or set None to disable.
+# See the Configuration Reference.
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 25_000  # bytes (shipped default)
 ```
 
@@ -151,7 +151,7 @@ The decorator does not prevent the agent from accessing all 500 records. It chan
 
 DRF already supports default pagination via `PAGE_SIZE` in `REST_FRAMEWORK` settings. `@mcp_heavy` differs in two ways:
 
-**It enforces a probe envelope in the response.** A standard DRF paginated response includes `count` and `next`; a non-paginated DRF response is a bare list. `@mcp_heavy` (and the auto-negotiation threshold) instead returns a structured probe envelope — `total_size`, `available_modes`, `continuation_token` — regardless of the underlying ViewSet's pagination configuration.
+**It enforces a probe envelope in the response.** A standard DRF paginated response includes `count` and `next`; a non-paginated DRF response is a bare list. `@mcp_heavy` instead returns a structured probe envelope — `total_size`, `available_modes`, `continuation_token` — regardless of the underlying ViewSet's pagination configuration. The auto-negotiation threshold uses the same envelope only for schema-disclosing heavy tools and dispatchers; non-disclosing ordinary reads over the threshold return complete.
 
 **It marks the operation explicitly.** The decorator signals to the schema generation layer that this tool returns metadata, not a complete dataset. The agent's tool description can include this hint, helping the agent make better calls.
 

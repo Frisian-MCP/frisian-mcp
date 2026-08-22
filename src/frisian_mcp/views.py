@@ -196,16 +196,25 @@ def _heavy_cache() -> Any | None:
 
 
 #: Default byte threshold for the auto-negotiate backstop
-#: (``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD``).  A tool response whose serialized
-#: JSON exceeds this many bytes is returned as a probe envelope so the caller can
-#: negotiate how much to retrieve, instead of a context-blowing full payload.
+#: (``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD``).  A response from a tool **whose
+#: published schema discloses the continuation call** is returned as a probe
+#: envelope once its serialized JSON exceeds this many bytes, so the caller can
+#: negotiate how much to retrieve instead of taking a context-blowing full
+#: payload.
+#:
+#: Size alone is not sufficient: the gate is ``schema_discloses_continuation()``
+#: on the outer entry, so the backstop covers ``@mcp_heavy`` and both
+#: dispatchers.  An over-threshold response from a tool that does not disclose
+#: is returned WHOLE and mints nothing (CR-2) — the threshold is a ceiling on
+#: what may probe, never on what may be returned.
 #:
 #: This ships non-``None`` (the historical default was ``None`` = dormant) so
-#: high-cardinality list actions probe-first on every host without the operator
-#: having to discover the knob.  ~25 KB is on the order of ~6k cl100k_base tokens:
-#: above a normal small filtered read, well below a large list page (a 114-row
-#: device list serialized to ~145 KB on the Nautobot test box and probes cleanly
-#: at this value).  Operators raise it to probe less often, or set
+#: high-cardinality list actions on those shapes probe-first on every host
+#: without the operator having to discover the knob.  ~25 KB is on the order of
+#: ~6k cl100k_base tokens: above a normal small filtered read, well below a
+#: large list page (a 114-row device list serialized to ~145 KB on the Nautobot
+#: test box and probes cleanly at this value).  Operators raise it to probe less
+#: often, or set
 #: ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = None`` to disable the backstop.
 _DEFAULT_AUTO_NEGOTIATE_THRESHOLD: int = 25_000
 
@@ -697,6 +706,19 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
         # therefore wrong for the flat shape, which has none of them.  `params`
         # is the only key the shapes that have one share, and the only place
         # the fields must never go, so naming just it is true everywhere.
+        #
+        # CR-15: the companion fields are described here rather than in the
+        # schema.  They are meaningful ONLY on a continuation call, which
+        # requires a token, which only ever arrives in this envelope — so the
+        # agent always reads this before it could use them.  Describing them in
+        # the schema instead cost every caller on every call, forever, to say
+        # something only a token-holder can act on.  `available_modes` above
+        # advertises `filtered`; without the `filter_keys` clause that mode is
+        # visible and unusable, which is the T6 failure one level down.
+        #
+        # The two `mode` sentences below are pinned byte-for-byte by
+        # `test_bare_token_clause_is_unchanged` (B2).  Append beside them;
+        # rewording them is a ruling, not an edit.
         "usage": (
             "Re-invoke this same tool with 'continuation_token' at the TOP LEVEL"
             " of arguments, not inside 'params'. 'mode' is optional and goes"
@@ -704,6 +726,9 @@ def _build_probe_envelope(result: Any, token: str) -> dict[str, Any]:
             f" Omitting 'mode' returns ONE PAGE of the {len(serialized.encode())}-byte"
             " result if it is a list, or the whole object if it is not;"
             " pass mode='full' explicitly for the complete dataset."
+            " For 'paginated', 'page' is 1-based and 'page_size' defaults to"
+            " FRISIAN_MCP_HEAVY_PAGE_SIZE. For 'filtered', supply 'filter_keys':"
+            " the top-level keys of the result to keep. These sit beside 'mode'."
         ),
     }
 
@@ -2197,9 +2222,38 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         _lean = _extract_lean_envelope(result, _w_token, _http_status, tool_name=tool_name)
         if "continuation_token" in _lean:
             _hc = _heavy_cache()
-            if _hc is None:
-                # No continuation store: return the write result whole rather
-                # than a lean envelope advertising a token nothing can redeem.
+            # Two ways the token cannot be redeemed, one outcome: return the
+            # write result whole rather than a lean envelope advertising a
+            # token nothing can redeem.
+            #
+            #   _hc is None                 no continuation store to redeem from
+            #   schema does not disclose    the caller cannot legally send it back
+            #
+            # CR-9: the second is the same condition as the first and was
+            # missing.  This path minted on ``is_write`` alone, and ``is_write``
+            # is set only by auto-discovery, so the affected population is
+            # auto-discovered ``*_create``/``*_update``/``*_partial_update`` —
+            # the production-dominant write path.
+            #
+            # It is worse here than the read-side defect the mint gate was
+            # written for.  There an undisclosed token was merely redundant: the
+            # payload came back anyway.  Here ``_extract_lean_envelope`` returns
+            # id + status_code + data_size + token and NOTHING else, so the
+            # written object is reachable ONLY by redeeming.  A schema-validating
+            # client cannot send an undeclared field, so it does not lose a
+            # negotiation nicety — it loses the write result, and pays for a
+            # pinned entry in the shared default cache to do it.
+            #
+            # The outer entry's schema is authoritative, matching the size
+            # backstop: it is the schema this caller validated against.
+            #
+            # This costs tokens — affected writes now return the full result
+            # instead of a lean envelope.  That is the correct trade.  The lean
+            # envelope's "saving" was achieved by making the data unreachable,
+            # and a larger response beats a lost one.
+            if _hc is None or not schema_discloses_continuation(
+                getattr(_write_entry, "input_schema", None)
+            ):
                 return _usage_success(
                     request, request_id, result, tool_name=tool_name, usage_args=_usage_args
                 )
@@ -2313,10 +2367,13 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             request, request_id, probe, tool_name=tool_name, usage_args=_usage_args
         )
 
-    # Threshold backstop (secondary, v2): auto-negotiate any tool response that exceeds
-    # FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD bytes.  Prefer @mcp_heavy for explicit control.
-    # Defaults to _DEFAULT_AUTO_NEGOTIATE_THRESHOLD (on) so high-cardinality lists probe
-    # first without per-host config; an explicit None in settings disables the backstop.
+    # Threshold backstop (secondary, v2): auto-negotiate an over-threshold response from
+    # any tool whose published schema DISCLOSES the continuation call — @mcp_heavy and the
+    # dispatchers.  A non-disclosing tool is returned whole no matter its size (CR-2); see
+    # the disclosure gate below.  Prefer @mcp_heavy for explicit control.
+    # Defaults to _DEFAULT_AUTO_NEGOTIATE_THRESHOLD (on) so high-cardinality lists on those
+    # shapes probe first without per-host config; an explicit None in settings disables the
+    # backstop entirely.
     _threshold: int | None = getattr(
         settings, "FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD", _DEFAULT_AUTO_NEGOTIATE_THRESHOLD
     )

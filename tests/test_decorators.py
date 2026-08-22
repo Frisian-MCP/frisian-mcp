@@ -12,7 +12,7 @@ from django.test import RequestFactory
 from rest_framework.permissions import IsAuthenticated
 
 from frisian_mcp.decorators import mcp_ignore, mcp_tool
-from frisian_mcp.negotiation import schema_discloses_continuation
+from frisian_mcp.negotiation import merge_continuation_branch, schema_discloses_continuation
 from frisian_mcp.registry import ToolInputError, ToolRegistry, tool_registry
 
 # ---------------------------------------------------------------------------
@@ -37,11 +37,12 @@ class TestMcpTool:
         @mcp_tool registers the decorated function in the global tool_registry.
 
         H2 changed the ``input_schema`` argument: it is no longer passed
-        verbatim.  Any tool reachable by the size backstop must publish the
-        continuation call, because the backstop now mints only where the
-        published schema discloses it.  The schema is therefore checked by
-        shape rather than by identity — the caller's own declarations must
-        survive untouched, and only the disclosure is added.
+        verbatim.  CR-2 narrowed H2's universal disclosure: the backstop still
+        mints only where the published schema discloses, but ``@mcp_tool`` no
+        longer discloses, so nothing is added here at all.  The schema is
+        therefore checked by IDENTITY rather than by shape — the package
+        contributes nothing to an ordinary host schema, and that is exactly
+        what "back to pre-H2" means.
         """
         schema: dict[str, Any] = {"type": "object", "properties": {"q": {"type": "string"}}}
 
@@ -60,13 +61,19 @@ class TestMcpTool:
             assert kwargs["permission_tier"] == "read"
 
             registered = kwargs["input_schema"]
-            # The author's own field is preserved verbatim...
+            # CR-2: the schema is published EXACTLY as handed in — not merely
+            # "the author's declarations survive alongside ours".  Identity is
+            # the assertion, because the package's contribution to an ordinary
+            # host schema is now zero and that is a stronger, drift-proof claim
+            # than checking for the absence of particular keys.
+            assert registered == schema
             assert registered["properties"]["q"] == {"type": "string"}
-            # ...and the continuation call is now reachable.
-            assert "continuation_token" in registered["properties"]
-            # The first call is unchanged: the four colliding fields are
-            # declared only in the continuation branch, never at the top level.
+            # No disclosure on this path: not the protocol key at the top
+            # level, not the four colliding fields, not the conditional branch
+            # that used to carry them.
+            assert "continuation_token" not in registered["properties"]
             assert "mode" not in registered["properties"]
+            assert "allOf" not in registered
 
     def test_does_not_mutate_the_callers_schema(self) -> None:
         """
@@ -213,6 +220,20 @@ class TestClosedSchemaKeepsItsStrictness:
     The safe fallback is free because negotiation eligibility is *derived from
     the published schema*: a tool that does not disclose does not mint, so the
     caller is never handed a token their own schema forbids them to return.
+
+    CR-2 GENERALISED THIS, which changes what these tests are worth.
+    ``@mcp_tool`` no longer merges at all, so every schema it publishes is
+    closed-or-open exactly as the host wrote it, and the registration-level
+    assertions below now hold for a broader reason than H18.  That makes them
+    weaker as H18 evidence, not stronger: they would pass even if
+    ``merge_continuation_branch`` went back to deleting the restriction,
+    because nothing routes through it from here any more.
+
+    So H18 is pinned directly on the helper as well
+    (``test_helper_still_refuses_to_open_a_closed_schema``).  Without that, CR-2
+    would silently retire the only guard on the behaviour, and the next caller
+    to reach for ``merge_continuation_branch`` would inherit the original
+    defect with a green suite.
     """
 
     CLOSED: dict[str, Any] = {
@@ -267,8 +288,49 @@ class TestClosedSchemaKeepsItsStrictness:
         assert entry is not None
         assert schema_discloses_continuation(entry.input_schema) is False
 
-    def test_open_schema_is_unaffected(self) -> None:
-        """The common case still discloses — the fallback must not swallow it."""
+    def test_open_schema_also_does_not_disclose(self) -> None:
+        """
+        CR-2 inverted this: the open case does not disclose either.
+
+        It used to assert the opposite — that an open schema still disclosed,
+        so H18's refusal could not be over-reaching into the common case.  That
+        guard is obsolete rather than violated: ``@mcp_tool`` declines for every
+        schema now, open or closed, so there is no narrow fallback left for a
+        broad one to swallow.
+
+        Keeping the assertion inverted rather than deleting the test preserves
+        the record that this distinction once existed on this path, and fails
+        loudly if universal disclosure is ever reintroduced here.
+        """
         entry = self._register({"type": "object", "properties": {}}).get_entry("item_search")
         assert entry is not None
-        assert schema_discloses_continuation(entry.input_schema) is True
+        assert schema_discloses_continuation(entry.input_schema) is False
+
+    def test_helper_still_refuses_to_open_a_closed_schema(self) -> None:
+        """
+        H18 asserted where it now actually lives: on the helper itself.
+
+        Every other test in this class reaches the behaviour through
+        ``@mcp_tool``, which post-CR-2 does not call ``merge_continuation_branch``
+        — so they no longer exercise H18 at all and would stay green if it
+        regressed.  The helper is still exported, still called from the tests
+        that cover the branch shape, and is the obvious thing a future
+        contributor reaches for when adding negotiation to a new path.  It keeps
+        its own guard.
+        """
+        closed = deepcopy(self.CLOSED)
+        merged = merge_continuation_branch(closed)
+
+        # Returned unchanged: the restriction survives and nothing is disclosed.
+        assert merged == self.CLOSED
+        assert merged["additionalProperties"] is False
+        assert schema_discloses_continuation(merged) is False
+        # ...and the caller's dict was not mutated on the way through.
+        assert closed == self.CLOSED
+
+        # The contrast that makes it a refusal rather than a no-op helper: an
+        # open schema of the same shape does still get the branch.
+        opened = merge_continuation_branch(
+            {"type": "object", "properties": {"q": {"type": "string"}}}
+        )
+        assert schema_discloses_continuation(opened) is True

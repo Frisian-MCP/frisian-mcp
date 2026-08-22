@@ -122,13 +122,22 @@ def build_group_input_schema() -> dict[str, Any]:
                 "type": "object",
                 "additionalProperties": True,
                 "description": (
+                    # The 'continuation_token' placement rule is NOT repeated
+                    # here: _NEGOTIATION_PROPERTIES already publishes "Place at
+                    # the TOP LEVEL of arguments — NOT inside 'params'." into
+                    # this same schema via the flat merge, so the reader was
+                    # being told twice (CR-7).
+                    #
+                    # What follows is NOT redundant and must stay: nothing else
+                    # in the schema says these four keys are top-level *only*
+                    # on a continuation call.  The negotiation field
+                    # descriptions are deliberately shape-neutral and cannot
+                    # carry it, and all four collide with real host data.
                     "Parameters forwarded to the underlying tool."
-                    " 'continuation_token' is never an action parameter — it is"
-                    " always a top-level sibling of 'resource', 'action' and"
-                    " 'params'. 'mode', 'page', 'page_size' and 'filter_keys'"
-                    " are top-level ONLY on a continuation call (i.e. alongside"
-                    " a 'continuation_token'); otherwise they are ordinary"
-                    " action parameters and belong here."
+                    " 'mode', 'page', 'page_size' and 'filter_keys' are"
+                    " top-level ONLY on a continuation call (i.e. alongside a"
+                    " 'continuation_token'); otherwise they are ordinary action"
+                    " parameters and belong here."
                 ),
             },
             "lite": {

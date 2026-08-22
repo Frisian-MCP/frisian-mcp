@@ -7,7 +7,7 @@ from typing import Any, TypeVar
 
 from rest_framework.permissions import BasePermission
 
-from frisian_mcp.negotiation import _merge_negotiation_schema, merge_continuation_branch
+from frisian_mcp.negotiation import _merge_negotiation_schema
 from frisian_mcp.registry import tool_registry
 from frisian_mcp.resources import ResourceDefinition, resource_registry
 
@@ -81,11 +81,35 @@ def mcp_tool(
             description=description,
             capability=capability,
             universal_discovery=universal_discovery,
-            # H2: any tool that can reach the size backstop must publish the
-            # continuation call, because the backstop mints against exactly this
-            # schema.  The conditional branch leaves the first call untouched,
-            # so a hand-authored signature keeps meaning what it meant.
-            input_schema=merge_continuation_branch(input_schema),
+            # H2 (narrowed, CR-2): the caller's schema is published EXACTLY as
+            # handed to us.  ``@mcp_tool`` deliberately does not disclose the
+            # continuation call.
+            #
+            # H2 originally disclosed here, reasoning that anything reachable by
+            # the size backstop must publish the shape the backstop mints
+            # against.  The premise was right; the direction was wrong.  The
+            # invariant to preserve is "never mint a token the caller cannot
+            # legally return", and it is enforced on the *mint* side:
+            # ``schema_discloses_continuation()`` gates the backstop in
+            # ``views.py`` against this same object, so a schema that stays
+            # silent never mints.  Disclosing universally bought that invariant
+            # by inflating every ordinary tool's published schema by ~380 tokens
+            # (measured, CR-1) — an additive cost, paid on every ``tools/list``,
+            # by hosts that never asked for negotiation.
+            #
+            # This is not a new fallback.  ``merge_continuation_branch`` already
+            # refused to disclose for any schema declaring
+            # ``"additionalProperties": false`` (H18), and already documented
+            # the consequence: an over-threshold response "is returned whole".
+            # CR-2 widens that existing, documented path from closed schemas to
+            # every ordinary ``@mcp_tool`` registration.  Whole is literally
+            # whole — the full payload, with nothing pinned in the heavy cache.
+            #
+            # A host that wants negotiation on a hand-registered tool has an
+            # explicit way to ask for it: ``@mcp_heavy``, which still discloses
+            # via ``_merge_negotiation_schema`` below and is the purpose of this
+            # PR.  Negotiation is opt-in for ordinary tools, not imposed on them.
+            input_schema=input_schema,
             permission_classes=permission_classes,
             permission_tier="admin" if admin else "read_write" if write else "read",
         )
@@ -306,14 +330,24 @@ def mcp_heavy(
     ``inputSchema`` so that ``tools/list`` exposes the protocol to clients.
 
     **Secondary backstop (v2):** ``FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD`` — a byte-count
-    integer; any successful **non-write** response above that size is automatically wrapped
-    in a probe envelope, even on tools not decorated with ``@mcp_heavy``.  (Writes return
-    their lean confirmation envelope *before* this backstop is reached, and ``@mcp_heavy``
-    tools use their own probe path — so the backstop covers reads, list and detail, plus
-    custom tool output.)  It defaults to ``25000`` bytes (~25 KB) so high-cardinality reads
-    probe-first out of the box; set it to ``None`` in Django settings to disable the
-    backstop, or to a larger value to probe less often.  This setting is secondary; prefer
-    ``@mcp_heavy`` for explicit heavy tools.
+    integer; a successful **non-write** response above that size is automatically wrapped
+    in a probe envelope **when the tool's published schema discloses the continuation
+    call**.  Since CR-2 that means ``@mcp_heavy`` and the dispatchers; it is deliberately
+    not universal.
+
+    The gate is disclosure, not decoration — a group or class dispatcher carries no
+    ``@mcp_heavy`` decorator and still probes, because its published schema declares the
+    protocol.  Conversely an ordinary ``@mcp_tool`` registration or a plain auto-discovered
+    action publishes the host schema unchanged, so however large its response, it is
+    **returned whole** and mints nothing.  A host wanting probe-first behaviour on such a
+    tool asks for it by decorating with ``@mcp_heavy`` or mounting behind a dispatcher.
+
+    (Writes return their lean confirmation envelope *before* this backstop is reached, and
+    ``@mcp_heavy`` tools use their own probe path — so the backstop covers disclosing
+    reads, list and detail, plus custom tool output.)  It defaults to ``25000`` bytes
+    (~25 KB) so high-cardinality reads on those shapes probe-first out of the box; set it
+    to ``None`` in Django settings to disable the backstop, or to a larger value to probe
+    less often.  This setting is secondary; prefer ``@mcp_heavy`` for explicit heavy tools.
 
     Args:
         name: Unique MCP tool name (e.g. ``"enterprise.list_all_tools"``).

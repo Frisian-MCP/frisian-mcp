@@ -1,5 +1,5 @@
 """
-Heavy-response negotiation asserted across every consumer shape (T4).
+Heavy-response negotiation asserted across every consumer shape (T4, narrowed by CR-2).
 
 Why this file exists as a *matrix* rather than more tests in the existing files:
 the group-dispatcher disclosure gap shipped green because every negotiation
@@ -10,36 +10,76 @@ with no disclosure at all and nothing turned red.
 
 The defence is structural, not additive: **shape is a parameter here, never a
 copy.**  A new consumer is one entry in :data:`_SHAPES` away from being held to
-the same contract, and a consumer that cannot satisfy the contract fails at
-collection rather than being quietly omitted.
+a contract, and a consumer that cannot satisfy one fails at collection rather
+than being quietly omitted.
 
-``negotiation.py`` has **five** consumers, and the matrix covers all five:
+**There are two contracts, and every shape owes exactly one of them.**  That is
+the part CR-2 changed, and the reason the matrix is no longer a list of five
+things that all do the same thing:
 
-==================  ==============================  ============================
-Shape               Merged by                       Top-level arguments
-==================  ==============================  ============================
-flat ``@mcp_heavy`` ``_merge_negotiation_schema``   the tool's own fields
-plain ``@mcp_tool`` ``merge_continuation_branch``   the tool's own fields
-auto-discovered     ``merge_continuation_branch``   the action's own fields
-class dispatcher    ``_merge_negotiation_schema``   ``action`` + ``params``
-group dispatcher    ``_merge_negotiation_schema``   ``resource``/``action``/``params``
-==================  ==============================  ============================
+===================  =========================  ==============================
+Shape                Contract                   Top-level arguments
+===================  =========================  ==============================
+flat ``@mcp_heavy``  DISCLOSE (flat merge)      the tool's own fields
+class dispatcher     DISCLOSE (flat merge)      ``action`` + ``params``
+group dispatcher     DISCLOSE (flat merge)      ``resource``/``action``/``params``
+plain ``@mcp_tool``  **PUBLISH UNCHANGED**      the tool's own fields
+auto-discovered      **PUBLISH UNCHANGED**      the action's own fields
+===================  =========================  ==============================
 
-**Two disclosure styles, both correct.**  The flat merge declares all five
-negotiation fields in ``properties``.  The conditional branch declares only
-``continuation_token`` there and the other four behind ``allOf`` → ``if``/
-``then``, because ``mode``, ``page``, ``page_size`` and ``filter_keys`` collide
-with real host field names and must not be injected into every tool's
-signature.  The disclosure assertions therefore test **reachability** rather
-than placement — see :func:`_reachable_negotiation_fields`.
+The three disclosing shapes are merged by ``_merge_negotiation_schema`` and are
+driven by the :func:`shape` fixture through the positive assertions.  The two
+non-disclosing shapes are driven by :func:`non_disclosing_shape` and asserted as
+**negative** cases in :class:`TestOrdinaryShapesDoNotDisclose`.
+:data:`_DISCLOSING_SHAPE_IDS` and :data:`_NON_DISCLOSING_SHAPE_IDS` partition
+:data:`_SHAPE_IDS` exactly, and
+:meth:`TestDisclosure.test_every_shape_is_classified` fails if a shape is added
+without being ruled into one of them.
 
-The last two rows are the ones this matrix originally missed.  H2 gave
-``@mcp_tool`` and auto-discovered ViewSet actions a disclosure they did not
-have, and neither became a parameter here; the meta-test meant to catch that
-counted entries in :data:`_SHAPES` rather than call sites in the package, so
-nothing drifted when the change landed in ``decorators.py``.  See
-:meth:`TestDisclosure.test_disclosure_survives_a_new_shape`, which now counts
-from the source.
+**Why the split, and what was tried first.**  Universal disclosure was not an
+oversight — it shipped, deliberately, and was then narrowed.  H2 closed a real
+defect: the size backstop minted continuation tokens for schemas that never
+published the continuation call, so a schema-validating client was handed a
+token it had no legal slot to return.  H2's remedy was to make **every** schema
+disclose, including ordinary ``@mcp_tool`` registrations and auto-discovered
+ViewSet actions.  It worked, and it cost roughly **380 tokens on every ordinary
+published schema** (measured, CR-1) — paid on every ``tools/list``, by hosts
+that never asked for negotiation.
+
+CR-2 closed the same defect from the side the code already enforced it on.
+``schema_discloses_continuation()`` gates the mint against the published schema,
+so a shape that stays silent never mints; disclosure was the expensive half of a
+belt-and-braces pair and the redundant one.  The consequence for a
+non-disclosing shape — an over-threshold response "is returned whole" — is the
+pre-existing H18 path, previously reached only by closed schemas.
+
+Both halves of the negative contract are asserted, because either alone lets the
+regression back: the ordinary shapes **publish nothing**, and the backstop
+**mints nothing** for them.  A schema-only assertion would pass a build that
+quietly kept minting against an undisclosed schema, which is the original defect.
+
+**One disclosure style now ships.**  The flat merge declares all five negotiation
+fields in ``properties``.  A second style existed — ``merge_continuation_branch``,
+which declared only ``continuation_token`` there and the other four behind
+``allOf`` → ``if``/``then``, because ``mode``, ``page``, ``page_size`` and
+``filter_keys`` collide with real host field names and must not be injected into
+every tool's signature.  That helper now has **zero call sites in ``src/``**; it
+is retained for the H18 closed-schema guard and for regression coverage here,
+not applied by any registration path.  The disclosure assertions still test
+**reachability** rather than placement (see
+:func:`_reachable_negotiation_fields`), which costs nothing and keeps the
+contract honest if a second style ever returns.
+
+**The guard is the point of the meta-tests.**  ``_CONSUMER_TO_SHAPES`` answers
+"is every disclosure claimed by a shape?" — a question a re-introduction can
+*pass*, by landing in a module already mapped for the other helper.
+``decorators.py`` is in exactly that position: it legitimately hosts the flat
+merge for ``@mcp_heavy`` while ``merge_continuation_branch`` must stay gone.  So
+call sites are counted **per helper**, by an :mod:`ast` walk over real ``Call``
+nodes rather than a text scan — prose naming a helper is not a call site, and an
+aliased import is — and :data:`_FORBIDDEN_HELPERS` pins the forbidden one at
+zero across the whole package.  See
+:meth:`TestDisclosure.test_forbidden_helpers_have_no_call_sites`.
 
 Cited by quoted phrase rather than line number throughout: the numbers this
 docstring previously carried had all moved by the time anyone read them.
@@ -51,6 +91,7 @@ no host-application schema as identifiers or data.
 # pylint: disable=redefined-outer-name,protected-access
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -65,7 +106,12 @@ from django.test import RequestFactory, override_settings
 import frisian_mcp
 from frisian_mcp.backends.group_dispatcher import build_group_input_schema, make_group_invoke
 from frisian_mcp.decorators import mcp_action, mcp_dispatcher, mcp_heavy, mcp_tool
-from frisian_mcp.negotiation import _NEGOTIATION_PROPERTIES, merge_continuation_branch
+from frisian_mcp.negotiation import (
+    _NEGOTIATION_PROPERTIES,
+    NEGOTIATION_PROTOCOL_ONLY_KEY,
+    merge_continuation_branch,
+    schema_discloses_continuation,
+)
 from frisian_mcp.registry import ToolInputError, ToolRegistry
 from frisian_mcp.views import McpView, _heavy_owner_key
 
@@ -323,20 +369,70 @@ _SHAPES: dict[str, _Shape] = {
 
 _SHAPE_IDS = tuple(_SHAPES)
 
-#: Where each disclosing consumer in ``src/`` lives, mapped to the shape that
-#: holds it to the contract.  Keys are module paths relative to the package
+#: The shapes that MUST publish the negotiation protocol.  These are the tools
+#: whose argument shape is *ours* -- ``@mcp_heavy`` opts in explicitly, and both
+#: dispatchers own their ``action``/``params`` envelope outright -- so declaring
+#: five extra fields on them cannot collide with a host signature.  They mint,
+#: so they must disclose.
+_DISCLOSING_SHAPE_IDS: tuple[str, ...] = (
+    "flat_heavy",
+    "class_dispatcher",
+    "group_dispatcher",
+)
+
+#: The shapes that MUST NOT publish it (CR-2).  An ordinary ``@mcp_tool`` and an
+#: auto-discovered ViewSet action carry the **host's** schema, and H2 made both
+#: disclose universally -- ~380 tokens added to every published schema, measured
+#: in CR-1, paid by hosts that never asked for negotiation.
+#:
+#: Removing disclosure does not re-open what H2 closed.  The invariant is "never
+#: mint a token the caller cannot legally return", and it is enforced on the
+#: MINT side: ``schema_discloses_continuation()`` gates the backstop against
+#: this same published schema, so a shape that stays silent never mints.  The
+#: consequence -- an over-threshold response "is returned whole" -- is the
+#: pre-existing H18 path, previously reached only by closed schemas.
+#:
+#: Both halves are asserted below, because either alone permits the regression
+#: back: :class:`TestOrdinaryShapesDoNotDisclose` pins the schema, and the
+#: behavioural tests pin that nothing is minted and nothing is cached.
+_NON_DISCLOSING_SHAPE_IDS: tuple[str, ...] = (
+    "plain_tool",
+    "auto_discovered",
+)
+
+#: Where each **disclosing** consumer in ``src/`` lives, mapped to the shape
+#: that holds it to the contract.  Keys are module paths relative to the package
 #: root; :func:`_discover_disclosing_call_sites` recomputes the left-hand side
 #: from the source so this mapping cannot silently fall behind.
 _CONSUMER_TO_SHAPES: dict[str, tuple[str, ...]] = {
-    # ``decorators.py`` hosts TWO consumers — ``@mcp_heavy`` (flat merge) and
-    # ``@mcp_tool`` (conditional branch).  The multiplicity lives in the mapping
-    # rather than in a separate constant precisely because module granularity
-    # alone cannot see one of them disappear: the module still has a call site,
-    # so a key-set comparison stays green.  The count is the guard.
-    "decorators.py": ("flat_heavy", "plain_tool"),
+    # ``decorators.py`` now hosts exactly ONE consumer: ``@mcp_heavy``'s flat
+    # merge.  It hosted two until CR-2 removed the ``@mcp_tool`` conditional
+    # branch.  The multiplicity still lives in the mapping rather than in a
+    # separate constant, because module granularity alone cannot see one of two
+    # consumers in a module disappear -- the module still has a call site, so a
+    # key-set comparison stays green.  The count is the guard.
+    "decorators.py": ("flat_heavy",),
     "backends/dispatcher.py": ("class_dispatcher",),
     "backends/group_dispatcher.py": ("group_dispatcher",),
-    "backends/discovery.py": ("auto_discovered",),
+}
+
+#: Helpers that must have **zero** call sites anywhere in ``src/``, mapped to
+#: why.  This is the other half of the guard, and the half that did not exist
+#: before CR-2: ``_CONSUMER_TO_SHAPES`` can only answer "is every disclosure
+#: claimed?", never "did disclosure come back somewhere we ruled it out?".
+#:
+#: A key-set comparison cannot answer the second question either, because a
+#: re-introduction on an ordinary path lands in a module that already appears
+#: in the mapping for a DIFFERENT helper -- exactly the case ``decorators.py``
+#: is in today, hosting the flat merge while the conditional branch must stay
+#: gone.  So the count is tracked PER HELPER, not per module.
+_FORBIDDEN_HELPERS: dict[str, str] = {
+    "merge_continuation_branch": (
+        "ordinary @mcp_tool and auto-discovered actions must publish the host's"
+        " schema unchanged (CR-2); negotiation is opt-in via @mcp_heavy or a"
+        " dispatcher, and the mint gate -- not disclosure -- is what keeps the"
+        " backstop from issuing an unreturnable token"
+    ),
 }
 
 #: The two helpers that publish the negotiation protocol.  A consumer is any
@@ -344,37 +440,92 @@ _CONSUMER_TO_SHAPES: dict[str, tuple[str, ...]] = {
 _MERGE_HELPERS = ("_merge_negotiation_schema", "merge_continuation_branch")
 
 
-def _discover_disclosing_call_sites() -> dict[str, int]:
+def _call_sites_by_helper(source: str) -> dict[str, int]:
     """
-    Return ``{module path relative to src/frisian_mcp: call-site count}``.
+    Return ``{helper: number of real call sites}`` for one module's *source*.
+
+    Parsed with :mod:`ast` rather than scanned line-by-line.  The previous
+    version counted the literal text ``helper(`` on any line not starting with
+    ``from``/``import``, which cannot tell a call from prose -- and CR-2's own
+    removal comments now name ``merge_continuation_branch`` in running text at
+    both former call sites.  A guard that reds the suite because someone
+    documented the removal is a guard people switch off.
+
+    Import aliases are resolved, so renaming on import cannot hide a call
+    either: ``from ... import merge_continuation_branch as _mcb`` followed by
+    ``_mcb(schema)`` is counted against ``merge_continuation_branch``.
+    """
+    tree = ast.parse(source)
+
+    # local name -> canonical helper name
+    aliases: dict[str, str] = {h: h for h in _MERGE_HELPERS}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name in _MERGE_HELPERS:
+                    aliases[alias.asname or alias.name] = alias.name
+
+    counts = dict.fromkeys(_MERGE_HELPERS, 0)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name):
+            local = func.id
+        elif isinstance(func, ast.Attribute):
+            local = func.attr
+        else:
+            continue
+        canonical = aliases.get(local)
+        if canonical is not None:
+            counts[canonical] += 1
+    return counts
+
+
+def _discover_disclosing_call_sites() -> dict[str, dict[str, int]]:
+    """
+    Return ``{module path relative to src/frisian_mcp: {helper: call count}}``.
 
     Scans the shipped source rather than trusting a hand-maintained list, so
     that "a consumer was added" is answered by the package itself.  The
     defining module is excluded: it declares the helpers, it does not consume
     them.
+
+    Counted **per helper**.  The previous version summed both helpers into a
+    single per-module integer, which cannot distinguish "``decorators.py`` has
+    one call site" (correct: ``@mcp_heavy``'s flat merge) from "``decorators.py``
+    has one call site" (regression: the conditional branch came back and the
+    flat merge moved).  Only modules with at least one call site appear.
     """
     package_root = Path(frisian_mcp.__file__).parent
-    found: dict[str, int] = {}
+    found: dict[str, dict[str, int]] = {}
     for path in sorted(package_root.rglob("*.py")):
         if path.name == "negotiation.py":
             continue
-        # Import lines name the helpers without calling them, so they are
-        # skipped outright rather than discounted — a discount miscounts any
-        # module whose import happens not to look like a call.
-        hits = sum(
-            line.count(f"{helper}(")
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if not line.lstrip().startswith(("from ", "import "))
-            for helper in _MERGE_HELPERS
-        )
-        if hits > 0:
-            found[path.relative_to(package_root).as_posix()] = hits
+        counts = _call_sites_by_helper(path.read_text(encoding="utf-8"))
+        if any(counts.values()):
+            found[path.relative_to(package_root).as_posix()] = counts
     return found
 
 
-@pytest.fixture(params=_SHAPE_IDS)
+@pytest.fixture(params=_DISCLOSING_SHAPE_IDS)
 def shape(request: Any) -> _Shape:
-    """Parameterise over every negotiation consumer."""
+    """
+    Parameterise over every consumer that MUST disclose.
+
+    Deliberately not every shape in :data:`_SHAPES`.  Until CR-2 this fixture
+    covered all five, which made the token regression a *required* contract:
+    CI demanded that ordinary tools keep publishing the heavy protocol forever.
+    The two ordinary shapes are now driven by :func:`non_disclosing_shape` and
+    held to the opposite contract, so both directions are asserted rather than
+    one being dropped.
+    """
+    return _SHAPES[request.param]
+
+
+@pytest.fixture(params=_NON_DISCLOSING_SHAPE_IDS)
+def non_disclosing_shape(request: Any) -> _Shape:
+    """Parameterise over every consumer that MUST NOT disclose (CR-2)."""
     return _SHAPES[request.param]
 
 
@@ -495,6 +646,11 @@ class TestDisclosure:
         siblings is wrong for it.  ``params`` is the only key common to the
         shapes that have one and is the only place the token must never go, so
         the neutral phrasing is the only phrasing true everywhere.
+
+        CR-14 moved the *long* form of this guidance into the probe envelope and
+        left only the placement line in the schema, so A5 now binds both texts.
+        The envelope half is asserted in
+        :meth:`test_envelope_carries_the_guidance_moved_out_of_the_schema`.
         """
         reg = ToolRegistry()
         name = shape.build(reg)
@@ -504,29 +660,105 @@ class TestDisclosure:
         assert "'action'" not in text
         assert "'resource'" not in text
 
+    def test_schema_declares_but_does_not_instruct(self, shape: _Shape) -> None:
+        """
+        CR-14: the schema DECLARES the protocol; the probe envelope INSTRUCTS.
+
+        The negotiation descriptions used to restate, in every ``tools/list`` on
+        every call, what an agent needs only while holding a token — which it
+        receives *in the envelope*.  That duplicate cost ~254 cl100k tokens per
+        call on a group-dispatcher-mounted host.
+
+        This guards the direction the cost came back from.  The envelope half is
+        already covered, and covered more strongly (through a live request), by
+        :class:`TestProbeEnvelopeTeachingText` — so what was missing was not
+        another envelope assertion but a guard against the prose being re-added
+        here by someone who assumes it was dropped by accident.
+
+        Deliberately a *shape* assertion, not a token ceiling: it names the
+        thing that must not come back rather than a number to be re-tuned.
+        """
+        reg = ToolRegistry()
+        name = shape.build(reg)
+        props = reg.get_entry(name).input_schema["properties"]
+
+        # The four non-token fields carry no prose at all.  Their meaning is
+        # machine-readable (`enum`, `default`, `type`) or lives in the envelope.
+        for prop_name in ("mode", "page", "page_size", "filter_keys"):
+            assert "description" not in props[prop_name], (
+                f"'{prop_name}' has regained a description. The negotiation guidance"
+                " belongs in the probe envelope's 'usage' field, which is paid"
+                " on the calls that mint rather than on every call forever."
+                " See the comment above _NEGOTIATION_PROPERTIES."
+            )
+
+        # `continuation_token` keeps ONE short line, as insurance against the
+        # T6 failure: an agent that puts the token inside 'params'.
+        token_desc = props["continuation_token"]["description"]
+        assert "not inside 'params'" in token_desc
+        assert len(token_desc) < 120, (
+            f"'continuation_token' description has grown to {len(token_desc)}"
+            " chars. It is a placement pointer, not the instructions."
+        )
+
+    def test_every_shape_is_classified(self) -> None:
+        """
+        META: every shape in ``_SHAPES`` is ruled either disclosing or not.
+
+        The two lists partition ``_SHAPE_IDS`` exactly.  Adding a shape without
+        deciding which contract it owes turns this red, rather than letting it
+        drift into whichever fixture happens to pick it up.
+        """
+        disclosing = set(_DISCLOSING_SHAPE_IDS)
+        non_disclosing = set(_NON_DISCLOSING_SHAPE_IDS)
+
+        overlap = sorted(disclosing & non_disclosing)
+        assert not overlap, f"shape(s) {overlap} claim both contracts at once"
+
+        unclassified = sorted(set(_SHAPE_IDS) - disclosing - non_disclosing)
+        assert not unclassified, (
+            f"shape(s) {unclassified} are in _SHAPES but neither disclose nor"
+            " refuse to; add each to _DISCLOSING_SHAPE_IDS or"
+            " _NON_DISCLOSING_SHAPE_IDS"
+        )
+
+        unknown = sorted((disclosing | non_disclosing) - set(_SHAPE_IDS))
+        assert not unknown, f"classified shape ids {unknown} are not in _SHAPES"
+
     def test_disclosure_survives_a_new_shape(self) -> None:
         """
         META: every consumer in ``src/`` is covered, counted FROM ``src/``.
 
-        The previous version asserted ``len(_SHAPE_IDS) == 3`` and **did not
-        fire when H2 added a consumer**, because it counted entries in
-        ``_SHAPES`` while the change happened in ``decorators.py``.  Nothing
-        drifted: the thing that changed was not the thing being counted.  A
-        guard that can only detect the edit you remembered to make is not a
-        guard, and bumping the literal to ``4`` would have reproduced the blind
-        spot with a bigger number.
+        An earlier version asserted ``len(_SHAPE_IDS) == 3`` and **did not fire
+        when H2 added a consumer**, because it counted entries in ``_SHAPES``
+        while the change happened in ``decorators.py``.  Nothing drifted: the
+        thing that changed was not the thing being counted.  A guard that can
+        only detect the edit you remembered to make is not a guard, and bumping
+        the literal to ``4`` would have reproduced the blind spot with a bigger
+        number.
 
         So the source of truth is the source: every call site of either merge
         helper is discovered by scanning ``src/``, and each must be claimed by a
         shape here.  Adding a consumer anywhere now turns this red until it is
         either parameterised or explicitly recorded as covered.
+
+        CR-2 re-aimed this rather than relaxing it.  ``decorators.py`` legitimately
+        dropped from two consumers to one and ``backends/discovery.py`` to zero,
+        so the mapping shrank -- but the counting moved from a per-module total
+        to a per-helper breakdown, and :meth:`test_forbidden_helpers_have_no_call_sites`
+        was added.  Both are tightenings: the guard can now see a re-introduction
+        that lands in a module which still legitimately hosts the *other* helper,
+        which the per-module total could not.
         """
         found = _discover_disclosing_call_sites()
         unclaimed = sorted(set(found) - set(_CONSUMER_TO_SHAPES))
         assert not unclaimed, (
-            f"negotiation consumer(s) {unclaimed} exist in src/ but no shape covers them;"
-            " add one to _SHAPES and map it in _CONSUMER_TO_SHAPES rather than"
-            " exempting the new construction path"
+            f"negotiation consumer(s) {unclaimed} exist in src/ but no shape covers"
+            " them. If this is a genuinely NEW disclosing construction path, add a"
+            " shape to _SHAPES and map it in _CONSUMER_TO_SHAPES. If it is"
+            " merge_continuation_branch reappearing on an ordinary tool or"
+            " auto-discovered action, that is the CR-2 regression -- do NOT map it"
+            " back, remove the call site"
         )
 
         stale = sorted(set(_CONSUMER_TO_SHAPES) - set(found))
@@ -535,15 +767,16 @@ class TestDisclosure:
             " negotiation fields; drop the mapping or restore the disclosure"
         )
 
-        # The count is the part that actually guards.  The three set comparisons
-        # above all stayed GREEN when one of decorators.py's two consumers was
-        # removed: the module still had a call site, so no key changed.  The
-        # per-module count was already being computed by the discovery pass and
-        # then discarded — the evidence was in hand and thrown away.
+        # The count is the part that actually guards.  The set comparisons above
+        # all stayed GREEN when one of decorators.py's two consumers was removed:
+        # the module still had a call site, so no key changed.  Counted per
+        # helper (not as a per-module total) so that a swap -- the conditional
+        # branch returning while the flat merge moves elsewhere -- cannot net out
+        # to the same number and pass.
         miscounted = {
-            module: (found[module], len(shapes))
+            module: (sum(found[module].values()), len(shapes))
             for module, shapes in _CONSUMER_TO_SHAPES.items()
-            if found.get(module) != len(shapes)
+            if sum(found[module].values()) != len(shapes)
         }
         assert not miscounted, (
             f"call-site count disagrees with claimed shapes {miscounted} "
@@ -556,6 +789,38 @@ class TestDisclosure:
             {shape for shapes in _CONSUMER_TO_SHAPES.values() for shape in shapes} - set(_SHAPE_IDS)
         )
         assert not uncovered, f"mapped shape ids {uncovered} are not in _SHAPES"
+
+    def test_forbidden_helpers_have_no_call_sites(self) -> None:
+        """
+        META: a helper ruled out of the ordinary path has ZERO call sites in ``src/``.
+
+        This is the assertion that actually stands between us and silently
+        re-landing the token regression in six months, and it is the one the
+        pre-CR-2 guard could not make. ``_CONSUMER_TO_SHAPES`` answers "is every
+        disclosure claimed by a shape?" -- a question a re-introduction can pass,
+        by landing in a module already mapped for the *other* helper.
+        ``decorators.py`` is in exactly that position: it legitimately hosts
+        ``_merge_negotiation_schema`` for ``@mcp_heavy`` while
+        ``merge_continuation_branch`` must stay gone.
+
+        Deliberately counted across the whole package, not just the two modules
+        CR-2 edited: the point is that disclosure must not come back ANYWHERE on
+        an ordinary path, including a registration path nobody has written yet.
+        """
+        found = _discover_disclosing_call_sites()
+        offenders = {
+            f"{module}:{helper}": counts[helper]
+            for module, counts in found.items()
+            for helper in _FORBIDDEN_HELPERS
+            if counts.get(helper)
+        }
+        assert not offenders, (
+            f"{sorted(offenders)} re-introduces negotiation disclosure on a path"
+            " ruled non-disclosing.\n"
+            + "\n".join(f"  {helper}: {why}" for helper, why in _FORBIDDEN_HELPERS.items())
+            + "\nIf this is deliberate it is a contract change and needs a ruling,"
+            " not a green suite."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -844,12 +1109,23 @@ class TestRedemptionShortCircuits:
             name="item_list",
             fn=fn,
             description="Counting tool.",
-            # H2: registering straight through the registry bypasses the
-            # decorator's merge, so a bare schema here would be unfaithful to
-            # production — where every backstop-reachable tool arrives via
-            # @mcp_tool or auto-discovery and therefore discloses.  Without
-            # this the backstop correctly refuses to mint and the test fails
-            # for a reason that has nothing to do with re-dispatch.
+            # This test is about re-dispatch, so it needs a shape the backstop
+            # will actually mint for — and minting requires a schema that
+            # discloses.  Registering straight through the registry bypasses
+            # every merge, so the branch is applied here by hand.
+            #
+            # The rationale used to read "production, where every
+            # backstop-reachable tool arrives via @mcp_tool or auto-discovery
+            # and therefore discloses".  CR-2 made that false, and false in the
+            # sharpest direction: those two paths are now precisely the ones
+            # that do NOT disclose.  In production a disclosing shape is an
+            # @mcp_heavy tool or a dispatcher.
+            #
+            # Kept as a hand-applied merge rather than rebuilt on @mcp_heavy
+            # because this test asserts re-dispatch, not registration, and the
+            # bare-registry fixture keeps that isolated.  Without the merge the
+            # backstop correctly refuses to mint and the test would fail for a
+            # reason that has nothing to do with re-dispatch.
             input_schema=merge_continuation_branch({"type": "object", "properties": {}}),
             permission_tier="read",
         )
@@ -1331,39 +1607,222 @@ class TestProbeEnvelopeTeachingText:
         assert "'action'" not in usage
         assert "'params'" not in usage or "not inside 'params'" in usage
 
+    def test_companion_fields_are_described_here_not_in_the_schema(
+        self, rf: RequestFactory, shape: _Shape
+    ) -> None:
+        """
+        CR-15: ``filter_keys``, ``page`` and ``page_size`` are taught here.
+
+        CR-14 removed their schema descriptions.  This is where that guidance
+        went, and the move is not merely a cost saving: these three are
+        meaningful **only** on a continuation call, which requires a token,
+        which only ever arrives in this envelope.  The agent therefore always
+        reads this before it could use them — which the schema could never
+        guarantee.
+
+        ``filter_keys`` is the load-bearing one.  ``available_modes`` advertises
+        ``filtered``; with nothing saying that mode needs a companion field or
+        what it holds, the mode is visible and unusable — the T6 failure this
+        class exists for, one level down.
+
+        Parameterised by shape rather than copied: one builder serves all three,
+        so a clause that is true only for the dispatchers would be a silent lie
+        to the flat caller.
+        """
+        reg = ToolRegistry()
+        name = shape.build(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            usage = _result(_call(rf, name, shape.probe_args))["usage"]
+
+        # 'filtered' is advertised in available_modes -- it must not be a mode
+        # the caller can see and cannot use.
+        assert "filter_keys" in usage
+        assert "'filtered'" in usage
+
+        # 'page_size' default source, otherwise undiscoverable from the contract.
+        assert "FRISIAN_MCP_HEAVY_PAGE_SIZE" in usage
+
+        # 'page' is 1-based; `default: 1` in the schema only implies it.
+        assert "1-based" in usage
+
+        # A5 again: the new clauses must stay shape-neutral like the rest.
+        assert "'resource'" not in usage
+
 
 # ---------------------------------------------------------------------------
-# The backstop mints on shapes that disclose nothing
+# The ordinary shapes disclose nothing -- schema AND behaviour (CR-2)
 # ---------------------------------------------------------------------------
 
 
-class TestBackstopMintsOnUndisclosedShapes:
+class TestOrdinaryShapesDoNotDisclose:
     """
-    H2 CLOSED THE FOURTH SHAPE.  These now assert disclosure, as intended.
+    The negative contract, parameterised exactly like the positive one.
 
-    Previously ``@mcp_tool`` registered ``input_schema`` verbatim while the
+    ``plain_tool`` and ``auto_discovered`` were parameters of every *positive*
+    disclosure test until CR-2, which made the token regression a **required**
+    contract: CI demanded that ordinary tools keep publishing the heavy protocol
+    forever.  Deleting them from the matrix would have removed the demand and
+    left nothing in its place -- so they stay parameters, held to the opposite
+    contract.  Shape is still a parameter here, never a copy.
+
+    Both halves are asserted, because either alone lets the regression back:
+
+    * **Schema** -- nothing is published, checked through the mint gate's own
+      ``schema_discloses_continuation`` so the test cannot disagree with the
+      gate about what disclosure means.
+    * **Behaviour** -- an over-threshold response comes back WHOLE, mints no
+      token and pins nothing in the heavy cache.  A schema assertion alone would
+      pass a build that quietly kept minting against an undisclosed schema,
+      which is the original defect.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _threshold(self, low_threshold: None) -> None:
+        """Negotiate on a modest payload -- or rather, do not."""
+
+    def test_schema_does_not_disclose(self, non_disclosing_shape: _Shape) -> None:
+        """The mint gate's own predicate returns False for the published schema."""
+        reg = ToolRegistry()
+        name = non_disclosing_shape.build(reg)
+        schema = reg.get_entry(name).input_schema
+        assert schema_discloses_continuation(schema) is False
+
+    def test_no_negotiation_field_is_reachable(self, non_disclosing_shape: _Shape) -> None:
+        """
+        Not one of the five fields is reachable, by either disclosure style.
+
+        Uses the same reachability resolver the positive tests use, so "does not
+        disclose" is the exact complement of "discloses" rather than a narrower
+        claim about ``properties`` that an ``allOf`` branch could slip past.
+        """
+        reg = ToolRegistry()
+        name = non_disclosing_shape.build(reg)
+        schema = reg.get_entry(name).input_schema
+        assert _reachable_negotiation_fields(schema) == set()
+
+    def test_no_negotiation_allof_branch(self, non_disclosing_shape: _Shape) -> None:
+        """No conditional branch keyed on ``continuation_token`` survives."""
+        reg = ToolRegistry()
+        name = non_disclosing_shape.build(reg)
+        schema = reg.get_entry(name).input_schema
+        for branch in schema.get("allOf", []):
+            assert branch.get("if") != {"required": [NEGOTIATION_PROTOCOL_ONLY_KEY]}
+
+    def test_the_fixture_would_actually_change_if_merged(
+        self, non_disclosing_shape: _Shape
+    ) -> None:
+        """
+        GUARD: the negative assertions above are not passing for a trivial reason.
+
+        ``merge_continuation_branch`` returns a schema declaring
+        ``"additionalProperties": false`` unchanged (H18).  So a fixture that
+        happened to be closed would satisfy every assertion in this class **on
+        the pre-CR-2 tree as well** -- a green that proves nothing and would stay
+        green if CR-2 were reverted.
+
+        Asserting the merge WOULD change these schemas pins them open, so the
+        negative contract keeps costing something to satisfy.
+        """
+        reg = ToolRegistry()
+        name = non_disclosing_shape.build(reg)
+        schema = reg.get_entry(name).input_schema
+        assert schema.get("additionalProperties") is not False
+        assert merge_continuation_branch(json.loads(json.dumps(schema))) != schema
+
+    def test_over_threshold_response_returns_the_whole_payload(
+        self, rf: RequestFactory, non_disclosing_shape: _Shape
+    ) -> None:
+        """
+        The documented consequence: the response "is returned whole".
+
+        Whole is the point, and the part worth failing over.  Silently
+        truncating an over-threshold response would be a worse outcome than the
+        schema bloat CR-2 removed, so this asserts the full payload rather than
+        merely the absence of an envelope.
+        """
+        reg = ToolRegistry()
+        name = non_disclosing_shape.build(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            result = _result(_call(rf, name, non_disclosing_shape.probe_args))
+
+        assert result == _PAYLOAD
+
+    def test_over_threshold_response_mints_and_pins_nothing(
+        self, rf: RequestFactory, non_disclosing_shape: _Shape
+    ) -> None:
+        """
+        No token issued, and nothing written to the heavy cache.
+
+        Read off ``django_cache.set`` rather than off the response body: a token
+        minted and then dropped would still have pinned a shared-cache entry for
+        the TTL, which is the cost SEC-3 cares about.
+        """
+        reg = ToolRegistry()
+        name = non_disclosing_shape.build(reg)
+        with (
+            patch("frisian_mcp.views.tool_registry", reg),
+            patch("frisian_mcp.views.django_cache") as cache,
+        ):
+            cache.get.return_value = None
+            result = _result(_call(rf, name, non_disclosing_shape.probe_args))
+
+        assert not cache.set.called, "minted a token for a schema that cannot return it"
+        assert not isinstance(result, dict) or "continuation_token" not in result
+
+
+# ---------------------------------------------------------------------------
+# The backstop refuses to mint on shapes that disclose nothing
+# ---------------------------------------------------------------------------
+
+
+class TestBackstopDoesNotMintOnUndisclosedShapes:
+    """
+    NO DISCLOSURE, NO MINT -- asserted from both sides (CR-2).
+
+    History, because the name of this class has now meant three things.
+    Originally ``@mcp_tool`` registered ``input_schema`` verbatim while the
     backstop minted a continuation token for *any* over-threshold read, so a
     plain flat tool issued a token its own published schema gave the caller no
     legal slot to send back.  Redemption worked in-process (the token is read
     before schema validation), which is why the defect stayed invisible to the
     suite and only bit through a real client that validates against the schema.
 
-    The old tests asserted that as shipped behaviour and recorded that they
-    should be "rewritten to assert disclosure" once the merge covered the
-    backstop.  H2 did that, so this is that rewrite.
+    H2 closed that by making **every** schema disclose.  That worked, and cost
+    ~380 tokens on every ordinary published schema (CR-1) -- paid by every host,
+    including those that never wanted negotiation.
 
-    Both halves are now checked, because either alone permits the defect to
-    return: the tool **discloses** the continuation call, and the backstop only
-    mints where the published schema discloses it.  Disclosure and mint
-    eligibility derive from the one schema, so they cannot drift apart again.
+    CR-2 closes the same defect from the other side, which is where the code
+    already enforced it: ``schema_discloses_continuation()`` gates the mint
+    against the published schema, so a tool that does not disclose does not
+    mint.  Disclosure was the expensive half of a belt-and-braces pair, and the
+    redundant one.
+
+    Both halves are still checked, because either alone permits the defect to
+    return: the ordinary tool **does not disclose**, and the backstop **does not
+    mint** for it.  Disclosure and mint eligibility derive from the one schema
+    object, so they cannot drift apart.
     """
 
     @pytest.fixture(autouse=True)
     def _threshold(self, low_threshold: None) -> None:
         """Negotiate on a modest payload."""
 
-    def test_plain_tool_mints_a_token(self, rf: RequestFactory) -> None:
-        """An over-threshold plain tool receives a probe envelope."""
+    def test_plain_tool_does_not_mint_a_token(self, rf: RequestFactory) -> None:
+        """
+        An over-threshold plain tool gets its payload WHOLE, not a probe envelope.
+
+        The inverse of what this test asserted under H2.  ``mints nothing`` is
+        read off ``django_cache.set`` rather than inferred from the response, so
+        a token minted and then discarded would still fail.
+        """
         reg = ToolRegistry()
         with patch("frisian_mcp.decorators.tool_registry", reg):
 
@@ -1384,23 +1843,28 @@ class TestBackstopMintsOnUndisclosedShapes:
             cache.get.return_value = None
             result = _result(_call(rf, "item_list", {}))
 
-        assert "continuation_token" in result
+        assert not isinstance(result, dict) or "continuation_token" not in result
+        assert not cache.set.called, "minted a token for a schema that cannot return it"
+        # Whole means whole: the complete payload, not a truncated stand-in.
+        assert result == _PAYLOAD
 
-    def test_plain_tool_discloses_where_the_token_goes(self) -> None:
+    def test_plain_tool_publishes_no_redemption_surface(self) -> None:
         """
-        H2: the minting tool publishes a redemption surface.
+        CR-2: the caller's schema is published exactly as handed to ``@mcp_tool``.
 
-        A conformant client reading this schema now has a legal slot for the
-        token it was just handed — the inverse of the defect this class used to
-        witness.
+        Asserted through ``schema_discloses_continuation`` -- the same predicate
+        the mint gate consults -- rather than by inspecting ``properties``
+        directly, so this test and the gate cannot disagree about what
+        "discloses" means.
         """
         reg = ToolRegistry()
+        registered = {"type": "object", "properties": {}}
         with patch("frisian_mcp.decorators.tool_registry", reg):
 
             @mcp_tool(
                 name="item_list",
                 description="Plain tool.",
-                input_schema={"type": "object", "properties": {}},
+                input_schema=json.loads(json.dumps(registered)),
             )
             def _fn(_arguments: dict[str, Any], _request: Any) -> Any:
                 return _PAYLOAD
@@ -1408,16 +1872,12 @@ class TestBackstopMintsOnUndisclosedShapes:
             _ = _fn
 
         schema = reg.get_entry("item_list").input_schema
-        assert "continuation_token" in schema["properties"]
-
-        # The other four stay OUT of `properties` and live in the conditional
-        # branch: `mode`, `page`, `page_size` and `filter_keys` collide with
-        # real host field names, so declaring them unconditionally would
-        # corrupt the signature of any tool that already uses one.
-        assert "mode" not in schema["properties"]
-        branch = schema["allOf"][-1]
-        assert branch["if"] == {"required": ["continuation_token"]}
-        assert set(branch["then"]["properties"]) == {"mode", "page", "page_size", "filter_keys"}
+        assert schema_discloses_continuation(schema) is False
+        assert "continuation_token" not in schema["properties"]
+        assert "allOf" not in schema
+        # Byte-identical to what the host handed us -- the package's contribution
+        # to an ordinary schema is zero, not merely small.
+        assert json.dumps(schema) == json.dumps(registered)
 
     def test_host_field_collision_still_leaves_the_token_redeemable(self) -> None:
         """

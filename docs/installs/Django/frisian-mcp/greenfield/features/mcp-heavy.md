@@ -178,7 +178,7 @@ The agent should retry without the token to get a fresh probe.
 
 ## Threshold backstop (secondary, v2)
 
-Setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` in Django settings automatically wraps any tool response — including plain `@mcp_tool` tools — that exceeds the byte threshold in a probe envelope:
+Setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` in Django settings enables the byte-size backstop. It returns a probe envelope only for tools whose published schema already discloses the continuation call, such as `@mcp_heavy` tools and dispatchers. Plain `@mcp_tool` tools and plain auto-discovered actions return an over-threshold response complete, without truncation, token minting, or caching:
 
 ```python
 # settings.py
@@ -187,7 +187,7 @@ Setting `FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD` in Django settings automatically 
 FRISIAN_MCP_AUTO_NEGOTIATE_THRESHOLD = 50_000
 ```
 
-This is a safety net for tools you didn't know would return large responses. Prefer `@mcp_heavy` for explicit control — it documents the intention in the code and in `tools/list`.
+This is a safety net for disclosing heavy surfaces you did not know would cross the threshold. Prefer `@mcp_heavy` for explicit control on known-large reads — it documents the intention in the code and in `tools/list`.
 
 ---
 
