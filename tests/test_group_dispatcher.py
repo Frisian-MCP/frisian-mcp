@@ -728,7 +728,7 @@ class TestUnknownToolHintAxis:
         self, rf: RequestFactory
     ) -> None:
         """
-        A multi-word resource must reach the action axis (CodeRabbit).
+        A multi-word resource must reach the action axis.
 
         The hint vocabulary was built with ``split(sep, 1)[0]``, which reduces
         ``location_type_list`` to ``location``.  Intersected against a configured

@@ -937,7 +937,7 @@ class FrisianMcpConfig(AppConfig):
         # no routes — never refuses to start over a route it will not serve.
         route_audit.raise_on_fatal_route_config()
 
-        # Same standard applied to the global tier cap (CodeRabbit).  E010
+        # Same standard applied to the global tier cap.  E010
         # reports an unrecognised FRISIAN_MCP_MAX_TIER to `manage.py check`,
         # but under gunicorn nobody runs that: the host boots, anonymous read
         # keeps working, and every privileged caller is denied every tool with

@@ -3158,7 +3158,7 @@ class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-met
 
 # ---------------------------------------------------------------------------
 # Defensive-validation regressions surfaced during PR review
-# (CodeRabbit findings, addressed in this PR).
+# (review findings, addressed in this PR).
 # ---------------------------------------------------------------------------
 
 

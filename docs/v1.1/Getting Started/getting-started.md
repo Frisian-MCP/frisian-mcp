@@ -238,7 +238,7 @@ Measured impact on a 65-device Nautobot instance: 23% token reduction on the lis
 
 ## Write-Path Token Efficiency (@mcp_light)
 
-Write operations — create, update, delete — return a lean confirmation envelope by default rather than echoing the full serialized object back. No decorator or configuration is required; this is the package-level default for all write tools.
+Write operations — create, update, delete — return a lean confirmation envelope by default rather than echoing the full serialized object back. No decorator or configuration is required; this is the package-level default for write calls whose published schema discloses the continuation call. A write whose schema does not disclose it returns the full serialized object instead.
 
 **Single-object create or update:**
 

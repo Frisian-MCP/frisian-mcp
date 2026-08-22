@@ -797,7 +797,7 @@ class TestMaxTierValueCheck:
     @override_settings(FRISIAN_MCP_MAX_TIER="  READ_WRITE  ")
     def test_non_canonical_value_is_accepted_by_both_check_and_runtime(self) -> None:
         """
-        The check must not bless a value the runtime rejects (CodeRabbit).
+        The check must not bless a value the runtime rejects.
 
         This check normalised with ``strip().lower()`` while the request stamp
         used the raw value, so ``"  READ_WRITE  "`` passed here and then denied

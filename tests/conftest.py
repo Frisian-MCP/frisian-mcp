@@ -21,7 +21,7 @@ from tests._mcp_mock_guard import mock_fabrication_guard
 # A bare ``MagicMock()`` request auto-materialises a truthy child mock for any
 # unset ``_mcp_*`` attribute, so a security gate reads a "stamp" no real request
 # carries and takes a branch it never would in production. This shipped three
-# false results in three days (H7, H17, and the #62 CodeRabbit round). The suite
+# false results in three days (H7, H17, and the #62 review round). The suite
 # is clean of it today; this keeps it clean. See ``tests/_mcp_mock_guard.py``.
 #
 # Session-scoped and autouse: the guard fires only on genuine fabrication of a

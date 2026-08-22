@@ -67,7 +67,7 @@ Where the published schema discloses continuation, the lean envelope is returned
 
 **Field extraction order for single-object envelopes:**
 
-The identifying fields are extracted from the full serialized response in priority order: `id`/`pk` first, then `url`, then `name`/`display`, then any fields listed in the serializer's `Meta.mcp_light_key`. The `status_code`, `data_size`, and `continuation_token` are included on lean envelopes.
+The identifying fields are extracted from the full serialized response in priority order: `id`/`pk` first, then `url`, then `name`/`display`, then any fields listed in the serializer's `Meta.mcp_light_key`. `status_code` is included on every lean envelope. `data_size` and `continuation_token` are included on create, update and bulk envelopes only — a delete envelope carries `deleted` and `status_code` and nothing else, so clients must not require those fields on a delete response.
 
 ---
 

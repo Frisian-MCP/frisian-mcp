@@ -175,7 +175,7 @@ Unlike result payload bloat, write-echo bloat is structurally predictable: the a
 
 ### The @mcp_light Solution
 
-The `@mcp_light` feature applies a lean confirmation envelope to all write operations by default. Instead of echoing the full serialized object, frisian-mcp returns a small set of identifying fields plus metadata:
+The `@mcp_light` feature applies a lean confirmation envelope by default to write operations whose published schema discloses the continuation call. Instead of echoing the full serialized object, frisian-mcp returns a small set of identifying fields plus metadata:
 
 **Single-object create or update:**
 

@@ -428,7 +428,7 @@ def check_max_tier_value(  # pylint: disable=unused-argument
     **kwargs: Any,  # noqa: ARG001
 ) -> list[Error]:
     """
-    An unrecognised ``FRISIAN_MCP_MAX_TIER`` must be loud (CodeRabbit).
+    An unrecognised ``FRISIAN_MCP_MAX_TIER`` must be loud.
 
     This is E007's argument applied to the second tier setting.  ``highest_tier``
     on a route is parser-validated; the **global** cap is read straight from
