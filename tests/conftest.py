@@ -33,11 +33,21 @@ from tests._mcp_mock_guard import mock_fabrication_guard
 #     cd <copy> && PYTHONPATH=<copy>/src python -c "..."
 #       -> <copy>/src/frisian_mcp/__init__.py       (marker present)
 #
-# The asymmetry is what makes this expensive: **a GREEN result from an isolated
-# copy is untrustworthy without PYTHONPATH, but a RED one is safe** — red can
-# only happen if the isolation actually worked.  So a "my change fixes it" green
-# proves nothing until you confirm which tree was imported; a red is real
-# either way.  Cheapest check is to print ``frisian_mcp.__file__`` first.
+# What makes it expensive is that the run is a HYBRID, not simply "the original
+# re-tested": pytest collects the tests from the COPY (they are cwd-relative)
+# while ``import frisian_mcp`` resolves to the ORIGINAL's ``src``.  So you are
+# running the copy's tests against the original's source.  Measured — a test
+# present only in the copy was collected, ran, and failed, with
+# ``frisian_mcp.__file__`` pointing at the original.
+#
+# **Neither colour is self-certifying.**  A green may mean the fix works, or
+# that the original was already green.  A red may mean the change is wrong, or
+# merely that the copy's tests do not hold against the original's source —
+# which is what you would expect when the change under test is the thing that
+# is missing.  A red does NOT prove the isolation worked.
+#
+# So confirm which tree was imported BEFORE interpreting either result.
+# Cheapest check is to print ``frisian_mcp.__file__`` first.
 #
 # This has cost real debugging time more than once.
 

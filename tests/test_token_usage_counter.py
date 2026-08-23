@@ -10,12 +10,13 @@ is not in a consistent direction:
 
 * **CI counts the real ``cl100k_base``.**  Every job in ``pr-validation.yml``
   installs with ``uv sync --all-extras``, which includes the ``usage`` extra,
-  and ``uv.lock`` resolves tiktoken.  The golden-vector class below therefore
-  runs in CI rather than skipping.  (The encoder still has to load: the ranks
-  are fetched over the network on first use unless a ``TIKTOKEN_CACHE_DIR`` is
-  populated.  If that load fails, ``_load_encoder()`` collapses to ``None`` and
-  the run silently drops to the fallback -- so read ``encoding_name()`` rather
-  than assuming which path was active.)
+  and ``uv.lock`` resolves tiktoken, so the golden-vector class below is
+  expected to run rather than skip.  It is not guaranteed to: the encoder still
+  has to LOAD, and the ranks are fetched over the network on first use unless a
+  ``TIKTOKEN_CACHE_DIR`` is populated.  If that load fails, ``_load_encoder()``
+  collapses to ``None``, counting drops to the fallback, and the golden-vector
+  class skips -- silently, as a pass.  Read ``encoding_name()`` rather than
+  assuming which path was active.
 * **A bare local venv counts ``approx-char4``.**  Without the extra,
   ``encoding_name()`` reports the fallback and the golden-vector class skips.
 
@@ -113,9 +114,14 @@ class TestGoldenVectorsRealTokenizer:
     """Real cl100k_base golden vectors -- the drift guard for TUR-2.
 
     Skipped unless the optional ``frisian-mcp[usage]`` extra provides a working
-    encoder.  CI installs that extra, so these assertions run on every PR: a
-    tiktoken bump that shifts any of these counts fails HERE rather than
-    silently changing every ``_usage`` block.
+    encoder.  When it does, a tiktoken bump that shifts any of these counts
+    fails HERE rather than silently changing every ``_usage`` block.
+
+    Installing the extra is NOT sufficient: ``setup_method`` below asks
+    ``tiktoken_available()``, which is false whenever the encoder fails to load
+    (see the module docstring), and a failed load skips this class as a pass.
+    So this is a best-effort drift guard, not a mandatory one -- drift can cross
+    CI green on a run where the encoder never loaded.
     """
 
     GOLDEN = {
