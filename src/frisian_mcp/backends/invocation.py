@@ -20,8 +20,11 @@ from typing import Any
 from urllib.parse import urlencode
 
 from django.contrib.auth.models import AnonymousUser
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.http import HttpRequest, QueryDict
+from django.core.exceptions import (
+    PermissionDenied as DjangoPermissionDenied,
+    ValidationError as DjangoValidationError,
+)
+from django.http import Http404, HttpRequest, QueryDict
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.renderers import JSONRenderer
@@ -206,6 +209,47 @@ def _exception_envelope_message(exc: BaseException) -> str:
     if detail is None:
         return str(exc)
     return _flatten_error_detail(detail)
+
+
+#: Status the error envelope reports when the exception carries no usable one.
+_DEFAULT_ERROR_STATUS = 500
+
+
+def _exception_envelope_status(exc: BaseException) -> int:
+    """
+    Resolve the HTTP status *exc* should report in the ``ToolResult`` envelope.
+
+    Counterpart to :func:`_exception_envelope_message`: that reaches into
+    ``.detail`` for the text, this reaches into ``.status_code`` for the code.
+    Without it every failure defaulted to 500 downstream, so a not-found
+    retrieve reported ``status_code: 500`` — and 404 and 500 mean very
+    different things to an agent deciding whether to retry, because a 500
+    invites a retry that can never succeed.
+
+    Mirrors ``rest_framework.views.exception_handler``, which normalises
+    Django's ``Http404`` and ``PermissionDenied`` into their DRF equivalents
+    *before* reading ``.status_code``.  That normalisation matters here rather
+    than being a nicety: the synthetic invocation path calls the ViewSet action
+    directly and never runs ``APIView.handle_exception``, and
+    ``rest_framework.generics.get_object_or_404`` raises a bare ``Http404``
+    that carries neither ``.detail`` nor ``.status_code``.  A plain
+    ``.status_code`` lookup would therefore miss the most common case of all.
+
+    A status outside the 4xx/5xx range is discarded in favour of the default:
+    ``status_code`` is whatever the exception class declares, a host app is
+    free to declare anything on its own ``APIException`` subclass, and an
+    envelope flagged ``is_error`` must never carry a code a caller could read
+    as success.
+    """
+    if isinstance(exc, Http404):
+        return 404
+    if isinstance(exc, DjangoPermissionDenied):
+        return 403
+
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
+        return status
+    return _DEFAULT_ERROR_STATUS
 
 
 # Standard ViewSet actions that need a primary-key URL kwarg.
@@ -520,13 +564,14 @@ class SyncInvocation(BaseInvocationBackend):
             # DRF APIException.detail is unwrapped instead of str()-ified into
             # a string-in-string envelope.
             message = _exception_envelope_message(exc)
+            status = _exception_envelope_status(exc)
             logger.warning(
                 "SyncInvocation: viewset.initial() denied call — %s: %s",
                 type(exc).__name__,
                 message,
-                extra={"tool": tool.name},
+                extra={"tool": tool.name, "status_code": status},
             )
-            return ToolResult(content={"error": message}, is_error=True)
+            return ToolResult(content={"error": message, "status_code": status}, is_error=True)
 
         try:
             response = getattr(viewset, tool.action)(drf_request, **view_kwargs)
@@ -540,11 +585,12 @@ class SyncInvocation(BaseInvocationBackend):
             raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
             message = _exception_envelope_message(exc)
+            status = _exception_envelope_status(exc)
             logger.exception(
                 "SyncInvocation error",
-                extra={"tool": tool.name, "error": message},
+                extra={"tool": tool.name, "error": message, "status_code": status},
             )
-            return ToolResult(content={"error": message}, is_error=True)
+            return ToolResult(content={"error": message, "status_code": status}, is_error=True)
 
         # Response normalisation lives in its own try/except so that a failure
         # to render DRF-native types (e.g. an unrenderable custom field) becomes

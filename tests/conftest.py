@@ -15,6 +15,33 @@ from frisian_mcp.registry import ToolRegistry
 from tests._mcp_mock_guard import mock_fabrication_guard
 
 # ---------------------------------------------------------------------------
+# Testing from an isolated copy of the tree — read this first
+# ---------------------------------------------------------------------------
+#
+# The package is installed editable, so site-packages holds a ``.pth`` file
+# containing the ABSOLUTE path of this checkout's ``src/``.  ``import
+# frisian_mcp`` therefore resolves to the LIVE tree no matter what directory
+# you run pytest from.  Copying the repo somewhere else and running the suite
+# there does NOT test the copy — it re-tests the original, from inside a
+# directory that looks isolated.
+#
+# Set ``PYTHONPATH=<copy>/src`` to actually exercise a copy.  Measured, both
+# directions, with a marker added to the copy only:
+#
+#     cd <copy> && python -c "import frisian_mcp; frisian_mcp.__file__"
+#       -> <original>/src/frisian_mcp/__init__.py   (marker absent)
+#     cd <copy> && PYTHONPATH=<copy>/src python -c "..."
+#       -> <copy>/src/frisian_mcp/__init__.py       (marker present)
+#
+# The asymmetry is what makes this expensive: **a GREEN result from an isolated
+# copy is untrustworthy without PYTHONPATH, but a RED one is safe** — red can
+# only happen if the isolation actually worked.  So a "my change fixes it" green
+# proves nothing until you confirm which tree was imported; a red is real
+# either way.  Cheapest check is to print ``frisian_mcp.__file__`` first.
+#
+# This has cost real debugging time more than once.
+
+# ---------------------------------------------------------------------------
 # H22 — fabrication guard, active for the whole suite
 # ---------------------------------------------------------------------------
 #
