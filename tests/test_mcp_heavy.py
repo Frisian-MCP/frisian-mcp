@@ -467,6 +467,85 @@ class TestServeHeavyMode:
         assert served == result
         assert "chunk" not in served
 
+    # -- CL-6 / GH #66: single_object suppresses the envelope lookup ---------
+
+    def test_single_object_with_one_list_field_is_not_paginated(self) -> None:
+        """
+        A created object's only list field must not be served as the payload.
+
+        Without the mint site's statement, this dict satisfies the envelope
+        test — exactly one list-valued key — and that field becomes the
+        payload, empty on a fresh create.  The caller then reads ``total: 0``
+        for an object that was successfully written.
+        """
+        created = {"id": "uuid-1", "name": "thing", "labels": []}
+
+        assert _serve_heavy_mode(created, "paginated", {}, single_object=True) == created
+
+    def test_same_shape_without_the_flag_keeps_todays_behaviour(self) -> None:
+        """
+        The default is ``False`` and must not change what an existing entry does.
+
+        This is the pre-deploy entry read with ``.get()``: identical input,
+        flag absent, envelope treatment retained.  Pinned so the default can
+        never be flipped without a test going red — flipping it would stop
+        in-flight READ entries paginating for the rest of their TTL.
+        """
+        created = {"id": "uuid-1", "name": "thing", "labels": []}
+
+        served = _serve_heavy_mode(created, "paginated", {})
+
+        assert served["envelope_payload_key"] == "labels"
+        assert served["total"] == 0
+
+    def test_list_envelope_still_paginates_the_h23_guard(self) -> None:
+        """
+        The H23 fix is untouched — this is the real regression risk.
+
+        H23 was correct: a large list endpoint is a dict and must page.  CL-6
+        must narrow only the single-object case, so a genuine envelope keeps
+        paging exactly as before, flag absent AND flag present-but-false.
+        """
+        envelope = {"count": 114, "results": [{"id": i} for i in range(50)]}
+
+        for kwargs in ({}, {"single_object": False}):
+            served = _serve_heavy_mode(envelope, "paginated", {"page": 2, "page_size": 3}, **kwargs)
+            assert [item["id"] for item in served["items"]] == [3, 4, 5]
+            assert served["total"] == 50
+            assert served["envelope_payload_key"] == "results"
+
+    def test_single_object_flag_does_not_stop_a_bulk_write_paginating(self) -> None:
+        """
+        A bulk write caches a **list**, and paginating that is correct.
+
+        ``single_object`` suppresses the envelope-key lookup for a dict; it is
+        deliberately not a blanket "never paginate a write", or bulk creates
+        would start returning every object at once.
+        """
+        created = [{"id": i} for i in range(10)]
+
+        served = _serve_heavy_mode(
+            created, "paginated", {"page": 1, "page_size": 4}, single_object=True
+        )
+
+        assert len(served["items"]) == 4
+        assert served["total"] == 10
+        assert served["has_more"] is True
+
+    def test_single_object_leaves_the_other_modes_alone(self) -> None:
+        """``single_object`` touches ``paginated`` only."""
+        created = {"id": "uuid-1", "name": "thing", "labels": []}
+
+        assert _serve_heavy_mode(created, "full", {}, single_object=True) == created
+        assert _serve_heavy_mode(
+            created, "filtered", {"filter_keys": ["id"]}, single_object=True
+        ) == {"id": "uuid-1"}
+        assert _serve_heavy_mode(created, "summary", {}, single_object=True) == {
+            "id": "uuid-1",
+            "name": "thing",
+            "labels": "[]",
+        }
+
     def test_paginated_page_size_clamped_to_max(self, settings: Any) -> None:
         """Agent-supplied page_size above FRISIAN_MCP_HEAVY_MAX_PAGE_SIZE is clamped."""
         settings.FRISIAN_MCP_HEAVY_PAGE_SIZE = 20
@@ -600,6 +679,68 @@ class TestMcpHeavyIntegration:
 
         result = _tool_result(response)
         assert result == stored
+
+    def test_call2_read_entry_without_the_flag_still_paginates(self, rf: RequestFactory) -> None:
+        """
+        CL-6: a READ entry carrying no ``single_object`` key must still paginate.
+
+        This pins the **redemption call site's** ``.get(..., False)`` default,
+        which the ``_serve_heavy_mode`` unit tests cannot reach — they pass the
+        flag directly. Two populations depend on this default and both are
+        represented by the entry below, which deliberately omits the key:
+
+        * every entry minted before this shipped, still live for its TTL
+        * every read entry, which never sets it
+
+        Flipping that default to ``True`` would stop large list endpoints
+        paginating — the dominant production path — which is a worse fault than
+        the one CL-6 fixes. The stored result is a genuine list envelope with
+        exactly one list-valued key, i.e. the shape that would be misread as a
+        single object if the default went the other way.
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _heavy_owner_key,
+        )
+
+        stored = {"count": 114, "results": [{"id": i} for i in range(50)]}
+        token = "readentrytoken"
+
+        isolated = ToolRegistry()
+        with (
+            patch("frisian_mcp.decorators.tool_registry", isolated),
+            patch("frisian_mcp.views.tool_registry", isolated),
+        ):
+
+            @mcp_heavy(
+                name="int.heavy.readentry",
+                description="Heavy read entry",
+                input_schema={"type": "object", "properties": {}},
+            )
+            def _big_env(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
+                return stored
+
+            with patch("frisian_mcp.views.django_cache") as mock_cache:
+                expected_owner = _heavy_owner_key(
+                    _build_call_tool_request(rf, "int.heavy.readentry", {}),
+                    "int.heavy.readentry",
+                )
+                # No "single_object" key at all — a pre-deploy or read entry.
+                mock_cache.get.return_value = {
+                    "result": stored,
+                    "owner_key": expected_owner,
+                    "tool_name": "int.heavy.readentry",
+                    "resolved_target": "int.heavy.readentry",
+                }
+                response = _call_tool(
+                    rf,
+                    "int.heavy.readentry",
+                    {"continuation_token": token, "mode": "paginated", "page_size": 2},
+                )
+
+        result = _tool_result(response)
+        assert result["envelope_payload_key"] == "results", "read entry stopped paginating"
+        assert len(result["items"]) == 2, "page_size ignored on a read entry"
+        assert result["total"] == 50
 
     def test_call2_summary_mode(self, rf: RequestFactory) -> None:
         """Call 2 with mode=summary returns a condensed result."""

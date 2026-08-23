@@ -431,6 +431,8 @@ def _build_heavy_cache_entry(
     tool_name: str,
     resolved_target: str | None = None,
     resolved_action: str | None = None,
+    *,
+    single_object: bool = False,
 ) -> dict[str, Any]:
     """
     Wrap *result* with the SEC-3 owner-binding metadata for the cache.
@@ -458,6 +460,17 @@ def _build_heavy_cache_entry(
     Recorded at mint because that is the action the server actually dispatched.
     The redemption call's own ``action`` argument is caller-supplied and is
     deliberately **not** consulted.
+
+    ``single_object`` records that *result* is one written object rather than a
+    list-shaped response, so redemption does not go looking for a list payload
+    inside it (see :func:`_serve_heavy_mode`).  Set by the two **write** mint
+    sites and by neither read site.  It is carried rather than inferred because
+    a created object and a paginated envelope are both dicts — exactly the
+    ambiguity :func:`_envelope_payload_key` declines to guess at.  The mint site
+    is the only place that knows which one this is.
+
+    Stored only when true, so an entry's shape is unchanged for every existing
+    caller.
     """
     entry: dict[str, Any] = {
         "result": result,
@@ -467,6 +480,8 @@ def _build_heavy_cache_entry(
     }
     if resolved_action is not None:
         entry["resolved_action"] = resolved_action
+    if single_object:
+        entry["single_object"] = True
     return entry
 
 
@@ -753,7 +768,9 @@ def _envelope_payload_key(result: Any) -> str | None:
     return list_keys[0] if len(list_keys) == 1 else None
 
 
-def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
+def _serve_heavy_mode(
+    result: Any, mode: str, arguments: dict[str, Any], *, single_object: bool = False
+) -> Any:
     """
     Serve a cached heavy result in the requested response mode.
 
@@ -772,6 +789,13 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
     caller entirely.  The caller never reaches here without a
     ``continuation_token``, so the absent-mode default is applied by the
     redemption path rather than here.
+
+    ``single_object`` is the mint site's statement that *result* is one written
+    object rather than a list-shaped response.  It suppresses only the
+    envelope-payload-key lookup in ``paginated``; every other mode is
+    unaffected, and a ``list`` result still paginates normally so a bulk write
+    pages as it should.  It defaults to ``False`` — see the ``paginated``
+    branch for why that direction is the safe one.
     """
     if mode == "full":
         return result
@@ -814,7 +838,33 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
         # host field: an envelope is a dict with exactly one list-valued key.
         # Ambiguity is not guessed at — zero or several lists means we cannot
         # tell which is the payload, and the result is returned whole as before.
-        payload_key = None if isinstance(result, list) else _envelope_payload_key(result)
+        #
+        # CL-6: H23 was right about list endpoints and wrong about one shape it
+        # could not see.  A *created object* is also a dict, and its own
+        # representation often has exactly one list-valued field — which then
+        # satisfies the envelope test and is served as the payload, usually
+        # empty on a fresh create.  Redemption reported `total: 0` with the
+        # created object displaced into `envelope`, so a client reading the
+        # payload concluded nothing had been created.  Two list fields returned
+        # `None` and behaved correctly, which is why it stayed hidden.
+        #
+        # The shapes are indistinguishable here by construction, so the fact is
+        # carried from the mint site rather than inferred. This does NOT change
+        # how the payload key is found within a genuine list envelope.
+        #
+        # Only the *lookup* is suppressed, not pagination: a bulk write caches a
+        # list at the top level and still pages normally, because a list has no
+        # envelope key to find in the first place.
+        #
+        # The default is False on purpose, and the direction matters: entries
+        # minted before this shipped carry no such key and are read with
+        # `.get()`.  Defaulting to True would stop in-flight READ entries
+        # paginating for the remainder of their TTL — a worse fault than this
+        # one, on the dominant path.  Old write entries keep this bug until
+        # they age out; that is the acceptable side of the trade.
+        payload_key = (
+            None if single_object or isinstance(result, list) else _envelope_payload_key(result)
+        )
         if not isinstance(result, list) and payload_key is None:
             return result
 
@@ -1943,7 +1993,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # select the most expensive response by accident.
         _mode: str = arguments.get("mode", DEFAULT_NEGOTIATION_MODE)
         try:
-            served = _serve_heavy_mode(cached["result"], _mode, arguments)
+            served = _serve_heavy_mode(
+                cached["result"],
+                _mode,
+                arguments,
+                # Absent on entries minted before this shipped, and on every
+                # read entry; `.get` keeps both on the existing behaviour.
+                single_object=bool(cached.get("single_object", False)),
+            )
         except ToolInputError as exc:
             _log_audit_context(
                 request, tool_name, arguments, decision="deny", reason="continuation_bad_mode"
@@ -2259,7 +2316,10 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 )
             _hc.set(
                 f"{_HEAVY_CACHE_PREFIX}{_w_token}",
-                _build_heavy_cache_entry(result, request, tool_name),
+                # A write result is the object that was just written, not a
+                # list envelope — say so, so redemption does not mistake one of
+                # its fields for a paginated payload.
+                _build_heavy_cache_entry(result, request, tool_name, single_object=True),
                 _heavy_cache_ttl(),
             )
         elif _lean.get("deleted") is True:
@@ -2306,8 +2366,13 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     f"{_HEAVY_CACHE_PREFIX}{_w_token}",
                     # ADR-011 §5: bind the server-resolved child, not the outer
                     # dispatcher name, so redemption has something to re-authorize.
+                    # single_object: as on the flat write path above.
                     _build_heavy_cache_entry(
-                        result, request, tool_name, getattr(_d_entry, "name", None)
+                        result,
+                        request,
+                        tool_name,
+                        getattr(_d_entry, "name", None),
+                        single_object=True,
                     ),
                     _heavy_cache_ttl(),
                 )

@@ -735,6 +735,129 @@ class TestContinuationTokenRetrieval:
 
 
 # ---------------------------------------------------------------------------
+# CL-6 / GH #66 — a created object is not a paginated list envelope
+# ---------------------------------------------------------------------------
+
+
+class TestCreatedObjectIsNotAPaginatedEnvelope:
+    """
+    Redeeming a create must hand back the object, not an empty page of one field.
+
+    ``_envelope_payload_key`` recognises a paginated envelope as *a dict with
+    exactly one list-valued key*.  That is sound for a list response and wrong
+    for a single created object, whose own representation frequently has
+    exactly one list-valued field — which is then chosen as the payload and is
+    usually empty on a fresh create.  Redemption reported ``total: 0`` with the
+    created object displaced into ``envelope``, so a client reading the payload
+    concluded nothing had been created.
+
+    Structural rather than host-specific: any serializer with exactly one list
+    field reaches it, and **two** list fields return ``None`` and behave
+    correctly — which is why it stayed hidden.
+
+    ``TestContinuationTokenRetrieval`` above already covers bare redemption,
+    but its fixture object has *zero* list-valued fields, so it takes the
+    ``len(list_keys) != 1`` arm and passes.  These cells supply the one-list
+    shape that arm never saw.
+    """
+
+    @staticmethod
+    def _redeem(rf: RequestFactory, created: dict[str, Any]) -> Any:
+        """Create *created* through the write path, then redeem with no ``mode``."""
+
+        def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return created
+
+        isolated = _build_write_registry("device.create", _create)
+        cache_store: dict[str, Any] = {}
+
+        def _cache_set(key: str, value: Any, timeout: int) -> None:
+            cache_store[key] = value
+
+        def _cache_get(key: str) -> Any:
+            return cache_store.get(key)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.side_effect = _cache_get
+            mock_cache.set.side_effect = _cache_set
+            resp1 = _call_tool(rf, "device.create", {"name": "test-device"})
+
+        token = _tool_result(resp1)["continuation_token"]
+        assert token is not None, "premise: the lean write path minted a token"
+
+        # Bare redemption — no `mode`, so B2's `paginated` default applies.
+        # That is the shape a client actually sends, and the one that broke.
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.side_effect = _cache_get
+            mock_cache.set.side_effect = _cache_set
+            resp2 = _call_tool(rf, "device.create", {"continuation_token": token})
+
+        return _tool_result(resp2)
+
+    def test_single_list_field_does_not_become_the_payload(self, rf: RequestFactory) -> None:
+        """A created object with exactly one list field redeems as the object."""
+        created = {
+            "id": "uuid-66",
+            "name": "test-device",
+            # Exactly one list-valued field, empty — the shape that broke.
+            "labels": [],
+            "payload": "x" * 4000,
+        }
+
+        served = self._redeem(rf, created)
+
+        # The failure this pins: the object displaced into `envelope` while the
+        # payload reports an empty page, so a client reading it sees nothing.
+        assert "envelope_payload_key" not in served, (
+            "a created object was paginated as a list envelope; "
+            f"payload key was {served.get('envelope_payload_key')!r}"
+        )
+        assert served.get("total") != 0, "redemption reported an empty page for a created object"
+        assert served == created
+
+    def test_populated_single_list_field_is_not_the_payload(self, rf: RequestFactory) -> None:
+        """
+        The bug is not limited to an *empty* list field.
+
+        A populated one is worse, not better: the page would contain that
+        field's contents presented as if they were the result of the call.
+        """
+        created = {"id": "uuid-66b", "name": "test-device", "labels": ["a", "b"], "x": "y" * 4000}
+
+        served = self._redeem(rf, created)
+
+        assert "envelope_payload_key" not in served
+        assert served == created
+
+    def test_two_list_fields_still_behave_as_before(self, rf: RequestFactory) -> None:
+        """
+        The ambiguous shape was already correct and must not change.
+
+        Two list-valued keys make ``_envelope_payload_key`` return ``None``, so
+        this shape never had the bug.  Asserted so the fix is not credited with
+        repairing something that was already working.
+        """
+        created = {
+            "id": "uuid-66c",
+            "name": "test-device",
+            "labels": [],
+            "aliases": [],
+            "payload": "x" * 4000,
+        }
+
+        served = self._redeem(rf, created)
+
+        assert "envelope_payload_key" not in served
+        assert served == created
+
+
+# ---------------------------------------------------------------------------
 # @mcp_heavy takes precedence when both flags present
 # ---------------------------------------------------------------------------
 
