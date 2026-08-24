@@ -215,11 +215,11 @@ Reduction:                             99.8%
 Per-device object size:               ~603 tokens (~3,800 bytes)
 ```
 
-The 99.8% reduction is constant regardless of bulk size. The lean envelope is a fixed-size structure; the full echo grows linearly. The larger the bulk operation, the greater the absolute saving.
+The full echo grows linearly with bulk size, so the larger the operation, the greater the absolute saving. The 99.8% figure itself holds at any bulk size only where the envelope carries a continuation token, which is a fixed-size structure. Where it instead carries the accepted ids, the envelope grows with the batch and the saving is a bound rather than a fixed percentage — on the same fixture, well under a fifth of the full echo.
 
 ### Full Object Access
 
-The lean envelope includes a `continuation_token`. The agent can retrieve the full serialized result via the heavy-fetch path without re-executing the write. For cases where the full result is needed immediately, the agent can pass `verify=True` on the write call to receive the complete echo inline.
+Where the calling tool's published schema discloses continuation, the lean envelope includes a `continuation_token`, and the agent can retrieve the full serialized result via the heavy-fetch path without re-executing the write. Where it does not, the envelope carries the written object's identifier instead, and the object is reached with a `retrieve`. In either case, an agent that needs the full result immediately can pass `verify=True` on the write call to receive the complete echo inline — that route is available on every write.
 
 See [Write-Path Response Filtering](write-path-response-filtering.md) for the full developer guide, including `@mcp_light_key` serializer annotation.
 
@@ -248,20 +248,6 @@ For a small Django app with a handful of ViewSets, none of the three problems is
 For medium applications, default pagination plus `@mcp_heavy` on any list endpoint that could return more than a few dozen records is the practical baseline. Write-path filtering (`@mcp_light`) is applied automatically by default — no additional configuration is needed unless you need to customize which fields appear in the lean envelope.
 
 For large multi-app applications — the kind of system where MCP is most valuable, because the surface is too large for an agent to navigate without help — the dispatcher pattern is a requirement, not an optimization. `FRISIAN_MCP_DISPATCH_GROUPS` is the simplest starting point — declare a group per app or domain, and refine the boundaries as they become clear. Pair with `@mcp_heavy` on list endpoints and rely on the `@mcp_light` lean default for write operations.
-
----
-
-## A Note on Future MCP Spec Work
-
-The MCP community has draft proposals addressing related problems:
-
-- **SEP-2084** (Primitive Grouping) — proposes a way to group tools at the protocol level; it remains under active working-group discussion rather than a finalized part of the spec.
-- **SEP-1300** (Tool Filtering) — would let clients request a filtered subset of tools at connection time.
-- **SEP-993** (Namespaces) — addresses tool naming collisions across servers.
-
-frisian-mcp's dispatcher pattern is implementable in the existing MCP specification without spec changes. As these SEPs stabilize, the package can adopt them where they provide additional value — but production users do not need to wait for spec evolution to solve the token problem today.
-
-The dispatcher pattern is the working solution. The SEPs may eventually offer alternative or complementary approaches. Both can coexist.
 
 ---
 

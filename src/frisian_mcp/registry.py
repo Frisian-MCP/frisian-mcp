@@ -365,6 +365,68 @@ class ToolInputError(ValueError):
     """Raised when tool arguments fail JSON Schema validation."""
 
 
+def format_validation_errors(schema: dict[str, Any], instance: Any) -> str | None:
+    """
+    Validate *instance* against *schema* and describe **every** fault at once.
+
+    Returns ``None`` when the instance validates.
+
+    Replaces ``jsonschema.validate()``, which raises on the FIRST error it
+    finds.  A create missing four required fields therefore disclosed them one
+    per call, so a caller spent four blind round-trips before reaching the
+    serializer at all — and each round-trip looks identical to the previous
+    one from the outside, which is indistinguishable from a client retrying
+    without progress.
+
+    A single fault renders exactly as ``jsonschema`` renders it, so the common
+    case gains no scaffolding; several are joined with ``"; "``.
+
+    Sorted, because ``iter_errors`` promises no ordering.  Without that the
+    same input reads differently between runs, and a caller cannot tell a new
+    fault from a reshuffled one.  Duplicates are collapsed: a schema using
+    ``anyOf``/``allOf`` can yield the same message from more than one branch.
+    """
+    validator = jsonschema.validators.validator_for(schema)(schema)
+    seen: list[tuple[tuple[Any, ...], str]] = []
+    sent_list_for_object = False
+    for error in validator.iter_errors(instance):
+        key = (tuple(error.absolute_path), error.message)
+        if key not in seen:
+            seen.append(key)
+        # A list supplied where an object was required is the bulk-write shape
+        # sent without its wrapper.  Detected from the error rather than from
+        # *instance* because the value is usually NESTED — a grouped call fails
+        # on ``params``, so the top-level instance is an ordinary arguments
+        # dict and only the failing sub-value is the list.
+        if (
+            error.validator == "type"
+            and error.validator_value == "object"
+            and isinstance(error.instance, list)
+        ):
+            sent_list_for_object = True
+    if not seen:
+        return None
+    rendered = "; ".join(
+        message for _, message in sorted(seen, key=lambda item: (item[0], item[1]))
+    )
+
+    # The bare message — "[...] is not of type 'object'" — says what is wrong
+    # and not what to do, so a caller whose list has just been rejected has to
+    # guess the wrapper key.  One did, in preference to reading it.  That is
+    # the same fault one level down from the reason this error moved into the
+    # payload at all: readable, and still not actionable.
+    #
+    # The keys are listed from _BULK_LIST_BODY_KEYS rather than restated, so
+    # the guidance cannot drift from what the invocation layer accepts.
+    if sent_list_for_object:
+        accepted = ", ".join(sorted(_BULK_LIST_BODY_KEYS))
+        rendered += (
+            f". To send a list, wrap it under one of these keys: {accepted}"
+            f' — for example {{"data": [...]}}.'
+        )
+    return rendered
+
+
 class ToolInvocationError(Exception):
     """
     Raised by the tool invocation shim when the backend returns is_error=True.
@@ -944,10 +1006,9 @@ class ToolRegistry:
                 }
 
         if not is_dispatcher_help and not _is_list_body:
-            try:
-                jsonschema.validate(instance=arguments, schema=_validation_schema)
-            except jsonschema.exceptions.ValidationError as exc:
-                raise ToolInputError(exc.message) from exc
+            _problems = format_validation_errors(_validation_schema, arguments)
+            if _problems is not None:
+                raise ToolInputError(_problems)
 
         if asyncio.iscoroutinefunction(entry.fn):
             return async_to_sync(entry.fn)(arguments, request)

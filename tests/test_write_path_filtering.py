@@ -1487,8 +1487,17 @@ class TestWriteMintRequiresDisclosure:
 
         return _create
 
-    def test_non_disclosing_write_returns_the_result_whole(self, rf: RequestFactory) -> None:
-        """No disclosure → the full written object, not a lean envelope."""
+    def test_non_disclosing_write_hands_back_no_token(self, rf: RequestFactory) -> None:
+        """
+        No disclosure → no ``continuation_token``, and nothing that needs one.
+
+        **Re-aimed by CL-9, not weakened.**  This asserted that the whole object
+        came back, which was CR-9's remedy for the data loss.  CR-9's gate is
+        unchanged and still asserted here — nothing is minted — but the caller
+        now receives the lean envelope *without* the token rather than the full
+        payload, because the token was the only unusable part of it.  The
+        object stays reachable by ``verify=True`` or a ``retrieve`` on the id.
+        """
         isolated = _build_write_registry("obj.create", self._handler(), discloses=False)
 
         with (
@@ -1500,11 +1509,10 @@ class TestWriteMintRequiresDisclosure:
 
         result = _tool_result(response)
         assert not _is_error(response)
-        # The whole result, byte for byte — this is the data-loss assertion.
-        assert result == self.OBJECT
-        # ...and specifically NOT a lean envelope.
+        # The gate itself — the assertion this cell has always carried.
         assert "continuation_token" not in result
-        assert "data_size" not in result
+        # ...and the caller can still identify what was written.
+        assert result["id"] == "obj-1"
 
     def test_non_disclosing_write_pins_nothing(self, rf: RequestFactory) -> None:
         """
@@ -1577,6 +1585,208 @@ class TestWriteMintRequiresDisclosure:
         result = _tool_result(response)
         assert result.get("deleted") is True
         assert result.get("id") == "obj-1"
+
+
+class TestNonDisclosingWriteKeepsTheLeanEnvelope:
+    """
+    CL-9 — drop the token, keep the envelope.
+
+    CR-9 correctly stopped minting a ``continuation_token`` no schema-validating
+    client could send back.  But it returned the FULL result instead, so an
+    ungrouped write went from ~25 tokens to the whole payload — a 60-item bulk
+    create measured 25 → 7,143.
+
+    The token was the only unusable part of the envelope.  Everything else is
+    ordinary data, and the written object stays reachable by two routes that are
+    already published and schema-legal: ``verify=True`` on the original call
+    (injected into every auto-discovered write schema under a bare ``if
+    is_write:``) or a ``retrieve`` on the id in the envelope.
+
+    **The envelope is only emitted when it is reachable.**  A bulk envelope is
+    ``{accepted: N}`` with no ids, and a single write whose serialised result
+    carries no ``id``/``pk`` has the same problem one object at a time — in both
+    cases the caller would know something was written and be unable to name it,
+    which is worse than a large response.  Those shapes fall back to returning
+    whole, which is the pre-CL-9 behaviour and therefore never a new loss.
+    """
+
+    OBJECT = {"id": "obj-1", "name": "n1", "bulk": "y" * 300}
+
+    def _handler(self) -> Any:
+        def _create(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
+            return dict(self.OBJECT)
+
+        return _create
+
+    @staticmethod
+    def _call(rf: RequestFactory, name: str, handler: Any, arguments: dict[str, Any]) -> Any:
+        isolated = _build_write_registry(name, handler, discloses=False)
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            return _call_tool(rf, name, arguments)
+
+    # -- single object ------------------------------------------------------
+
+    def test_single_write_returns_the_lean_envelope_without_a_token(
+        self, rf: RequestFactory
+    ) -> None:
+        """The envelope survives; only the token is dropped."""
+        result = _tool_result(self._call(rf, "obj.create", self._handler(), {"name": "n1"}))
+
+        assert "continuation_token" not in result
+        assert result["id"] == "obj-1"
+        assert result["name"] == "n1"
+        assert result["status_code"] == 200
+        assert "data_size" in result
+        # The bulky serialised field is exactly what the envelope exists to omit.
+        assert "bulk" not in result, "the full payload came back, not a lean envelope"
+
+    def test_single_write_without_an_id_returns_whole(self, rf: RequestFactory) -> None:
+        """
+        An unreachable envelope is worse than a large response.
+
+        With no ``id``/``pk`` in the serialised result there is nothing to
+        ``retrieve``, so the tokenless envelope would confirm a write the caller
+        can never look up.  Falls back to the pre-CL-9 behaviour.
+        """
+
+        def _create(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
+            return {"name": "n1", "bulk": "y" * 300}
+
+        result = _tool_result(self._call(rf, "obj.create", _create, {"name": "n1"}))
+
+        assert result == {"name": "n1", "bulk": "y" * 300}
+
+    # -- bulk ---------------------------------------------------------------
+
+    def test_bulk_write_echoes_the_ids_in_place_of_the_token(self, rf: RequestFactory) -> None:
+        """
+        Bulk needs ids, because ``{accepted: N}`` alone identifies nothing.
+
+        Dropping the token from a bulk envelope without echoing ids would leave
+        the caller knowing N objects exist and unable to name any of them —
+        strictly worse than returning whole.
+        """
+        objects = [{"id": f"obj-{i}", "name": f"n{i}", "bulk": "y" * 300} for i in range(60)]
+
+        def _bulk_create(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
+            return objects
+
+        result = _tool_result(
+            self._call(rf, "objs.bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
+        )
+
+        assert "continuation_token" not in result
+        assert result["accepted"] == 60
+        assert result["ids"] == [f"obj-{i}" for i in range(60)]
+        assert "bulk" not in json.dumps(result), "the full payload came back"
+
+    def test_bulk_write_with_an_unidentifiable_item_returns_whole(self, rf: RequestFactory) -> None:
+        """One id-less item makes the whole echo untrustworthy, so fall back."""
+        objects: list[dict[str, Any]] = [{"id": "obj-0", "name": "n0"}, {"name": "n1"}]
+
+        def _bulk_create(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
+            return objects
+
+        result = _tool_result(
+            self._call(rf, "objs.bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
+        )
+
+        assert result == objects
+
+    def test_empty_bulk_returns_whole(self, rf: RequestFactory) -> None:
+        """An empty list has no ids to echo; nothing is gained by an envelope."""
+
+        def _bulk_create(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
+            return []
+
+        result = _tool_result(self._call(rf, "objs.bulk_create", _bulk_create, {"objects": []}))
+
+        assert result == []
+
+    # -- the guardrails -----------------------------------------------------
+
+    def test_still_pins_nothing(self, rf: RequestFactory) -> None:
+        """
+        CR-9's gate is unchanged: no disclosure still means no mint.
+
+        This is the assertion CL-9 must not weaken.  Keeping the envelope
+        changes what we return *instead* of the token, never whether one is
+        issued or an entry pinned in the shared cache.
+        """
+        isolated = _build_write_registry("obj.create", self._handler(), discloses=False)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            _call_tool(rf, "obj.create", {"name": "n1"})
+            heavy_writes = [
+                call
+                for call in mock_cache.set.call_args_list
+                if str(call.args[0]).startswith("frisian_mcp:heavy:")
+            ]
+
+        assert heavy_writes == [], f"nothing may be pinned: {heavy_writes}"
+
+    def test_disclosing_write_keeps_its_token(self, rf: RequestFactory) -> None:
+        """
+        A grouped/disclosing write is untouched — that path is live-verified.
+
+        Asserted rather than assumed: CL-9 changes only the arm taken when the
+        schema does NOT disclose.
+        """
+        isolated = _build_write_registry("obj.create", self._handler(), discloses=True)
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            response = _call_tool(rf, "obj.create", {"name": "n1"})
+
+        result = _tool_result(response)
+        assert "continuation_token" in result
+        assert "ids" not in result, "the bulk id-echo leaked onto the disclosing path"
+
+    def test_verify_still_returns_the_full_object(self, rf: RequestFactory) -> None:
+        """
+        The published escape route still works.
+
+        The tokenless envelope is only defensible because ``verify=True`` can
+        still fetch the whole thing, so that is asserted here rather than
+        assumed from the schema.
+        """
+        result = _tool_result(
+            self._call(rf, "obj.create", self._handler(), {"name": "n1", "verify": True})
+        )
+
+        assert result == self.OBJECT
+
+    def test_savings_against_returning_whole(self, rf: RequestFactory) -> None:
+        """
+        The envelope is materially smaller than the payload it replaces.
+
+        Measured rather than asserted in prose: this is the regression's whole
+        justification, so it should fail if the envelope ever grows back toward
+        the full result.
+        """
+        objects = [{"id": f"obj-{i}", "name": f"n{i}", "bulk": "y" * 300} for i in range(60)]
+
+        def _bulk_create(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
+            return objects
+
+        envelope = _tool_result(
+            self._call(rf, "objs.bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
+        )
+
+        whole = len(json.dumps(objects))
+        lean = len(json.dumps(envelope))
+        assert lean < whole / 5, f"envelope {lean}B vs whole {whole}B — not a material saving"
 
 
 class TestDiscoveredWriteActionsAreGovernedByTheGate:

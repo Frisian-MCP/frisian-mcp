@@ -339,6 +339,77 @@ def _apply_meta_light_key(result: dict[str, Any], tool_name: str, envelope: dict
             envelope[key] = result[key]
 
 
+#: Keys carrying an object's primary identifier, in preference order.  Shared
+#: so the lean envelope and the tokenless variant cannot drift apart on what
+#: counts as identifiable.
+_ID_KEYS: tuple[str, ...] = ("id", "pk")
+
+
+def _object_id(item: Any) -> Any | None:
+    """Return *item*'s identifier under :data:`_ID_KEYS`, or ``None``."""
+    if not isinstance(item, dict):
+        return None
+    for key in _ID_KEYS:
+        if key in item:
+            return item[key]
+    return None
+
+
+def _lean_envelope_without_token(
+    result: Any, http_status: int = 200, tool_name: str | None = None
+) -> dict[str, Any] | None:
+    """
+    Build the lean write envelope with **no** ``continuation_token``.
+
+    Returns ``None`` when the caller could not reach the written object from the
+    envelope, in which case the caller should return *result* whole.
+
+    CR-9 stopped minting a token for a write whose published schema does not
+    declare one — correctly, since a schema-validating client cannot legally
+    send an undeclared field back.  But it returned the FULL serialised result
+    instead, so an ungrouped write went from roughly 25 tokens to the whole
+    payload: a 60-item bulk create measured 25 -> 7,143.
+
+    The token was the only unusable part of that envelope.  Everything else is
+    ordinary data, and the object stays reachable by two routes that are already
+    published and schema-legal — ``verify=True`` on the original call, which
+    ``backends/discovery`` injects into every auto-discovered write schema, or a
+    ``retrieve`` on the id carried here.  So the envelope is kept and the token
+    dropped, rather than the envelope abandoned.
+
+    **Reachability is the precondition, and it is checked rather than assumed.**
+    A bulk envelope is ``{accepted: N, ...}`` with no ids, and a single write
+    whose serialised result carries no ``id``/``pk`` has the same problem one
+    object at a time: the caller learns that something was written and cannot
+    name it, which is worse than a large response.  Both return ``None`` here
+    and fall back to the pre-CL-9 behaviour, so the fallback is the status quo
+    and never a new loss.
+
+    Bulk therefore echoes the accepted **ids** in place of the token — the
+    planned ``bulk_create`` id-echo, landing here because this is where it
+    becomes load-bearing.
+    """
+    # Built on _extract_lean_envelope so the two cannot disagree about what the
+    # envelope contains; only the token differs.
+    envelope = _extract_lean_envelope(result, "", http_status, tool_name=tool_name)
+    envelope.pop("continuation_token", None)
+
+    if isinstance(result, list):
+        if not result:
+            return None
+        ids = [_object_id(item) for item in result]
+        if any(item_id is None for item_id in ids):
+            # A partial echo is not usable: the caller cannot tell which of the
+            # accepted objects the listed ids belong to.
+            return None
+        envelope["ids"] = ids
+        return envelope
+
+    if "id" not in envelope:
+        return None
+    return envelope
+
+
 def _extract_lean_envelope(
     result: Any, token: str, http_status: int = 200, tool_name: str | None = None
 ) -> dict[str, Any]:
@@ -386,7 +457,7 @@ def _extract_lean_envelope(
 
     envelope: dict[str, Any] = {}
     if isinstance(result, dict):
-        for key in ("id", "pk"):
+        for key in _ID_KEYS:
             if key in result:
                 envelope["id"] = result[key]
                 break

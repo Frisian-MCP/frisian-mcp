@@ -1180,7 +1180,11 @@ def _log_audit_context(
 
 
 def _lite_enrich_error_content(
-    content: dict[str, Any], tool_name: str, lite: bool, request: Any = None
+    content: dict[str, Any],
+    tool_name: str,
+    lite: bool,
+    request: Any = None,
+    arguments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Attach the failing tool's ``inputSchema`` to an ``isError`` content dict.
@@ -1199,6 +1203,10 @@ def _lite_enrich_error_content(
         lite: The per-call ``lite`` flag extracted from arguments.
         request: The current request; scopes the entry lookup to the route
             view and effective tier when present.
+        arguments: The call's arguments.  When supplied **and** *tool_name* is
+            a group dispatcher that routes them to one of its members, the
+            member's schema is echoed instead of the dispatcher's — see below.
+            Omit it to keep the dispatcher's own schema.
 
     Returns:
         Either *content* unchanged, or a new dict with ``"inputSchema"``
@@ -1210,6 +1218,52 @@ def _lite_enrich_error_content(
     entry = _request_visible_entry(request, tool_name)
     if entry is None:
         return content
+    # The entry is looked up by the name the CALLER invoked, which on a grouped
+    # call is the dispatcher.  Echoing its schema hands back
+    # ``{resource, action, params}`` — the shape the caller already had — and
+    # never names the member's fields, so the hatch could not disclose a
+    # missing field on the dominant call shape.
+    #
+    # ``arguments`` is passed only where the failure is against a MEMBER's
+    # schema (input validation).  Everywhere else it is omitted and the
+    # dispatcher's schema is still the right answer: an unknown resource or a
+    # tier denial is a failure against the dispatcher, and resolving inward
+    # there would describe a tool the caller never reached.
+    #
+    # ``_dispatcher_target_entry`` is reused rather than resolving here: it
+    # already carries the membership check that stops a caller-supplied
+    # ``resource`` reaching an arbitrary global tool, and it returns ``None``
+    # for class dispatchers, which deliberately resolve nothing.
+    #
+    # F1: membership is NOT sufficient on its own, and the reasoning that said
+    # it was covered only half the paths.  "``registry.dispatch`` runs its tier
+    # check before argument validation, so the member was already cleared" holds
+    # when the MEMBER's schema rejects — but when the DISPATCHER's own schema
+    # rejects (``params`` not an object) ``registry.dispatch`` raises before
+    # calling ``entry.fn``, so ``make_group_invoke``'s per-action gate never
+    # runs.  The only tier check that fired was the dispatcher's, and
+    # dispatchers are registered ``read`` deliberately so they stay visible as
+    # navigation entry-points — a no-op.  ``resource``/``action`` remain
+    # caller-supplied on that path, and ``_dispatcher_target_entry`` resolves
+    # against the GLOBAL registry with no route or tier filter of its own.
+    #
+    # So the resolved member goes back through the same gate the outer name
+    # did.  Absence has to hold on every observable surface (WI-1): a route
+    # that denies a tool, or an effective tier that hides it, must not have its
+    # contract arrive inside an error about something else.  A hidden member
+    # falls back to the dispatcher's schema — the same outcome an unroutable
+    # ``resource``/``action`` pair already produces — so self-correction is
+    # narrowed to members the caller can actually invoke, not removed.
+    #
+    # On a plain mount ``_request_visible_entry`` is the global lookup the hatch
+    # always performed, so this deliberately leaves that posture unchanged; the
+    # tier half there is tracked separately (CR-19).
+    if arguments:
+        target = _dispatcher_target_entry(entry, arguments)
+        if target is not None:
+            visible = _request_visible_entry(request, target.name)
+            if visible is not None:
+                entry = visible
     return {**content, "inputSchema": entry.input_schema}
 
 
@@ -2132,14 +2186,44 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             },
         )
     except ToolInputError as exc:
-        # Lite-mode escape hatch: when the call fails because arguments did not
-        # validate against ``inputSchema``, re-include the schema so the agent
-        # can self-correct without a separate ``tools/list`` round-trip.
-        return _lite_enrich_error(
-            _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc)),
-            tool_name,
-            _lite,
-            request,
+        # MCP 2025-11-25 (`server/tools.mdx`) splits error reporting in two:
+        # protocol errors for unknown tools, malformed requests and server
+        # errors; tool results with `isError: true` for input validation.  A
+        # failure against the tool's own `inputSchema` is the second kind.
+        # "Malformed request" is about the CallToolRequest ENVELOPE — a missing
+        # `name`, or `arguments` that is not an object, both still rejected as
+        # protocol errors above — not a missing required field inside
+        # `arguments`.
+        #
+        # This path used to answer with `_jsonrpc_error(INVALID_PARAMS,
+        # "Invalid arguments", str(exc))`, where `message` is a constant and the
+        # field name is the `data` argument.  Clients deliver `data` as null, so
+        # the agent was told only "Invalid arguments" and could not self-correct;
+        # a bad *action* enum on the same client and route displayed in full
+        # because its text travels in the payload.  Using the wrong mechanism is
+        # the defect and the unreadable `data` is its consequence, so the fix is
+        # to move the mechanism rather than to fold the detail into `message`.
+        #
+        # This also makes the path consistent with every sibling dispatcher
+        # error — unknown action, missing resource, omitted action — which
+        # already report as tool results.
+        #
+        # `_lite_enrich_error_content` is the `isError` counterpart of
+        # `_lite_enrich_error`; routing through it keeps one helper per shape
+        # rather than adding a third.
+        #
+        # ``arguments`` is passed here and at no other enrich site: this is the
+        # one failure that is against the MEMBER tool's schema, so it is the one
+        # where echoing the dispatcher's schema would answer the wrong question.
+        content = _lite_enrich_error_content(
+            {"error": str(exc), "status_code": 400}, tool_name, _lite, request, arguments
+        )
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps(content)}],
+                "isError": True,
+            },
         )
     except ToolInvocationError as exc:
         # Backend returned ToolResult.is_error=True (non-DRF exception in the ViewSet).
@@ -2304,15 +2388,36 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             # The outer entry's schema is authoritative, matching the size
             # backstop: it is the schema this caller validated against.
             #
-            # This costs tokens — affected writes now return the full result
-            # instead of a lean envelope.  That is the correct trade.  The lean
-            # envelope's "saving" was achieved by making the data unreachable,
-            # and a larger response beats a lost one.
+            # CL-9: the token is the only unusable part of the envelope, so it
+            # is the only part dropped.  CR-9 returned the FULL result here,
+            # which cost a 60-item bulk create 25 -> 7,143 tokens; the envelope
+            # itself is ordinary data and the object stays reachable by
+            # ``verify=True`` (injected into every auto-discovered write schema)
+            # or a ``retrieve`` on the id it carries.
+            #
+            # CR-9's gate is unchanged and still governs whether we MINT — this
+            # decides only what is returned instead.  Nothing is cached on this
+            # arm, so no entry is pinned for a token nobody can send back.
+            #
+            # ``_lean_envelope_without_token`` returns None when the envelope
+            # would not let the caller reach what was written (a bulk result
+            # with no ids, or a single object with no id).  Then, and only then,
+            # the full result is still the right answer — a larger response
+            # beats a confirmation the caller cannot act on.
             if _hc is None or not schema_discloses_continuation(
                 getattr(_write_entry, "input_schema", None)
             ):
+                from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
+                    _lean_envelope_without_token,
+                )
+
+                _tokenless = _lean_envelope_without_token(result, _http_status, tool_name=tool_name)
                 return _usage_success(
-                    request, request_id, result, tool_name=tool_name, usage_args=_usage_args
+                    request,
+                    request_id,
+                    result if _tokenless is None else _tokenless,
+                    tool_name=tool_name,
+                    usage_args=_usage_args,
                 )
             _hc.set(
                 f"{_HEAVY_CACHE_PREFIX}{_w_token}",

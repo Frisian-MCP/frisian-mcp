@@ -564,10 +564,19 @@ class TestToolsCall:
 
         assert data["result"]["isError"] is True
 
-    def test_tools_call_schema_validation_failure_returns_invalid_params(
+    def test_tools_call_schema_validation_failure_returns_tool_error(
         self, rf: RequestFactory
     ) -> None:
-        """tools/call with arguments failing JSON Schema returns INVALID_PARAMS error."""
+        """
+        tools/call with arguments failing JSON Schema returns an isError tool result.
+
+        **Re-aimed by CL-7, not weakened.**  This previously asserted
+        ``INVALID_PARAMS``; rejecting a bad payload is still correct and still
+        asserted, but MCP 2025-11-25 classes a failure against the tool's own
+        ``inputSchema`` as an input validation error, which is reported in the
+        tool result rather than as a protocol error.  The old mechanism put the
+        only actionable text in ``error.data``, which clients deliver as null.
+        """
         isolated = ToolRegistry()
         isolated.register(
             "typed",
@@ -590,9 +599,12 @@ class TestToolsCall:
                 )
             )
 
-        assert "error" in data
-        assert data["error"]["code"] == INVALID_PARAMS
-        assert data["error"]["message"] == "Invalid arguments"
+        assert "error" not in data, "input validation must not be a protocol error"
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert content["status_code"] == 400
+        # The detail now travels in the payload, where a client actually reads it.
+        assert "integer" in content["error"]
 
     def test_tools_call_null_arguments_defaults_to_empty(self, rf: RequestFactory) -> None:
         """tools/call with null 'arguments' defaults to an empty dict."""
