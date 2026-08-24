@@ -642,6 +642,45 @@ def _continuation_refused(request_id: Any) -> JsonResponse:
     )
 
 
+def _retrieve_counterpart_visible(request: Any, entry: Any, tool_name: str) -> bool:
+    """
+    Can *request*'s caller fetch an object written by *entry*'s tool?
+
+    The lean write envelope hands back an id instead of the payload, which is
+    only defensible while the id leads somewhere.  It does not always: a route
+    ``allow_list`` may permit ``create`` and deny ``retrieve``, the effective
+    tier may hide it, or the ViewSet may expose no ``retrieve`` at all.  In
+    those cases the envelope confirms a write the caller can never look up and
+    the server-assigned fields are gone.
+
+    Auto-discovered tools are named ``{resource}{sep}{action}`` and every action
+    on one ViewSet shares its ``resource``, so the counterpart is
+    ``{resource}{sep}retrieve``.  The resource is recovered by stripping the
+    action the registry recorded at discovery time rather than by splitting on
+    the separator: a compound action (``bulk_create``) or a resource containing
+    the separator would both mis-split, and the recorded action cannot.
+
+    Resolved through :func:`_request_visible_entry`, so route denial and tier
+    hiding are answered by the same helper that answers them everywhere else
+    (WI-1) rather than by a second rule that could disagree with it.
+
+    Returns ``False`` when the action was not recorded — the population that
+    reaches here is auto-discovered and always records one, so an absent action
+    means something unmodelled, and the safe answer is to return the payload.
+    """
+    action = getattr(entry, "perm_drf_action", None)
+    if not action:
+        return False
+    sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
+    suffix = f"{sep}{action}"
+    if not tool_name.endswith(suffix):
+        return False
+    resource = tool_name[: -len(suffix)]
+    if not resource:
+        return False
+    return _request_visible_entry(request, f"{resource}{sep}retrieve") is not None
+
+
 def _dispatcher_target_entry(entry: Any, arguments: dict[str, Any]) -> Any | None:
     """
     Resolve the entry *entry* routes to, **restricted to its own members**.
@@ -2400,10 +2439,11 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             # arm, so no entry is pinned for a token nobody can send back.
             #
             # ``_lean_envelope_without_token`` returns None when the envelope
-            # would not let the caller reach what was written (a bulk result
-            # with no ids, or a single object with no id).  Then, and only then,
-            # the full result is still the right answer — a larger response
-            # beats a confirmation the caller cannot act on.
+            # would not let the caller reach what was written — no id, no ids on
+            # a bulk result, or no ``retrieve`` visible to this caller to spend
+            # an id on.  Then, and only then, the full result is still the right
+            # answer: a larger response beats a confirmation the caller cannot
+            # act on.
             if _hc is None or not schema_discloses_continuation(
                 getattr(_write_entry, "input_schema", None)
             ):
@@ -2411,7 +2451,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     _lean_envelope_without_token,
                 )
 
-                _tokenless = _lean_envelope_without_token(result, _http_status, tool_name=tool_name)
+                _tokenless = _lean_envelope_without_token(
+                    result,
+                    _http_status,
+                    tool_name=tool_name,
+                    retrieve_reachable=_retrieve_counterpart_visible(
+                        request, _write_entry, tool_name
+                    ),
+                )
                 return _usage_success(
                     request,
                     request_id,

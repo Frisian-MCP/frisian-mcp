@@ -65,11 +65,39 @@ def _is_error(response: Any) -> bool:
     return data["result"]["isError"]
 
 
+#: DRF action names, longest first, so a compound action is matched before the
+#: bare verb it ends with (``bulk_create`` before ``create``).  Fixture-only —
+#: production reads the action off the registry entry, which records it at
+#: discovery time rather than re-deriving it from the name.
+_FIXTURE_ACTIONS: tuple[str, ...] = (
+    "bulk_partial_update",
+    "partial_update",
+    "bulk_create",
+    "bulk_update",
+    "bulk_destroy",
+    "retrieve",
+    "destroy",
+    "create",
+    "update",
+    "list",
+)
+
+
+def _fixture_action(name: str) -> str:
+    """Return the DRF action a fixture tool name ends with, or ``""``."""
+    for candidate in _FIXTURE_ACTIONS:
+        if name.endswith(f"_{candidate}"):
+            return candidate
+    return ""
+
+
 def _build_write_registry(
     name: str,
     handler: Any,
     is_heavy: bool = False,
     discloses: bool = True,
+    *,
+    with_retrieve: bool = True,
 ) -> ToolRegistry:
     """
     Return an isolated registry with a single write-marked tool.
@@ -88,6 +116,13 @@ def _build_write_registry(
     the lean path it was written for.  Pass ``discloses=False`` for the CR-9
     fallthrough: a write tool whose schema does not declare the token must get
     its result back WHOLE rather than a lean envelope it cannot redeem.
+
+    CL-17: the tokenless envelope is only emitted when a ``retrieve`` for the
+    same resource is visible to the caller, so a realistic fixture has to have
+    one.  ``with_retrieve=True`` registers that sibling, and the name is split
+    on the configured separator exactly as production names are.  Pass
+    ``with_retrieve=False`` for the write-only-resource shape, where the caller
+    is handed an id with nothing to fetch it with.
     """
     schema: dict[str, Any] = {"type": "object", "properties": {"name": {"type": "string"}}}
     if discloses:
@@ -102,7 +137,20 @@ def _build_write_registry(
         is_write=True,
         is_heavy=is_heavy,
         permission_tier="read",
+        perm_drf_action=_fixture_action(name),
     )
+    _action = _fixture_action(name)
+    resource = name[: -(len(_action) + 1)] if _action and name.endswith(f"_{_action}") else ""
+    if with_retrieve and resource:
+        isolated.register(
+            name=f"{resource}_retrieve",
+            fn=lambda arguments, request: {},
+            description="stub retrieve tool",
+            input_schema={"type": "object", "properties": {}},
+            permission_classes=[],
+            permission_tier="read",
+            perm_drf_action="retrieve",
+        )
     return isolated
 
 
@@ -264,14 +312,14 @@ class TestWritePathDefaultLean:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "device.create", {"name": "spine-1"})
+            response = _call_tool(rf, "device_create", {"name": "spine-1"})
 
         result = _tool_result(response)
         assert not _is_error(response)
@@ -294,14 +342,14 @@ class TestWritePathDefaultLean:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("obj.create", _create)
+        isolated = _build_write_registry("obj_create", _create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "obj.create", {"name": "y"})
+            response = _call_tool(rf, "obj_create", {"name": "y"})
 
         result = _tool_result(response)
         expected_size = len(json.dumps(full_object).encode())
@@ -315,14 +363,14 @@ class TestWritePathDefaultLean:
             received_args.update(arguments)
             return {"id": "1", "name": "x"}
 
-        isolated = _build_write_registry("item.create", _create)
+        isolated = _build_write_registry("item_create", _create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            _call_tool(rf, "item.create", {"name": "x", "verify": False})
+            _call_tool(rf, "item_create", {"name": "x", "verify": False})
 
         # verify must not appear in the arguments the handler received.
         assert "verify" not in received_args
@@ -333,14 +381,14 @@ class TestWritePathDefaultLean:
         def _destroy(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return {"deleted": True, "status": 204}
 
-        isolated = _build_write_registry("device.destroy", _destroy)
+        isolated = _build_write_registry("device_destroy", _destroy)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "device.destroy", {"id": "device-uuid-99"})
+            response = _call_tool(rf, "device_destroy", {"id": "device-uuid-99"})
 
         result = _tool_result(response)
         assert not _is_error(response)
@@ -367,14 +415,14 @@ class TestWritePathVerifyFull:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "device.create", {"name": "leaf-1", "verify": True})
+            response = _call_tool(rf, "device_create", {"name": "leaf-1", "verify": True})
 
         result = _tool_result(response)
         assert not _is_error(response)
@@ -396,14 +444,14 @@ class TestWritePathVerifyFull:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return {"id": "1", "name": "x"}
 
-        isolated = _build_write_registry("item.create", _create)
+        isolated = _build_write_registry("item_create", _create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            _call_tool(rf, "item.create", {"name": "x", "verify": True})
+            _call_tool(rf, "item_create", {"name": "x", "verify": True})
 
         mock_cache.set.assert_not_called()
 
@@ -415,14 +463,14 @@ class TestWritePathVerifyFull:
             received_args.update(arguments)
             return {"id": "1"}
 
-        isolated = _build_write_registry("item.create", _create)
+        isolated = _build_write_registry("item_create", _create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            _call_tool(rf, "item.create", {"name": "x", "verify": True})
+            _call_tool(rf, "item_create", {"name": "x", "verify": True})
 
         assert "verify" not in received_args
 
@@ -470,7 +518,7 @@ class TestWritePathBulkCreate:
         def _bulk_create(arguments: dict[str, Any], request: Any) -> list[dict[str, Any]]:
             return devices
 
-        isolated = _build_write_registry("devices.bulk_create", _bulk_create)
+        isolated = _build_write_registry("devices_bulk_create", _bulk_create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
@@ -478,7 +526,7 @@ class TestWritePathBulkCreate:
         ):
             mock_cache.get.return_value = None
             objects = [{"name": f"spine-{i}"} for i in range(60)]
-            response = _call_tool(rf, "devices.bulk_create", {"objects": objects})
+            response = _call_tool(rf, "devices_bulk_create", {"objects": objects})
 
         result = _tool_result(response)
         assert not _is_error(response)
@@ -508,7 +556,7 @@ class TestWritePathBulkCreate:
         def _bulk_create(arguments: dict[str, Any], request: Any) -> list[dict[str, Any]]:
             return devices
 
-        isolated = _build_write_registry("devices.bulk_create", _bulk_create)
+        isolated = _build_write_registry("devices_bulk_create", _bulk_create)
 
         # Measure lean envelope size.
         with (
@@ -517,7 +565,7 @@ class TestWritePathBulkCreate:
         ):
             mock_cache.get.return_value = None
             objects = [{"name": f"spine-{i}"} for i in range(60)]
-            response = _call_tool(rf, "devices.bulk_create", {"objects": objects})
+            response = _call_tool(rf, "devices_bulk_create", {"objects": objects})
 
         lean_result = _tool_result(response)
         lean_json = json.dumps(lean_result)
@@ -553,14 +601,14 @@ class TestWritePathBulkCreate:
         def _bulk_create(arguments: dict[str, Any], request: Any) -> list[dict[str, Any]]:
             return devices
 
-        isolated = _build_write_registry("devices.bulk_create", _bulk_create)
+        isolated = _build_write_registry("devices_bulk_create", _bulk_create)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "devices.bulk_create", {})
+            response = _call_tool(rf, "devices_bulk_create", {})
 
         result = _tool_result(response)
         expected_size = len(json.dumps(devices).encode())
@@ -602,7 +650,7 @@ class TestContinuationTokenRetrieval:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
         cache_store: dict[str, Any] = {}
 
         def _cache_set(key: str, value: Any, timeout: int) -> None:
@@ -617,7 +665,7 @@ class TestContinuationTokenRetrieval:
         ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp1 = _call_tool(rf, "device.create", {"name": "test-device"})
+            resp1 = _call_tool(rf, "device_create", {"name": "test-device"})
 
         token = _tool_result(resp1)["continuation_token"]
         assert token is not None
@@ -629,7 +677,7 @@ class TestContinuationTokenRetrieval:
         ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp2 = _call_tool(rf, "device.create", {"continuation_token": token})
+            resp2 = _call_tool(rf, "device_create", {"continuation_token": token})
 
         served = _tool_result(resp2)
         assert "chunk" not in served, "bare write-token redemption returned a JSON chunk"
@@ -642,7 +690,7 @@ class TestContinuationTokenRetrieval:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
 
         # Use a real cache dict to capture and replay the token.
         cache_store: dict[str, Any] = {}
@@ -661,7 +709,7 @@ class TestContinuationTokenRetrieval:
             mock_cache.set.side_effect = _cache_set
 
             # Call 1: lean create → receive continuation_token.
-            resp1 = _call_tool(rf, "device.create", {"name": "test-device"})
+            resp1 = _call_tool(rf, "device_create", {"name": "test-device"})
 
         lean = _tool_result(resp1)
         token = lean["continuation_token"]
@@ -674,7 +722,7 @@ class TestContinuationTokenRetrieval:
         ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp2 = _call_tool(rf, "device.create", {"continuation_token": token, "mode": "full"})
+            resp2 = _call_tool(rf, "device_create", {"continuation_token": token, "mode": "full"})
 
         full_retrieved = _tool_result(resp2)
         assert full_retrieved["id"] == full_object["id"]
@@ -688,7 +736,7 @@ class TestContinuationTokenRetrieval:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("router.create", _create)
+        isolated = _build_write_registry("router_create", _create)
         cache_store: dict[str, Any] = {}
 
         def _cache_set(key: str, value: Any, timeout: int) -> None:
@@ -704,7 +752,7 @@ class TestContinuationTokenRetrieval:
         ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp_verify = _call_tool(rf, "router.create", {"name": "router-x", "verify": True})
+            resp_verify = _call_tool(rf, "router_create", {"name": "router-x", "verify": True})
 
         # Path B: lean → token → mode=full.
         with (
@@ -713,7 +761,7 @@ class TestContinuationTokenRetrieval:
         ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp_lean = _call_tool(rf, "router.create", {"name": "router-x"})
+            resp_lean = _call_tool(rf, "router_create", {"name": "router-x"})
 
         lean = _tool_result(resp_lean)
         token = lean["continuation_token"]
@@ -725,7 +773,7 @@ class TestContinuationTokenRetrieval:
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
             resp_cont = _call_tool(
-                rf, "router.create", {"continuation_token": token, "mode": "full"}
+                rf, "router_create", {"continuation_token": token, "mode": "full"}
             )
 
         verify_result = _tool_result(resp_verify)
@@ -768,7 +816,7 @@ class TestCreatedObjectIsNotAPaginatedEnvelope:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return created
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
         cache_store: dict[str, Any] = {}
 
         def _cache_set(key: str, value: Any, timeout: int) -> None:
@@ -783,7 +831,7 @@ class TestCreatedObjectIsNotAPaginatedEnvelope:
         ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp1 = _call_tool(rf, "device.create", {"name": "test-device"})
+            resp1 = _call_tool(rf, "device_create", {"name": "test-device"})
 
         token = _tool_result(resp1)["continuation_token"]
         assert token is not None, "premise: the lean write path minted a token"
@@ -796,7 +844,7 @@ class TestCreatedObjectIsNotAPaginatedEnvelope:
         ):
             mock_cache.get.side_effect = _cache_get
             mock_cache.set.side_effect = _cache_set
-            resp2 = _call_tool(rf, "device.create", {"continuation_token": token})
+            resp2 = _call_tool(rf, "device_create", {"continuation_token": token})
 
         return _tool_result(resp2)
 
@@ -873,14 +921,14 @@ class TestMcpHeavyPrecedence:
             return full_object
 
         # Register with BOTH is_write=True and is_heavy=True.
-        isolated = _build_write_registry("hw.create", _create, is_heavy=True)
+        isolated = _build_write_registry("hw_create", _create, is_heavy=True)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "hw.create", {"name": "heavy-write"})
+            response = _call_tool(rf, "hw_create", {"name": "heavy-write"})
 
         result = _tool_result(response)
         assert not _is_error(response)
@@ -1498,14 +1546,14 @@ class TestWriteMintRequiresDisclosure:
         payload, because the token was the only unusable part of it.  The
         object stays reachable by ``verify=True`` or a ``retrieve`` on the id.
         """
-        isolated = _build_write_registry("obj.create", self._handler(), discloses=False)
+        isolated = _build_write_registry("obj_create", self._handler(), discloses=False)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "obj.create", {"name": "n1"})
+            response = _call_tool(rf, "obj_create", {"name": "n1"})
 
         result = _tool_result(response)
         assert not _is_error(response)
@@ -1522,14 +1570,14 @@ class TestWriteMintRequiresDisclosure:
         pinned entry in the shared default cache is a cost even when the caller
         never sees the token it belongs to.
         """
-        isolated = _build_write_registry("obj.create", self._handler(), discloses=False)
+        isolated = _build_write_registry("obj_create", self._handler(), discloses=False)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            _call_tool(rf, "obj.create", {"name": "n1"})
+            _call_tool(rf, "obj_create", {"name": "n1"})
             heavy_writes = [
                 call
                 for call in mock_cache.set.call_args_list
@@ -1545,14 +1593,14 @@ class TestWriteMintRequiresDisclosure:
         Without this, deleting the write-side lean envelope entirely would also
         pass the two assertions above.
         """
-        isolated = _build_write_registry("obj.create", self._handler(), discloses=True)
+        isolated = _build_write_registry("obj_create", self._handler(), discloses=True)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "obj.create", {"name": "n1"})
+            response = _call_tool(rf, "obj_create", {"name": "n1"})
 
         result = _tool_result(response)
         assert "continuation_token" in result
@@ -1573,14 +1621,14 @@ class TestWriteMintRequiresDisclosure:
         def _destroy(_arguments: dict[str, Any], _request: Any) -> Any:
             return {"deleted": True, "status": 204}
 
-        isolated = _build_write_registry("obj.destroy", _destroy, discloses=False)
+        isolated = _build_write_registry("obj_destroy", _destroy, discloses=False)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "obj.destroy", {"pk": "obj-1"})
+            response = _call_tool(rf, "obj_destroy", {"pk": "obj-1"})
 
         result = _tool_result(response)
         assert result.get("deleted") is True
@@ -1634,7 +1682,7 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
         self, rf: RequestFactory
     ) -> None:
         """The envelope survives; only the token is dropped."""
-        result = _tool_result(self._call(rf, "obj.create", self._handler(), {"name": "n1"}))
+        result = _tool_result(self._call(rf, "obj_create", self._handler(), {"name": "n1"}))
 
         assert "continuation_token" not in result
         assert result["id"] == "obj-1"
@@ -1656,7 +1704,7 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
         def _create(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
             return {"name": "n1", "bulk": "y" * 300}
 
-        result = _tool_result(self._call(rf, "obj.create", _create, {"name": "n1"}))
+        result = _tool_result(self._call(rf, "obj_create", _create, {"name": "n1"}))
 
         assert result == {"name": "n1", "bulk": "y" * 300}
 
@@ -1676,7 +1724,7 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
             return objects
 
         result = _tool_result(
-            self._call(rf, "objs.bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
+            self._call(rf, "objs_bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
         )
 
         assert "continuation_token" not in result
@@ -1692,7 +1740,7 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
             return objects
 
         result = _tool_result(
-            self._call(rf, "objs.bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
+            self._call(rf, "objs_bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
         )
 
         assert result == objects
@@ -1703,7 +1751,7 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
         def _bulk_create(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
             return []
 
-        result = _tool_result(self._call(rf, "objs.bulk_create", _bulk_create, {"objects": []}))
+        result = _tool_result(self._call(rf, "objs_bulk_create", _bulk_create, {"objects": []}))
 
         assert result == []
 
@@ -1717,14 +1765,14 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
         changes what we return *instead* of the token, never whether one is
         issued or an entry pinned in the shared cache.
         """
-        isolated = _build_write_registry("obj.create", self._handler(), discloses=False)
+        isolated = _build_write_registry("obj_create", self._handler(), discloses=False)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            _call_tool(rf, "obj.create", {"name": "n1"})
+            _call_tool(rf, "obj_create", {"name": "n1"})
             heavy_writes = [
                 call
                 for call in mock_cache.set.call_args_list
@@ -1740,14 +1788,14 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
         Asserted rather than assumed: CL-9 changes only the arm taken when the
         schema does NOT disclose.
         """
-        isolated = _build_write_registry("obj.create", self._handler(), discloses=True)
+        isolated = _build_write_registry("obj_create", self._handler(), discloses=True)
 
         with (
             patch("frisian_mcp.views.tool_registry", isolated),
             patch("frisian_mcp.views.django_cache") as mock_cache,
         ):
             mock_cache.get.return_value = None
-            response = _call_tool(rf, "obj.create", {"name": "n1"})
+            response = _call_tool(rf, "obj_create", {"name": "n1"})
 
         result = _tool_result(response)
         assert "continuation_token" in result
@@ -1762,7 +1810,7 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
         assumed from the schema.
         """
         result = _tool_result(
-            self._call(rf, "obj.create", self._handler(), {"name": "n1", "verify": True})
+            self._call(rf, "obj_create", self._handler(), {"name": "n1", "verify": True})
         )
 
         assert result == self.OBJECT
@@ -1781,12 +1829,148 @@ class TestNonDisclosingWriteKeepsTheLeanEnvelope:
             return objects
 
         envelope = _tool_result(
-            self._call(rf, "objs.bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
+            self._call(rf, "objs_bulk_create", _bulk_create, {"objects": [{"name": "n"}]})
         )
 
         whole = len(json.dumps(objects))
         lean = len(json.dumps(envelope))
         assert lean < whole / 5, f"envelope {lean}B vs whole {whole}B — not a material saving"
+
+
+class TestTokenlessEnvelopeNeedsAReachableRetrieve:
+    """
+    CL-17 — an id proves the object can be *named*, not that it can be *fetched*.
+
+    CL-9 emitted the tokenless envelope whenever an id was present.  That is
+    identifiability, not reachability, and the two come apart in three ways: a
+    route ``allow_list`` may permit ``create`` and deny ``retrieve``, the
+    effective tier may hide it, or the ViewSet may expose no ``retrieve`` at
+    all.  In each case the payload is dropped, nothing is minted, and the
+    server-assigned fields are unrecoverable — the CR-9 data-loss class that
+    this whole path exists to prevent.
+
+    ``verify=True`` does not rescue it: it is a parameter of the write that
+    already happened, so using it means issuing the write a second time.
+
+    The fallback is to return the result whole, which is the pre-CL-9
+    behaviour — never a new loss.
+    """
+
+    OBJECT = {"id": "obj-1", "name": "n1", "bulk": "y" * 300}
+
+    def _handler(self) -> Any:
+        def _create(_arguments: dict[str, Any], _request: Any) -> dict[str, Any]:
+            return dict(self.OBJECT)
+
+        return _create
+
+    @staticmethod
+    def _call(rf: RequestFactory, name: str, handler: Any, *, with_retrieve: bool) -> Any:
+        isolated = _build_write_registry(
+            name, handler, discloses=False, with_retrieve=with_retrieve
+        )
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.return_value = None
+            return _call_tool(rf, name, {"name": "n1"})
+
+    def test_no_retrieve_on_the_resource_returns_whole(self, rf: RequestFactory) -> None:
+        """
+        Row 4 — the ViewSet exposes no ``retrieve``, so the id leads nowhere.
+
+        The simplest unreachable shape, and the one that makes a write-only
+        custom action fall out correctly without being special-cased.
+        """
+        result = _tool_result(self._call(rf, "obj_create", self._handler(), with_retrieve=False))
+
+        assert result == self.OBJECT, (
+            "a tokenless envelope was emitted with no retrieve to spend the id on; " f"got {result}"
+        )
+
+    def test_bulk_with_no_retrieve_returns_whole(self, rf: RequestFactory) -> None:
+        """
+        Row 7 — ids you cannot fetch are no better than one id you cannot fetch.
+
+        The bulk arm echoes ``ids`` and asks the identical question, which the
+        original write-up did not consider.
+        """
+        objects = [{"id": f"obj-{i}", "name": f"n{i}", "bulk": "y" * 300} for i in range(5)]
+
+        def _bulk_create(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
+            return objects
+
+        result = _tool_result(self._call(rf, "objs_bulk_create", _bulk_create, with_retrieve=False))
+
+        assert result == objects
+        assert "ids" not in json.dumps(result) or isinstance(result, list)
+
+    def test_visible_retrieve_still_gets_the_lean_envelope(self, rf: RequestFactory) -> None:
+        """
+        Row 1, the control — the saving must survive the fix.
+
+        Without this cell, "always return whole" would pass every assertion
+        above while silently restoring the 286x regression CL-9 exists to fix.
+        """
+        result = _tool_result(self._call(rf, "obj_create", self._handler(), with_retrieve=True))
+
+        assert result["id"] == "obj-1"
+        assert "bulk" not in result, "the full payload came back; the saving was lost"
+
+    def test_route_denied_retrieve_returns_whole(self, rf: RequestFactory) -> None:
+        """
+        Rows 2 and 3 — the retrieve exists but is not visible to this caller.
+
+        Exercised through ``_retrieve_counterpart_visible`` directly with a
+        route view that filters it out, because the per-route mount is where
+        route denial and tier hiding actually live — and it is the same helper
+        (``_request_visible_entry``) that answers both.
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _retrieve_counterpart_visible,
+        )
+
+        isolated = _build_write_registry("obj_create", self._handler(), discloses=False)
+        write_entry = isolated.get_entry("obj_create")
+
+        class _RouteViewDenyingRetrieve:
+            """A route whose entries omit the retrieve tool."""
+
+            entries = {"obj_create": write_entry}
+
+        request = RequestFactory().post("/mcp/")
+        request.user = AnonymousUser()
+        request._mcp_route_view = _RouteViewDenyingRetrieve()  # noqa: SLF001
+
+        assert (
+            _retrieve_counterpart_visible(request, write_entry, "obj_create") is False
+        ), "a route-denied retrieve was treated as reachable"
+
+    def test_compound_action_name_resolves_the_right_resource(self, rf: RequestFactory) -> None:
+        """
+        ``objs_bulk_create`` must look for ``objs_retrieve``, not ``objs_bulk_retrieve``.
+
+        Splitting the tool name on the separator would mis-split every compound
+        action, so the resource is recovered by stripping the action the
+        registry recorded.  Pinned because the failure would be silent: every
+        bulk write would quietly return whole.
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _retrieve_counterpart_visible,
+        )
+
+        def _bulk_create(_arguments: dict[str, Any], _request: Any) -> list[dict[str, Any]]:
+            return []
+
+        isolated = _build_write_registry("objs_bulk_create", _bulk_create, discloses=False)
+        entry = isolated.get_entry("objs_bulk_create")
+
+        request = RequestFactory().post("/mcp/")
+        request.user = AnonymousUser()
+
+        with patch("frisian_mcp.views.tool_registry", isolated):
+            assert _retrieve_counterpart_visible(request, entry, "objs_bulk_create") is True
 
 
 class TestDiscoveredWriteActionsAreGovernedByTheGate:
@@ -1899,11 +2083,11 @@ class TestWriteContinuationTokenOwnerBinding:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
         cache_store: dict[str, Any] = {}
 
         resp1 = _call_with_cache(
-            rf, isolated, cache_store, "device.create", {"name": "device-A"}, "agent-A"
+            rf, isolated, cache_store, "device_create", {"name": "device-A"}, "agent-A"
         )
         token = _tool_result(resp1)["continuation_token"]
 
@@ -1912,7 +2096,7 @@ class TestWriteContinuationTokenOwnerBinding:
             rf,
             isolated,
             cache_store,
-            "device.create",
+            "device_create",
             {"continuation_token": token, "mode": "full"},
             "agent-B",
         )
@@ -1935,11 +2119,11 @@ class TestWriteContinuationTokenOwnerBinding:
         def _create(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return full_object
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
         cache_store: dict[str, Any] = {}
 
         resp1 = _call_with_cache(
-            rf, isolated, cache_store, "device.create", {"name": "device-A2"}, "agent-A"
+            rf, isolated, cache_store, "device_create", {"name": "device-A2"}, "agent-A"
         )
         token = _tool_result(resp1)["continuation_token"]
 
@@ -1958,7 +2142,7 @@ class TestWriteContinuationTokenOwnerBinding:
             rf,
             isolated,
             cache_store,
-            "device.create",
+            "device_create",
             {"continuation_token": token, "mode": "full"},
             "agent-A",
         )
@@ -1980,7 +2164,7 @@ class TestWriteContinuationTokenOwnerBinding:
         def _delete(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
             return {"deleted": True}
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
         isolated.register(
             name="device.delete",
             fn=_delete,
@@ -1993,7 +2177,7 @@ class TestWriteContinuationTokenOwnerBinding:
         cache_store: dict[str, Any] = {}
 
         resp1 = _call_with_cache(
-            rf, isolated, cache_store, "device.create", {"name": "device-B"}, "agent-A"
+            rf, isolated, cache_store, "device_create", {"name": "device-B"}, "agent-A"
         )
         token = _tool_result(resp1)["continuation_token"]
 
@@ -2024,11 +2208,11 @@ class TestWriteContinuationTokenOwnerBinding:
             calls += 1
             return full_object
 
-        isolated = _build_write_registry("device.create", _create)
+        isolated = _build_write_registry("device_create", _create)
         cache_store: dict[str, Any] = {}
 
         resp1 = _call_with_cache(
-            rf, isolated, cache_store, "device.create", {"name": "device-C"}, "agent-A"
+            rf, isolated, cache_store, "device_create", {"name": "device-C"}, "agent-A"
         )
         token = _tool_result(resp1)["continuation_token"]
         # Sanity: the first invocation hit the tool exactly once.
@@ -2038,7 +2222,7 @@ class TestWriteContinuationTokenOwnerBinding:
             rf,
             isolated,
             cache_store,
-            "device.create",
+            "device_create",
             {"continuation_token": token, "mode": "full"},
             "agent-A",
         )

@@ -38,7 +38,7 @@ frisian-mcp implements write-path response filtering as a package-level default 
 Eligible write tools return a lean confirmation envelope without agent intervention. Three envelope shapes:
 
 - **Single-object create/update:** `{id, url?, name?, status_code, data_size}`, plus `continuation_token` where the schema discloses it
-- **Bulk create/update:** `{accepted, failed, status_code, data_size}`, plus either `continuation_token` where the schema discloses it, or `ids` — the accepted objects' identifiers — where it does not
+- **Bulk create/update:** `{accepted, status_code, data_size}`, plus either `continuation_token` where the schema discloses it, or `ids` — the accepted objects' identifiers — where it does not
 - **Delete:** `{id, deleted: true, status_code}`
 
 **Lean field extraction order:**
@@ -114,7 +114,7 @@ Read and list paths are unaffected. The `verify` parameter is a no-op on read to
 
 **Negative.** The `@mcp_light_key` annotation adds a non-standard meta attribute to serializer `Meta` classes. While it follows the existing Django pattern for serializer metadata, it is frisian-mcp-specific and will not be understood by tools that inspect serializers for other purposes.
 
-**Negative.** The `data_size` field in the lean envelope reports bytes of the cached full response, not a parsed record count. For bulk operations, agents that want a record count must call the continuation token path to inspect the full response, or infer from `accepted` + `failed` in the bulk envelope.
+**Negative.** The `data_size` field in the lean envelope reports bytes of the cached full response, not a parsed record count. For bulk operations, `accepted` is the count of objects written; an agent that needs more than a count reaches the full response by `verify=True` on the call, or by the continuation token where the envelope carries one.
 
 The write-path token savings are material enough to justify the behavior change on eligible write paths. Agents building infrastructure across large datasets — the primary use case for the large Django application integrations this package targets — cannot sustain multi-step workflows without this optimization.
 

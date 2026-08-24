@@ -356,7 +356,11 @@ def _object_id(item: Any) -> Any | None:
 
 
 def _lean_envelope_without_token(
-    result: Any, http_status: int = 200, tool_name: str | None = None
+    result: Any,
+    http_status: int = 200,
+    tool_name: str | None = None,
+    *,
+    retrieve_reachable: bool,
 ) -> dict[str, Any] | None:
     """
     Build the lean write envelope with **no** ``continuation_token``.
@@ -371,24 +375,43 @@ def _lean_envelope_without_token(
     payload: a 60-item bulk create measured 25 -> 7,143.
 
     The token was the only unusable part of that envelope.  Everything else is
-    ordinary data, and the object stays reachable by two routes that are already
-    published and schema-legal — ``verify=True`` on the original call, which
-    ``backends/discovery`` injects into every auto-discovered write schema, or a
-    ``retrieve`` on the id carried here.  So the envelope is kept and the token
-    dropped, rather than the envelope abandoned.
+    ordinary data, so the envelope is kept and the token dropped — **provided
+    the caller can still fetch what was written.**
 
-    **Reachability is the precondition, and it is checked rather than assumed.**
-    A bulk envelope is ``{accepted: N, ...}`` with no ids, and a single write
-    whose serialised result carries no ``id``/``pk`` has the same problem one
-    object at a time: the caller learns that something was written and cannot
-    name it, which is worse than a large response.  Both return ``None`` here
-    and fall back to the pre-CL-9 behaviour, so the fallback is the status quo
-    and never a new loss.
+    **Reachability is the precondition, and it takes two things: an identifier,
+    and somewhere to spend it.**  Both are checked.
 
-    Bulk therefore echoes the accepted **ids** in place of the token — the
-    planned ``bulk_create`` id-echo, landing here because this is where it
-    becomes load-bearing.
+    * *Identifier* — a bulk envelope is ``{accepted: N, ...}`` with no ids, and a
+      single write whose serialised result carries no ``id``/``pk`` has the same
+      problem one object at a time.  Bulk therefore echoes the accepted **ids**
+      in place of the token (the planned ``bulk_create`` id-echo, landing here
+      because this is where it becomes load-bearing); a single write without one
+      returns ``None``.
+    * *Somewhere to spend it* — ``retrieve_reachable`` says whether a
+      ``retrieve`` for this resource is visible to **this caller on this route**.
+      An id proves the object can be named, not that it can be fetched: a route
+      may allow ``create`` and deny ``retrieve``, the effective tier may hide it,
+      or the ViewSet may expose no ``retrieve`` at all.  In those cases dropping
+      the payload loses the server-assigned fields outright — the CR-9 data-loss
+      class this whole path exists to prevent.
+
+    ``retrieve_reachable`` is **required, not defaulted**, so a future call site
+    has to answer the question rather than inherit an assumption.
+
+    ⚠️ ``verify=True`` is deliberately **not** counted as a recovery route,
+    though an earlier version of this docstring claimed it.  It is a parameter of
+    the write that already happened: by the time a caller holds this envelope the
+    choice is spent, and obtaining the object would mean issuing the write a
+    second time.  It is a pre-call preference, not a way back.
+
+    Every ``None`` here falls back to returning *result* whole — the pre-CL-9
+    behaviour — so the fallback is the status quo and never a new loss.
     """
+    # Asked first: without somewhere to spend an identifier, no envelope this
+    # function can build is usable, whatever the result shape.
+    if not retrieve_reachable:
+        return None
+
     # Built on _extract_lean_envelope so the two cannot disagree about what the
     # envelope contains; only the token differs.
     envelope = _extract_lean_envelope(result, "", http_status, tool_name=tool_name)
