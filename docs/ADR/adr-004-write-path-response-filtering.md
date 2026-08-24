@@ -114,7 +114,7 @@ Read and list paths are unaffected. The `verify` parameter is a no-op on read to
 
 **Negative.** The `@mcp_light_key` annotation adds a non-standard meta attribute to serializer `Meta` classes. While it follows the existing Django pattern for serializer metadata, it is frisian-mcp-specific and will not be understood by tools that inspect serializers for other purposes.
 
-**Negative.** The `data_size` field in the lean envelope reports bytes of the cached full response, not a parsed record count. For bulk operations, `accepted` is the count of objects written; an agent that needs more than a count reaches the full response by `verify=True` on the call, or by the continuation token where the envelope carries one.
+**Negative.** The `data_size` field in the lean envelope reports the byte length of the serialized write response — it is computed from that response when the envelope is built, independently of whether anything is cached, so it is present and means the same thing on the tokenless path. It is not a parsed record count. For bulk operations, `accepted` is the count of objects written; an agent that needs more than a count reaches the full response by `verify=True` on the call, or by the continuation token where the envelope carries one.
 
 The write-path token savings are material enough to justify the behavior change on eligible write paths. Agents building infrastructure across large datasets — the primary use case for the large Django application integrations this package targets — cannot sustain multi-step workflows without this optimization.
 
@@ -140,7 +140,7 @@ Status remains **Accepted**. This amendment records what the 2026-08-22 entry be
 
 Outcome 2 is only defensible because the object stays reachable without the token, and it does: `verify=True` is injected into every auto-discovered write schema, and the identifier in the envelope supports a `retrieve`. Both are published and schema-legal. Nothing is cached on that path.
 
-**Consequence for the reduction figure.** The lean envelope is no longer a constant size. Where it carries `ids`, it grows with the batch, so the original claim that the 99.8% reduction "holds at any bulk size" is wrong in shape, not merely stale in its number. The saving on that path is properly stated as a bound rather than a fixed percentage: on the 60-item fixture the tokenless bulk envelope measured well under a fifth of the full echo. Outcomes 1 and 3 are unaffected.
+**Consequence for the reduction figure.** The lean envelope is no longer a constant size. Where it carries `ids`, it grows with the batch, so the original claim that the 99.8% reduction "holds at any bulk size" is wrong in shape, not merely stale in its number. The saving on that path is properly stated as a bound rather than a fixed percentage: on the 60-item fixture the tokenless bulk envelope measured well under a fifth of the full echo. Outcome 1 keeps a constant-size envelope, but 99.8% was never batch-invariant there either — it is this fixture's measurement, and because the echo grows while the envelope does not, the proportion saved rises with the batch rather than holding steady.
 
 ### 2026-08-22 — write lean envelope now gates on published schema disclosure
 

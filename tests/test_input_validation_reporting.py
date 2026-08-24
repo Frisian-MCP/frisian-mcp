@@ -336,13 +336,34 @@ class TestEscapeHatchEchoesTheFailingToolsSchema:
 
         The failure here is against the *dispatcher's* own schema, so the
         dispatcher's schema is the correct thing to echo.
+
+        ``lite`` is required: the escape hatch is opt-in, so without it no
+        schema is attached at all and there is nothing to assert about. This
+        previously guarded the assertion behind ``if "inputSchema" in content``
+        and omitted the flag, which made the branch unreachable and the test
+        vacuous -- it passed without checking anything.
+
+        Both directions are asserted, mirroring
+        ``test_escape_hatch_echoes_the_member_schema``. The positive alone would
+        still pass if inward resolution fired when it must not, and "resolves
+        nothing" is the half this test exists for.
+
+        The call omits ``resource``, so there is genuinely no member to resolve
+        to. The previous version passed ``resource="thing"`` -- which names a
+        member perfectly well -- so it never exercised the fallback its own
+        docstring describes.
         """
         with patch("frisian_mcp.views.tool_registry", group_registry):
-            body = _call(rf, "grp", {"resource": "thing", "action": "create", "params": 5})
+            body = _call(rf, "grp", {"action": "create", "params": 5, "lite": True})
 
-        content = _tool_error_content(body)
-        if "inputSchema" in content:
-            assert "params" in content["inputSchema"]["properties"]
+        schema = _tool_error_content(body)["inputSchema"]
+        assert "params" in schema["properties"], (
+            "the dispatcher's own schema was not echoed; "
+            f"got {sorted(schema.get('properties', {}))}"
+        )
+        assert (
+            "alpha" not in schema["properties"]
+        ), "resolved inward to the member schema on a call that names no member"
 
 
 # ---------------------------------------------------------------------------

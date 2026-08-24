@@ -181,7 +181,7 @@ An agent creating 60 devices in a network automation session:
 
 Without write-path filtering, the same call returns the full serialized echo of all 60 devices — approximately 10,798 tokens — before the agent has done anything with the result. A multi-step provisioning session of four or five such operations would consume tens of thousands of context tokens from echoes alone.
 
-The 60-device measurement represents a 99.8% token reduction from the full echo to the envelope carrying a continuation token. **That envelope is a fixed size, so the figure holds at any bulk size; the tokenless envelope is not, and the figure does not carry over to it.** Where the token is replaced by the accepted ids, the envelope grows with the batch, and the saving is properly read as a bound rather than a fixed percentage — on the same 60-item fixture it measured well under a fifth of the full echo. Either way the envelope stays far smaller than the echo; only the constant-size claim is specific to the token path.
+The 60-device measurement represents a 99.8% token reduction from the full echo to the envelope carrying a continuation token. **That percentage is this fixture's measurement, not a batch-size invariant.** The echo grows linearly with the batch while a tokenized envelope does not, so the proportion saved rises with batch size rather than holding at 99.8% — a smaller batch saves proportionally less. Where the token is replaced by the accepted ids the envelope grows with the batch too, and the saving is properly read as a bound: on this same 60-item fixture, well under a fifth of the full echo. Either way the envelope stays far smaller than the echo.
 
 ---
 
@@ -192,7 +192,7 @@ The 60-device measurement represents a 99.8% token reduction from the full echo 
 - `@mcp_heavy` handles **read-path response bloat**: list responses where the result size is unknown at call time
 - `@mcp_light` handles **write-path response bloat**: echo responses where the agent already provided the data
 
-When either feature applies, the continuation token mechanism is shared: both cache large responses server-side and return a token the agent can use to retrieve the full result. The cache infrastructure is the same; only the trigger differs. (`@mcp_heavy` IS a real decorator that the host app applies to a tool; `@mcp_light` is a feature name only — it is package-level and applies automatically on write paths. What the published schema discloses decides whether the envelope carries a continuation token, not whether the envelope applies.)
+Where a continuation token is issued, the mechanism is shared: the large response is cached server-side and the token is what the agent uses to retrieve it. The cache infrastructure is the same for both features; only the trigger differs. **A write that issues no token uses neither** — nothing is cached, and the full object is reached by `verify=True` or by a `retrieve` on the identifier the envelope carries. (`@mcp_heavy` IS a real decorator that the host app applies to a tool; `@mcp_light` is a feature name only — it is package-level and applies automatically on write paths. What the published schema discloses decides whether the envelope carries a continuation token, not whether the envelope applies.)
 
 If a custom action both reads and writes and the read path is decorated with `@mcp_heavy`, `@mcp_heavy` takes precedence. Write-path lean envelope behavior applies only on pure write paths where `@mcp_heavy` is not in effect.
 

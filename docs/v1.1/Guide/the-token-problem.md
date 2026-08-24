@@ -175,7 +175,7 @@ Unlike result payload bloat, write-echo bloat is structurally predictable: the a
 
 ### The @mcp_light Solution
 
-The `@mcp_light` feature applies a lean confirmation envelope by default to write operations whose published schema discloses the continuation call. Instead of echoing the full serialized object, frisian-mcp returns a small set of identifying fields plus metadata:
+The `@mcp_light` feature applies a lean confirmation envelope by default to write operations. What the published schema discloses decides whether that envelope carries a continuation token or the written object's identifier, not whether the envelope applies. Instead of echoing the full serialized object, frisian-mcp returns a small set of identifying fields plus metadata:
 
 **Single-object create or update:**
 
@@ -215,7 +215,7 @@ Reduction:                             99.8%
 Per-device object size:               ~603 tokens (~3,800 bytes)
 ```
 
-The full echo grows linearly with bulk size, so the larger the operation, the greater the absolute saving. The 99.8% figure itself holds at any bulk size only where the envelope carries a continuation token, which is a fixed-size structure. Where it instead carries the accepted ids, the envelope grows with the batch and the saving is a bound rather than a fixed percentage — on the same fixture, well under a fifth of the full echo.
+**99.8% is what was measured on this 60-item fixture, not a constant.** The full echo grows linearly with bulk size while an envelope carrying a continuation token does not, so on that path the proportion saved *rises* with the batch rather than holding steady — a smaller batch saves proportionally less. Where the envelope instead carries the accepted ids it grows with the batch, and the saving is properly read as a bound: on this same fixture, well under a fifth of the full echo.
 
 ### Full Object Access
 

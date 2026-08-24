@@ -28,10 +28,16 @@ from tests._mcp_mock_guard import mock_fabrication_guard
 # Set ``PYTHONPATH=<copy>/src`` to actually exercise a copy.  Measured, both
 # directions, with a marker added to the copy only:
 #
-#     cd <copy> && python -c "import frisian_mcp; frisian_mcp.__file__"
+#     cd <copy> && python -c "import frisian_mcp; print(frisian_mcp.__file__)"
 #       -> <original>/src/frisian_mcp/__init__.py   (marker absent)
-#     cd <copy> && PYTHONPATH=<copy>/src python -c "..."
+#     cd <copy> && PYTHONPATH=<copy>/src \
+#         python -c "import frisian_mcp; print(frisian_mcp.__file__)"
 #       -> <copy>/src/frisian_mcp/__init__.py       (marker present)
+#
+# ``print()`` is load-bearing: ``python -c`` evaluates an expression but does
+# not echo it the way the REPL does, so the bare attribute access above used to
+# produce a blank line -- a check that silently answered nothing, in the note
+# written to stop this trap costing anyone else a day.
 #
 # What makes it expensive is that the run is a HYBRID, not simply "the original
 # re-tested": pytest collects the tests from the COPY (they are cwd-relative)
