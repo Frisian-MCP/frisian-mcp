@@ -106,6 +106,43 @@ class _PerActionSerializerViewSet(ViewSet):
         return Response({})
 
 
+class _DecoratorSerializerViewSet(ViewSet):
+    """
+    Per-action selection in the form DRF actually documents.
+
+    ``@action(serializer_class=...)`` is the canonical spelling;
+    :class:`_PerActionSerializerViewSet` above uses a hand-written
+    ``get_serializer_class()`` branch, which is the *other* way to say the same
+    thing.  Only the hand-written form was covered, so the decorator form —
+    the one a host is most likely to reach for — went unread entirely.
+
+    DRF's decorator stores these on the method (``func.kwargs``); its router
+    merges them into the dynamic route's initkwargs and ``as_view()`` applies
+    them.  Discovery builds the ViewSet directly and never went through
+    ``as_view()``, so it saw only the class-level ``serializer_class``.
+    """
+
+    serializer_class = _ParentSerializer
+
+    def get_serializer_class(self) -> type[serializers.Serializer]:
+        """Return whatever the view currently declares — no per-action branch."""
+        return self.serializer_class
+
+    def create(self, request: Request) -> Response:
+        """Standard create."""
+        return Response({}, status=201)
+
+    @action(detail=True, methods=["post"], serializer_class=_AttachmentSerializer)
+    def annotate(self, request: Request, pk: str | None = None) -> Response:
+        """A custom action naming its serializer on the decorator."""
+        return Response({})
+
+    @action(detail=True, methods=["post"])
+    def touch(self, request: Request, pk: str | None = None) -> Response:
+        """A custom action naming nothing — the conservative branch."""
+        return Response({})
+
+
 def _schema(view_class: type, action_name: str) -> dict[str, Any]:
     return DRFSyncDiscovery().get_input_schema(view_class, action_name)
 
@@ -131,15 +168,22 @@ class TestCustomActionDoesNotInheritParentRequired:
             f"got {sorted(required)}"
         )
 
-    def test_the_parents_create_contract_is_not_disclosed_on_the_custom_action(
+    def test_the_parents_required_fields_are_not_inherited_by_the_custom_action(
         self,
     ) -> None:
         """
         Stated as absence of the specific field names, not as a count.
 
-        The live report was that a read-tier caller could read the resource's
-        whole create contract off a read-ish action.  Naming the fields is what
-        makes this fail for the right reason.
+        Scoped to ``required`` deliberately, and the name says so.  The
+        implementation still merges the parent serializer's ``properties`` on
+        purpose — an over-broad *optional* property is a hint, while an
+        over-broad *required* one is a call the caller cannot make — so the
+        parent's field names do remain published here.  An earlier name claimed
+        the contract was not "disclosed", which is a stronger statement than
+        this assertion makes and would be a poor foundation to build on.
+
+        Naming the fields rather than counting them is what makes it fail for
+        the right reason.
         """
         required = _schema(_FixedSerializerViewSet, "annotate").get("required", [])
 
@@ -193,3 +237,61 @@ class TestStandardWriteActionsAreUnchanged:
         schema = _schema(_FixedSerializerViewSet, "partial_update")
 
         assert "required" not in schema
+
+
+# ---------------------------------------------------------------------------
+# The decorator form of per-action serializer selection
+# ---------------------------------------------------------------------------
+
+
+class TestDecoratorDeclaredActionSerializer:
+    """
+    ``@action(serializer_class=...)`` must be honoured, like the written-out form.
+
+    The gap is not a regression — the same bare ``view_class()`` predates this
+    work — but it makes the feature appear broken on its canonical spelling:
+    the action published the *parent's* properties, so its own field was absent
+    entirely and no caller could supply it, however willing.
+    """
+
+    def test_the_actions_own_field_is_published(self) -> None:
+        """The action's field must appear in properties at all."""
+        props = _schema(_DecoratorSerializerViewSet, "annotate").get("properties", {})
+
+        assert "body" in props, (
+            "the action's own field is absent from its schema; " f"published {sorted(props)}"
+        )
+
+    def test_the_actions_own_field_is_required(self) -> None:
+        """It is required on the serializer, so it must be required here."""
+        required = _schema(_DecoratorSerializerViewSet, "annotate").get("required", [])
+
+        assert "body" in required
+
+    def test_the_parents_create_contract_is_not_imposed(self) -> None:
+        """The parent's required fields must not be demanded of the action."""
+        schema = _schema(_DecoratorSerializerViewSet, "annotate")
+        required = set(schema.get("required", []))
+        props = set(schema.get("properties", {}))
+
+        assert not (required & {"name", "origin", "contact"})
+        assert not (props & {"name", "origin", "contact"}), (
+            "the parent's fields are still published on the action; " f"got {sorted(props)}"
+        )
+
+    def test_an_action_naming_nothing_is_unchanged(self) -> None:
+        """
+        The conservative branch still applies when the host has said nothing.
+
+        Pinned so the fix is scoped to hosts that made a declaration, rather
+        than changing what CL-14 decided for hosts that did not.
+        """
+        required = _schema(_DecoratorSerializerViewSet, "touch").get("required", [])
+
+        assert not (set(required) & {"name", "origin", "contact"})
+
+    def test_standard_create_is_unaffected(self) -> None:
+        """``create`` has no decorator kwargs and must keep the parent contract."""
+        required = _schema(_DecoratorSerializerViewSet, "create").get("required", [])
+
+        assert set(required) >= {"name", "origin", "contact"}

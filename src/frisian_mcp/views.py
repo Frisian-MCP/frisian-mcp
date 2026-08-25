@@ -2396,6 +2396,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             )
         from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
             _extract_lean_envelope,
+            _object_id,
         )
 
         _w_token = secrets.token_urlsafe(16)
@@ -2468,10 +2469,29 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 )
             _hc.set(
                 f"{_HEAVY_CACHE_PREFIX}{_w_token}",
-                # A write result is the object that was just written, not a
-                # list envelope — say so, so redemption does not mistake one of
-                # its fields for a paginated payload.
-                _build_heavy_cache_entry(result, request, tool_name, single_object=True),
+                # ``single_object`` is a claim about the RESULT, not about
+                # the tool's tier.  It was stamped unconditionally here on the
+                # reasoning that a write result is the object just written —
+                # true for the standard write actions, false for the rest.
+                # ``is_write`` is derived from the router's HTTP method, so
+                # every custom ``@action(methods=["post"])`` is auto-discovered
+                # as a write; a POST-search action returns a paginated envelope
+                # through this same mint and stopped paging.
+                #
+                # An extractable id is the discriminator: an object carries one
+                # and its lists are attributes, an envelope carries none and its
+                # one list IS the payload.  Deriving it from the action instead
+                # is wrong in both directions — it re-breaks GH #66 for custom
+                # write actions, and keeps this defect for ``create`` itself.
+                #
+                # Residual, accepted: an id-less single object with exactly one
+                # list field paginates.  It is indistinguishable from a one-page
+                # envelope by shape, and it took this same arm before
+                # ``single_object`` existed, so this restores that behaviour
+                # rather than regressing it.
+                _build_heavy_cache_entry(
+                    result, request, tool_name, single_object=_object_id(result) is not None
+                ),
                 _heavy_cache_ttl(),
             )
         elif _lean.get("deleted") is True:
@@ -2498,6 +2518,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 )
             from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
                 _extract_lean_envelope,
+                _object_id,
             )
 
             _w_token = secrets.token_urlsafe(16)
@@ -2518,13 +2539,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     f"{_HEAVY_CACHE_PREFIX}{_w_token}",
                     # ADR-011 §5: bind the server-resolved child, not the outer
                     # dispatcher name, so redemption has something to re-authorize.
-                    # single_object: as on the flat write path above.
+                    # single_object: derived from the result, as on the flat
+                    # write path above and for the same reasons.
                     _build_heavy_cache_entry(
                         result,
                         request,
                         tool_name,
                         getattr(_d_entry, "name", None),
-                        single_object=True,
+                        single_object=_object_id(result) is not None,
                     ),
                     _heavy_cache_ttl(),
                 )

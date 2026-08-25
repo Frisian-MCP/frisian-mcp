@@ -906,6 +906,129 @@ class TestCreatedObjectIsNotAPaginatedEnvelope:
 
 
 # ---------------------------------------------------------------------------
+# A write result that IS a list envelope must keep paginating
+# ---------------------------------------------------------------------------
+
+
+class TestWriteEnvelopeStillPaginates:
+    """
+    ``single_object`` is a claim about the *result*, not about the tool's tier.
+
+    Both write mint sites stamped it unconditionally, on the reasoning that a
+    write result is the object that was just written.  That holds for the
+    standard write actions and not for the rest: ``is_write`` is derived from
+    the router's HTTP method, so **every** custom ``@action(methods=["post"])``
+    is auto-discovered as a write, with no host opt-in.  A POST-search action —
+    the ordinary idiom for filters too complex for a query string — returns a
+    paginated envelope through that same mint, and stopped paging.
+
+    The shape below is a dict, deliberately: a top-level list takes the
+    ``isinstance(result, list)`` arm in ``_serve_heavy_mode`` and never reaches
+    the envelope lookup, so a list fixture cannot fail on this defect.
+
+    Covered on **both** mint sites.  They are separate code paths, and this
+    board's recurring defect is fixing one and leaving the other.
+    """
+
+    #: A DRF paginated envelope: one list-valued key, which is the payload.
+    PAGE: dict[str, Any] = {
+        "count": 60,
+        "next": None,
+        "previous": None,
+        "results": [{"id": i, "name": f"row-{i}"} for i in range(60)],
+    }
+
+    def test_flat_write_returning_an_envelope_paginates(self, rf: RequestFactory) -> None:
+        """A custom POST action's paginated envelope redeems as a page, not whole."""
+        served = TestCreatedObjectIsNotAPaginatedEnvelope._redeem(rf, self.PAGE)
+
+        assert served.get("envelope_payload_key") == "results", (
+            "a write result that IS a list envelope was served whole; " f"got keys {sorted(served)}"
+        )
+        assert served["total"] == 60
+        assert len(served["items"]) < 60, "the whole payload came back in one page"
+
+    def test_dispatcher_write_returning_an_envelope_paginates(self, rf: RequestFactory) -> None:
+        """Same result through the group dispatcher's own mint site."""
+
+        def _search(arguments: dict[str, Any], request: Any) -> dict[str, Any]:
+            return self.PAGE
+
+        builder = TestDispatcherGroupWritePath()
+        isolated = builder._build_dispatcher_registry({"device_search": (_search, True)})
+        cache_store: dict[str, Any] = {}
+
+        def _cache_set(key: str, value: Any, timeout: int) -> None:
+            cache_store[key] = value
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.side_effect = cache_store.get
+            mock_cache.set.side_effect = _cache_set
+            resp1 = _call_tool(
+                rf,
+                "dcim",
+                {"resource": "device", "action": "search", "params": {"name": "spine"}},
+            )
+
+        token = _tool_result(resp1).get("continuation_token")
+        assert token is not None, "premise: the dispatcher write path minted a token"
+
+        with (
+            patch("frisian_mcp.views.tool_registry", isolated),
+            patch("frisian_mcp.views.django_cache") as mock_cache,
+        ):
+            mock_cache.get.side_effect = cache_store.get
+            mock_cache.set.side_effect = _cache_set
+            resp2 = _call_tool(rf, "dcim", {"continuation_token": token})
+
+        served = _tool_result(resp2)
+
+        assert served.get("envelope_payload_key") == "results", (
+            "dispatcher-routed write envelope was served whole; " f"got keys {sorted(served)}"
+        )
+        assert served["total"] == 60
+        assert len(served["items"]) < 60
+
+    def test_created_object_is_still_served_whole(self, rf: RequestFactory) -> None:
+        """
+        The GH #66 fix is not traded away to get the above.
+
+        This is the shape ``single_object`` was introduced for.  Narrowing the
+        flag must keep it whole, or the fix has simply moved the defect.
+        """
+        created = {"id": "uuid-68", "name": "test-device", "labels": [], "payload": "x" * 4000}
+
+        served = TestCreatedObjectIsNotAPaginatedEnvelope._redeem(rf, created)
+
+        assert "envelope_payload_key" not in served
+        assert served == created
+
+    def test_id_less_single_object_is_the_accepted_hole(self, rf: RequestFactory) -> None:
+        """
+        The residual gap, pinned deliberately rather than left to be discovered.
+
+        An id-less result with exactly one list field is indistinguishable from
+        a one-page envelope by shape alone, so it paginates.  This is **not** a
+        regression against ``main``, where ``single_object`` does not exist and
+        this shape took the same arm; it is narrower than the defect it
+        replaces, and it is recorded here so the next reader finds a decision
+        rather than a surprise.
+
+        If this shape ever needs to be served whole, the discriminator would
+        have to be size-based (does the list hold most of the bytes?), which is
+        a third rule and was deliberately not adopted here.
+        """
+        idless = {"status": "ok", "warnings": [], "payload": "x" * 4000}
+
+        served = TestCreatedObjectIsNotAPaginatedEnvelope._redeem(rf, idless)
+
+        assert served.get("envelope_payload_key") == "warnings"
+
+
+# ---------------------------------------------------------------------------
 # @mcp_heavy takes precedence when both flags present
 # ---------------------------------------------------------------------------
 

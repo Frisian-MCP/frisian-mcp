@@ -157,6 +157,21 @@ def _resolve_unauthenticated_tier() -> str:
 #: each item individually.  Mirrors ``_LIST_BODY_KEYS`` in ``backends.invocation``.
 _BULK_LIST_BODY_KEYS: frozenset[str] = frozenset({"objects", "data", "items", "_items", "body"})
 
+#: Argument-tree positions where a list supplied for an object genuinely means
+#: "the bulk body arrived without its wrapper", so the wrapper keys above are
+#: the remedy.  Exactly two, enumerated against the real dispatch shapes:
+#:
+#:   ()            the arguments themselves are the list  (flat tool)
+#:   ("params",)   the dispatcher payload is the list     (both dispatcher kinds)
+#:
+#: Anywhere else the object-typed thing is a HOST serializer field — a JSON or
+#: nested-serializer field that happens to have received a list — and wrapping
+#: cannot make the call valid, so the advice would name the wrong field and
+#: send the caller somewhere there is nothing to find.  Matched exactly rather
+#: than by prefix: ``("params", "metadata")`` is a host field inside a grouped
+#: call, and a prefix test would admit it.
+_BULK_LIST_WRAPPABLE_PATHS: frozenset[tuple[str, ...]] = frozenset({(), ("params",)})
+
 #: Recognised role-keys for ``FRISIAN_MCP_TOKEN_TIER_MAP`` lookup.  Probed in
 #: this order against ``request.user`` attributes — the first match wins.
 _TOKEN_TIER_MAP_ROLE_PROBES: tuple[tuple[str, str], ...] = (
@@ -398,10 +413,18 @@ def format_validation_errors(schema: dict[str, Any], instance: Any) -> str | Non
         # *instance* because the value is usually NESTED — a grouped call fails
         # on ``params``, so the top-level instance is an ordinary arguments
         # dict and only the failing sub-value is the list.
+        #
+        # Restricted to the positions where wrapping is actually the remedy
+        # (see _BULK_LIST_WRAPPABLE_PATHS).  Unrestricted, ANY object-typed
+        # host field receiving a list was told to wrap it under a bulk key —
+        # advice that cannot make the call valid and names a field the caller
+        # never mentioned.  This function exists to end correction loops, so a
+        # confidently wrong remedy is the one failure it must not produce.
         if (
             error.validator == "type"
             and error.validator_value == "object"
             and isinstance(error.instance, list)
+            and tuple(error.absolute_path) in _BULK_LIST_WRAPPABLE_PATHS
         ):
             sent_list_for_object = True
     if not seen:

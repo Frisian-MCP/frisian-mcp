@@ -539,6 +539,19 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         )
         viewset.format_kwarg = None
         viewset.action = action
+        # ``@action(serializer_class=...)`` is the canonical way to select a
+        # serializer per action, and it does not reach the class: DRF's
+        # decorator parks the kwargs on the method, its router merges them into
+        # the dynamic route's initkwargs, and ``as_view()`` applies them with
+        # setattr.  Building the ViewSet directly skips all of that, so redo
+        # the one assignment that selects the serializer.  Only that key is
+        # applied — DRF also injects ``name`` and ``description`` into the same
+        # dict, and neither belongs on a synthetic view.  An overridden
+        # ``get_serializer_class()`` still wins, because it is consulted after
+        # this, which is the order ``as_view()`` produces.
+        action_kwargs = getattr(getattr(view_class, action, None), "kwargs", None)
+        if isinstance(action_kwargs, dict) and "serializer_class" in action_kwargs:
+            viewset.serializer_class = action_kwargs["serializer_class"]
         return viewset.get_serializer_class()
 
     def _inherits_parent_required(self, view_class: type, action: str) -> bool:

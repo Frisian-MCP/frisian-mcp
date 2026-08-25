@@ -108,6 +108,43 @@ def flat_registry() -> ToolRegistry:
     return isolated
 
 
+#: The same shape plus an object-typed property.  A host field declared
+#: ``{"type": "object"}`` — a JSON column or a nested serializer — is the shape
+#: that made the wrapper hint fire where wrapping cannot help.
+_OBJECT_FIELD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "alpha": {"type": "string"},
+        "metadata": {"type": "object"},
+    },
+    "required": ["alpha"],
+}
+
+
+@pytest.fixture()
+def object_field_registry() -> ToolRegistry:
+    """Return a registry whose flat tool declares an object-typed field."""
+    isolated = ToolRegistry()
+    isolated.register(
+        name="thing_create",
+        fn=lambda arguments, request: {"ok": True},
+        description="stub",
+        input_schema=_OBJECT_FIELD_SCHEMA,
+        permission_classes=[],
+        permission_tier="read",
+    )
+    isolated.register(
+        name="grp",
+        fn=make_group_invoke("grp", frozenset({"thing_create"}), isolated),
+        description="group",
+        input_schema=build_group_input_schema(),
+        permission_classes=[],
+        permission_tier="read",
+        group_tool_names=frozenset({"thing_create"}),
+    )
+    return isolated
+
+
 @pytest.fixture()
 def group_registry() -> ToolRegistry:
     """Return a registry whose group dispatcher routes to the flat tool."""
@@ -423,6 +460,83 @@ class TestBareListErrorNamesTheWrapperKeys:
             body = _call(rf, "thing_create", {})
 
         assert "wrap it under" not in _tool_error_content(body)["error"]
+
+    def test_object_typed_host_field_is_not_told_to_wrap(
+        self, rf: RequestFactory, object_field_registry: ToolRegistry
+    ) -> None:
+        """
+        A host field that happens to be object-typed is not a missing wrapper.
+
+        ``{"metadata": []}`` against ``{"metadata": {"type": "object"}}`` is a
+        list-for-object mismatch like the bulk shape, and was answered with the
+        same remedy.  Wrapping cannot make this call valid, and the keys named
+        are not fields this tool has — so the caller is sent to correct
+        something that was never the problem.  This function exists to end
+        correction loops; a confidently wrong remedy is the one failure mode it
+        must not add.
+        """
+        with patch("frisian_mcp.views.tool_registry", object_field_registry):
+            body = _call(rf, "thing_create", {"alpha": "a", "metadata": []})
+
+        message = _tool_error_content(body)["error"]
+
+        assert "is not of type 'object'" in message, "the diagnosis itself must survive"
+        assert "wrap it under" not in message, (
+            "an object-typed host field was told to wrap its value under a bulk key; "
+            f"got {message!r}"
+        )
+
+    def test_object_typed_field_inside_a_grouped_call_is_not_told_to_wrap(
+        self, rf: RequestFactory, object_field_registry: ToolRegistry
+    ) -> None:
+        """
+        The nested position, which a prefix test would wrongly admit.
+
+        Here the failing path is ``("params", "metadata")``.  Only ``()`` and
+        ``("params",)`` mean the body arrived unwrapped, so the match is exact
+        rather than "starts with params" — this cell is what makes that
+        distinction fail if it is ever loosened.
+        """
+        with patch("frisian_mcp.views.tool_registry", object_field_registry):
+            body = _call(
+                rf,
+                "grp",
+                {
+                    "resource": "thing",
+                    "action": "create",
+                    "params": {"alpha": "a", "metadata": []},
+                },
+            )
+
+        message = _tool_error_content(body)["error"]
+
+        assert "is not of type 'object'" in message, "the diagnosis itself must survive"
+        assert "wrap it under" not in message
+
+    def test_flat_bare_list_still_names_the_keys(
+        self, rf: RequestFactory, object_field_registry: ToolRegistry
+    ) -> None:
+        """
+        The positive direction, on the SAME registry as the negatives above.
+
+        Without this the two negative cells would pass just as well against a
+        hint that never fires at all, which is worth nothing.  Same tool, same
+        schema — only the position of the list differs.
+        """
+        from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
+            _BULK_LIST_BODY_KEYS,
+        )
+
+        with patch("frisian_mcp.views.tool_registry", object_field_registry):
+            body = _call(
+                rf,
+                "grp",
+                {"resource": "thing", "action": "create", "params": [{"alpha": "a"}]},
+            )
+
+        message = _tool_error_content(body)["error"]
+        for key in _BULK_LIST_BODY_KEYS:
+            assert key in message, f"accepted wrapper key {key!r} not named in the error"
 
 
 # ---------------------------------------------------------------------------
