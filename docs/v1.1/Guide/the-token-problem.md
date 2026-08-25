@@ -175,7 +175,7 @@ Unlike result payload bloat, write-echo bloat is structurally predictable: the a
 
 ### The @mcp_light Solution
 
-The `@mcp_light` feature applies a lean confirmation envelope by default to write operations. What the published schema discloses decides whether that envelope carries a continuation token or the written object's identifier, not whether the envelope applies. Instead of echoing the full serialized object, frisian-mcp returns a small set of identifying fields plus metadata:
+The `@mcp_light` feature applies a lean confirmation envelope by default to write operations. What the published schema discloses decides whether that envelope carries a continuation token, not whether the envelope applies. Instead of echoing the full serialized object, frisian-mcp returns a small set of identifying fields plus metadata:
 
 **Single-object create or update:**
 
@@ -215,11 +215,11 @@ Reduction:                             99.8%
 Per-device object size:               ~603 tokens (~3,800 bytes)
 ```
 
-**99.8% is what was measured on this 60-item fixture, not a constant.** The full echo grows linearly with bulk size while an envelope carrying a continuation token does not, so on that path the proportion saved *rises* with the batch rather than holding steady — a smaller batch saves proportionally less. Where the envelope instead carries the accepted ids it grows with the batch, and the saving is properly read as a bound: on this same fixture, well under a fifth of the full echo.
+**99.8% is what was measured on this 60-item fixture, not a constant.** The full echo grows linearly with bulk size while an envelope carrying a continuation token does not, so on that path the proportion saved *rises* with the batch rather than holding steady — a smaller batch saves proportionally less. Where the envelope instead carries the accepted ids it grows with the batch, so batch size largely cancels and the saving is properly read as the ratio of identifier length to serialized object size: on this same fixture, well under a fifth of the full echo. A host with thinner write serializers, or longer identifiers, will see a larger fraction.
 
 ### Full Object Access
 
-Where the calling tool's published schema discloses continuation, the lean envelope includes a `continuation_token`, and the agent can retrieve the full serialized result via the heavy-fetch path without re-executing the write. Where it does not, the envelope carries the written object's identifier instead, and the object is reached with a `retrieve`. In either case, an agent that needs the full result immediately can pass `verify=True` on the write call to receive the complete echo inline — that route is available on every write.
+Where the calling tool's published schema discloses continuation, the lean envelope includes a `continuation_token`, and the agent can retrieve the full serialized result via the heavy-fetch path without re-executing the write. Where it does not, a single-object envelope carries the same identifying fields without the token, and a bulk envelope carries the accepted `ids` in place of it; either way the object is reached with a `retrieve`. In either case, an agent that needs the full result immediately can pass `verify=True` on the write call to receive the complete echo inline — that route is available on every write.
 
 See [Write-Path Response Filtering](write-path-response-filtering.md) for the full developer guide, including `@mcp_light_key` serializer annotation.
 
