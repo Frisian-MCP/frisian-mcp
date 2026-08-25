@@ -34,7 +34,6 @@ from frisian_mcp.backends.dispatcher import (
     _build_dispatcher_input_schema,
     _make_dispatcher_invoke,
 )
-from frisian_mcp.protocol import INVALID_PARAMS
 from frisian_mcp.registry import ToolRegistry
 from frisian_mcp.views import McpView
 
@@ -325,32 +324,51 @@ class TestLiteStrippedFromArguments:
 class TestLiteFailureEscapeHatch:
     """A failing ``tools/call`` with ``lite: true`` re-includes ``inputSchema``."""
 
-    def test_lite_bad_params_includes_input_schema_on_invalid_params_error(
+    def test_lite_bad_params_includes_input_schema_on_tool_error(
         self, rf: RequestFactory, plain_registry: ToolRegistry
     ) -> None:
-        """An invalid-args JSON-RPC error embeds the failing tool's schema."""
+        """
+        An invalid-args failure embeds the failing tool's schema.
+
+        **Re-aimed by CL-7, not weakened.**  The escape hatch is unchanged in
+        substance — a failed call under ``lite`` still re-includes the schema so
+        the agent can self-correct.  Only the carrier moved: input-schema
+        validation is now an ``isError`` tool result, so the schema rides in the
+        content block via ``_lite_enrich_error_content`` rather than in
+        ``error.data``.  That is the point of the change: ``error.data`` is the
+        field clients deliver as null.
+        """
         with patch("frisian_mcp.views.tool_registry", plain_registry):
             # ``msg`` is required by the schema; omit it to provoke validation.
             data = _response_data(_call(rf, "echo", {"lite": True}))
 
-        assert data["error"]["code"] == INVALID_PARAMS
-        err_data = data["error"]["data"]
-        assert isinstance(err_data, dict), "lite-mode error.data must be a dict"
-        schema = err_data["inputSchema"]
+        assert "error" not in data
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        schema = content["inputSchema"]
         assert schema["type"] == "object"
         assert "msg" in schema["properties"]
-        # The original error string is preserved under ``detail``.
-        assert isinstance(err_data["detail"], str)
+        # The original error string is preserved alongside it.
+        assert isinstance(content["error"], str)
 
-    def test_lite_false_bad_params_returns_string_data(
+    def test_lite_false_bad_params_omits_input_schema(
         self, rf: RequestFactory, plain_registry: ToolRegistry
     ) -> None:
-        """Without ``lite``, the error data stays a plain string (unchanged)."""
+        """
+        Without ``lite``, no schema is attached.
+
+        **Re-aimed by CL-7.**  This asserted that ``error.data`` stayed a plain
+        string; the invariant it protects is that the escape hatch is opt-in,
+        which is now asserted on the content block instead.
+        """
         with patch("frisian_mcp.views.tool_registry", plain_registry):
             data = _response_data(_call(rf, "echo", {}))
 
-        assert data["error"]["code"] == INVALID_PARAMS
-        assert isinstance(data["error"]["data"], str)
+        assert "error" not in data
+        assert data["result"]["isError"] is True
+        content = json.loads(data["result"]["content"][0]["text"])
+        assert "inputSchema" not in content
+        assert isinstance(content["error"], str)
 
     def test_lite_value_error_includes_input_schema_in_iserror_content(
         self, rf: RequestFactory

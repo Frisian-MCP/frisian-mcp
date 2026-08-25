@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 from collections.abc import Generator
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from django.test import override_settings
@@ -405,9 +406,143 @@ class TestLiteEscapeHatchAbsence:
             {"name": "item_create", "arguments": {"lite": True}},
             user=_StubUser(),
         )
-        error = _rpc_error(response)
-        assert isinstance(error["data"], dict)
-        assert "inputSchema" in error["data"]
+        # CL-7: input-schema validation now reports as a tool result with
+        # isError=true rather than a JSON-RPC error, so the escape hatch is
+        # asserted on the content block.  The invariant is unchanged — a
+        # route-VISIBLE tool still self-teaches, where an absent one must not.
+        result = _rpc_result(response)
+        assert result["isError"] is True
+        content = json.loads(result["content"][0]["text"])
+        assert "inputSchema" in content
+
+    # -- CL-13 / F1: the inward resolve must not route around WI-1 -----------
+    #
+    # CL-7 made the hatch resolve inward on a grouped call so it echoes the
+    # schema of the member that actually failed, rather than the dispatcher's.
+    # Its justification was that ``registry.dispatch`` runs its tier check
+    # before argument validation, so the member had already been cleared.
+    #
+    # That holds when the MEMBER's schema rejects.  It does not hold when the
+    # DISPATCHER's own schema rejects: ``registry.dispatch`` raises before
+    # calling ``entry.fn``, so ``make_group_invoke``'s per-action gate never
+    # runs, and the only tier check that fired was the dispatcher's own — and
+    # dispatchers are registered ``read`` deliberately so they stay visible as
+    # navigation entry-points.  ``resource``/``action`` are caller-supplied and
+    # still read on that path, and ``_dispatcher_target_entry`` checks
+    # membership only, against the global registry.
+    #
+    # Both arms are pinned below so the fix cannot be credited with repairing
+    # the case that already worked.
+
+    @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read"))
+    def test_grouped_dispatcher_schema_failure_does_not_leak_a_hidden_member(
+        self, registry: ToolRegistry
+    ) -> None:
+        """
+        **A** — the dispatcher's own schema rejects, and the member is hidden here.
+
+        ``params`` is typed ``object``; a string fails the *dispatcher's*
+        schema, so nothing ever routes to ``item_create``.  On this capped route
+        ``item_create`` is ``read_write`` above a ``read`` ceiling — the very
+        tool the test above proves is reported nonexistent — so its contract
+        must not arrive inside an error about something else.
+        """
+        view = _mount(_cfg("default", GATEWAY), registry)
+        # `_dispatcher_target_entry` resolves against the GLOBAL registry, so it
+        # is patched here to match production, where every route view is built
+        # from a populated one.  Without this the inward resolve cannot fire at
+        # all and the test passes for the wrong reason.
+        with patch("frisian_mcp.views.tool_registry", registry):
+            response = _post_jsonrpc(
+                view,
+                GATEWAY,
+                "tools/call",
+                {
+                    "name": "catalog",
+                    "arguments": {
+                        "resource": "item",
+                        "action": "create",
+                        "params": "notanobject",
+                        "lite": True,
+                    },
+                },
+                user=_StubUser(),
+            )
+
+        result = _rpc_result(response)
+        assert result["isError"] is True
+        content = json.loads(result["content"][0]["text"])
+        schema = content.get("inputSchema")
+        if schema is None:
+            return  # No hatch at all is also absence-preserving.
+        properties = schema.get("properties", {})
+        assert "name" not in properties, (
+            "the hidden member's input contract leaked through the escape hatch; "
+            f"echoed properties were {sorted(properties)}"
+        )
+        assert schema.get("required") != ["name"]
+        # Positively: what came back is the dispatcher's own shape.
+        assert "params" in properties
+
+    @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read_write"))
+    def test_grouped_member_schema_failure_still_self_teaches(self, registry: ToolRegistry) -> None:
+        """
+        **B** — the control. A member the caller CAN reach still self-teaches.
+
+        This is the case CL-7's justification actually described, and it must
+        keep working: the fix narrows the echo to visible members rather than
+        removing it.
+        """
+        view = _mount(_cfg("elevated", GATEWAY_ELEVATED, highest_tier="read_write"), registry)
+        with patch("frisian_mcp.views.tool_registry", registry):
+            response = _post_jsonrpc(
+                view,
+                GATEWAY_ELEVATED,
+                "tools/call",
+                {
+                    "name": "catalog",
+                    "arguments": {
+                        "resource": "item",
+                        "action": "create",
+                        "params": {},
+                        "lite": True,
+                    },
+                },
+                user=_StubUser(),
+            )
+
+        result = _rpc_result(response)
+        assert result["isError"] is True
+        content = json.loads(result["content"][0]["text"])
+        assert "name" in content["inputSchema"]["properties"], (
+            "self-correction was lost for a member the caller can invoke; "
+            "the fix must narrow the echo, not remove it"
+        )
+
+    @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read"))
+    def test_plain_mount_posture_is_unchanged(self, registry: ToolRegistry) -> None:
+        """
+        No ``RouteView`` means no route filtering — deliberately unchanged.
+
+        On a plain mount ``_request_visible_entry`` is the same global lookup
+        the hatch always performed, and the tier half there is the separately
+        tracked CR-19 gap.  Asserted so this fix is not quietly widened into
+        one it was told not to make.
+        """
+        from frisian_mcp.views import (  # pylint: disable=import-outside-toplevel
+            _lite_enrich_error_content,
+        )
+
+        with patch("frisian_mcp.views.tool_registry", registry):
+            enriched = _lite_enrich_error_content(
+                {"error": "boom"},
+                "catalog",
+                True,
+                None,
+                {"resource": "item", "action": "create"},
+            )
+
+        assert "name" in enriched["inputSchema"]["properties"]
 
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read"))
     def test_capped_route_help_respects_effective_tier(self, registry: ToolRegistry) -> None:

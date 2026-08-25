@@ -431,6 +431,8 @@ def _build_heavy_cache_entry(
     tool_name: str,
     resolved_target: str | None = None,
     resolved_action: str | None = None,
+    *,
+    single_object: bool = False,
 ) -> dict[str, Any]:
     """
     Wrap *result* with the SEC-3 owner-binding metadata for the cache.
@@ -458,6 +460,17 @@ def _build_heavy_cache_entry(
     Recorded at mint because that is the action the server actually dispatched.
     The redemption call's own ``action`` argument is caller-supplied and is
     deliberately **not** consulted.
+
+    ``single_object`` records that *result* is one written object rather than a
+    list-shaped response, so redemption does not go looking for a list payload
+    inside it (see :func:`_serve_heavy_mode`).  Set by the two **write** mint
+    sites and by neither read site.  It is carried rather than inferred because
+    a created object and a paginated envelope are both dicts — exactly the
+    ambiguity :func:`_envelope_payload_key` declines to guess at.  The mint site
+    is the only place that knows which one this is.
+
+    Stored only when true, so an entry's shape is unchanged for every existing
+    caller.
     """
     entry: dict[str, Any] = {
         "result": result,
@@ -467,6 +480,8 @@ def _build_heavy_cache_entry(
     }
     if resolved_action is not None:
         entry["resolved_action"] = resolved_action
+    if single_object:
+        entry["single_object"] = True
     return entry
 
 
@@ -627,6 +642,45 @@ def _continuation_refused(request_id: Any) -> JsonResponse:
     )
 
 
+def _retrieve_counterpart_visible(request: Any, entry: Any, tool_name: str) -> bool:
+    """
+    Can *request*'s caller fetch an object written by *entry*'s tool?
+
+    The lean write envelope hands back an id instead of the payload, which is
+    only defensible while the id leads somewhere.  It does not always: a route
+    ``allow_list`` may permit ``create`` and deny ``retrieve``, the effective
+    tier may hide it, or the ViewSet may expose no ``retrieve`` at all.  In
+    those cases the envelope confirms a write the caller can never look up and
+    the server-assigned fields are gone.
+
+    Auto-discovered tools are named ``{resource}{sep}{action}`` and every action
+    on one ViewSet shares its ``resource``, so the counterpart is
+    ``{resource}{sep}retrieve``.  The resource is recovered by stripping the
+    action the registry recorded at discovery time rather than by splitting on
+    the separator: a compound action (``bulk_create``) or a resource containing
+    the separator would both mis-split, and the recorded action cannot.
+
+    Resolved through :func:`_request_visible_entry`, so route denial and tier
+    hiding are answered by the same helper that answers them everywhere else
+    (WI-1) rather than by a second rule that could disagree with it.
+
+    Returns ``False`` when the action was not recorded — the population that
+    reaches here is auto-discovered and always records one, so an absent action
+    means something unmodelled, and the safe answer is to return the payload.
+    """
+    action = getattr(entry, "perm_drf_action", None)
+    if not action:
+        return False
+    sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
+    suffix = f"{sep}{action}"
+    if not tool_name.endswith(suffix):
+        return False
+    resource = tool_name[: -len(suffix)]
+    if not resource:
+        return False
+    return _request_visible_entry(request, f"{resource}{sep}retrieve") is not None
+
+
 def _dispatcher_target_entry(entry: Any, arguments: dict[str, Any]) -> Any | None:
     """
     Resolve the entry *entry* routes to, **restricted to its own members**.
@@ -753,7 +807,9 @@ def _envelope_payload_key(result: Any) -> str | None:
     return list_keys[0] if len(list_keys) == 1 else None
 
 
-def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
+def _serve_heavy_mode(
+    result: Any, mode: str, arguments: dict[str, Any], *, single_object: bool = False
+) -> Any:
     """
     Serve a cached heavy result in the requested response mode.
 
@@ -772,6 +828,13 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
     caller entirely.  The caller never reaches here without a
     ``continuation_token``, so the absent-mode default is applied by the
     redemption path rather than here.
+
+    ``single_object`` is the mint site's statement that *result* is one written
+    object rather than a list-shaped response.  It suppresses only the
+    envelope-payload-key lookup in ``paginated``; every other mode is
+    unaffected, and a ``list`` result still paginates normally so a bulk write
+    pages as it should.  It defaults to ``False`` — see the ``paginated``
+    branch for why that direction is the safe one.
     """
     if mode == "full":
         return result
@@ -814,7 +877,33 @@ def _serve_heavy_mode(result: Any, mode: str, arguments: dict[str, Any]) -> Any:
         # host field: an envelope is a dict with exactly one list-valued key.
         # Ambiguity is not guessed at — zero or several lists means we cannot
         # tell which is the payload, and the result is returned whole as before.
-        payload_key = None if isinstance(result, list) else _envelope_payload_key(result)
+        #
+        # CL-6: H23 was right about list endpoints and wrong about one shape it
+        # could not see.  A *created object* is also a dict, and its own
+        # representation often has exactly one list-valued field — which then
+        # satisfies the envelope test and is served as the payload, usually
+        # empty on a fresh create.  Redemption reported `total: 0` with the
+        # created object displaced into `envelope`, so a client reading the
+        # payload concluded nothing had been created.  Two list fields returned
+        # `None` and behaved correctly, which is why it stayed hidden.
+        #
+        # The shapes are indistinguishable here by construction, so the fact is
+        # carried from the mint site rather than inferred. This does NOT change
+        # how the payload key is found within a genuine list envelope.
+        #
+        # Only the *lookup* is suppressed, not pagination: a bulk write caches a
+        # list at the top level and still pages normally, because a list has no
+        # envelope key to find in the first place.
+        #
+        # The default is False on purpose, and the direction matters: entries
+        # minted before this shipped carry no such key and are read with
+        # `.get()`.  Defaulting to True would stop in-flight READ entries
+        # paginating for the remainder of their TTL — a worse fault than this
+        # one, on the dominant path.  Old write entries keep this bug until
+        # they age out; that is the acceptable side of the trade.
+        payload_key = (
+            None if single_object or isinstance(result, list) else _envelope_payload_key(result)
+        )
         if not isinstance(result, list) and payload_key is None:
             return result
 
@@ -1130,7 +1219,11 @@ def _log_audit_context(
 
 
 def _lite_enrich_error_content(
-    content: dict[str, Any], tool_name: str, lite: bool, request: Any = None
+    content: dict[str, Any],
+    tool_name: str,
+    lite: bool,
+    request: Any = None,
+    arguments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Attach the failing tool's ``inputSchema`` to an ``isError`` content dict.
@@ -1149,6 +1242,10 @@ def _lite_enrich_error_content(
         lite: The per-call ``lite`` flag extracted from arguments.
         request: The current request; scopes the entry lookup to the route
             view and effective tier when present.
+        arguments: The call's arguments.  When supplied **and** *tool_name* is
+            a group dispatcher that routes them to one of its members, the
+            member's schema is echoed instead of the dispatcher's — see below.
+            Omit it to keep the dispatcher's own schema.
 
     Returns:
         Either *content* unchanged, or a new dict with ``"inputSchema"``
@@ -1160,6 +1257,52 @@ def _lite_enrich_error_content(
     entry = _request_visible_entry(request, tool_name)
     if entry is None:
         return content
+    # The entry is looked up by the name the CALLER invoked, which on a grouped
+    # call is the dispatcher.  Echoing its schema hands back
+    # ``{resource, action, params}`` — the shape the caller already had — and
+    # never names the member's fields, so the hatch could not disclose a
+    # missing field on the dominant call shape.
+    #
+    # ``arguments`` is passed only where the failure is against a MEMBER's
+    # schema (input validation).  Everywhere else it is omitted and the
+    # dispatcher's schema is still the right answer: an unknown resource or a
+    # tier denial is a failure against the dispatcher, and resolving inward
+    # there would describe a tool the caller never reached.
+    #
+    # ``_dispatcher_target_entry`` is reused rather than resolving here: it
+    # already carries the membership check that stops a caller-supplied
+    # ``resource`` reaching an arbitrary global tool, and it returns ``None``
+    # for class dispatchers, which deliberately resolve nothing.
+    #
+    # F1: membership is NOT sufficient on its own, and the reasoning that said
+    # it was covered only half the paths.  "``registry.dispatch`` runs its tier
+    # check before argument validation, so the member was already cleared" holds
+    # when the MEMBER's schema rejects — but when the DISPATCHER's own schema
+    # rejects (``params`` not an object) ``registry.dispatch`` raises before
+    # calling ``entry.fn``, so ``make_group_invoke``'s per-action gate never
+    # runs.  The only tier check that fired was the dispatcher's, and
+    # dispatchers are registered ``read`` deliberately so they stay visible as
+    # navigation entry-points — a no-op.  ``resource``/``action`` remain
+    # caller-supplied on that path, and ``_dispatcher_target_entry`` resolves
+    # against the GLOBAL registry with no route or tier filter of its own.
+    #
+    # So the resolved member goes back through the same gate the outer name
+    # did.  Absence has to hold on every observable surface (WI-1): a route
+    # that denies a tool, or an effective tier that hides it, must not have its
+    # contract arrive inside an error about something else.  A hidden member
+    # falls back to the dispatcher's schema — the same outcome an unroutable
+    # ``resource``/``action`` pair already produces — so self-correction is
+    # narrowed to members the caller can actually invoke, not removed.
+    #
+    # On a plain mount ``_request_visible_entry`` is the global lookup the hatch
+    # always performed, so this deliberately leaves that posture unchanged; the
+    # tier half there is tracked separately (CR-19).
+    if arguments:
+        target = _dispatcher_target_entry(entry, arguments)
+        if target is not None:
+            visible = _request_visible_entry(request, target.name)
+            if visible is not None:
+                entry = visible
     return {**content, "inputSchema": entry.input_schema}
 
 
@@ -1943,7 +2086,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
         # select the most expensive response by accident.
         _mode: str = arguments.get("mode", DEFAULT_NEGOTIATION_MODE)
         try:
-            served = _serve_heavy_mode(cached["result"], _mode, arguments)
+            served = _serve_heavy_mode(
+                cached["result"],
+                _mode,
+                arguments,
+                # Absent on entries minted before this shipped, and on every
+                # read entry; `.get` keeps both on the existing behaviour.
+                single_object=bool(cached.get("single_object", False)),
+            )
         except ToolInputError as exc:
             _log_audit_context(
                 request, tool_name, arguments, decision="deny", reason="continuation_bad_mode"
@@ -2075,14 +2225,44 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             },
         )
     except ToolInputError as exc:
-        # Lite-mode escape hatch: when the call fails because arguments did not
-        # validate against ``inputSchema``, re-include the schema so the agent
-        # can self-correct without a separate ``tools/list`` round-trip.
-        return _lite_enrich_error(
-            _jsonrpc_error(request_id, INVALID_PARAMS, "Invalid arguments", str(exc)),
-            tool_name,
-            _lite,
-            request,
+        # MCP 2025-11-25 (`server/tools.mdx`) splits error reporting in two:
+        # protocol errors for unknown tools, malformed requests and server
+        # errors; tool results with `isError: true` for input validation.  A
+        # failure against the tool's own `inputSchema` is the second kind.
+        # "Malformed request" is about the CallToolRequest ENVELOPE — a missing
+        # `name`, or `arguments` that is not an object, both still rejected as
+        # protocol errors above — not a missing required field inside
+        # `arguments`.
+        #
+        # This path used to answer with `_jsonrpc_error(INVALID_PARAMS,
+        # "Invalid arguments", str(exc))`, where `message` is a constant and the
+        # field name is the `data` argument.  Clients deliver `data` as null, so
+        # the agent was told only "Invalid arguments" and could not self-correct;
+        # a bad *action* enum on the same client and route displayed in full
+        # because its text travels in the payload.  Using the wrong mechanism is
+        # the defect and the unreadable `data` is its consequence, so the fix is
+        # to move the mechanism rather than to fold the detail into `message`.
+        #
+        # This also makes the path consistent with every sibling dispatcher
+        # error — unknown action, missing resource, omitted action — which
+        # already report as tool results.
+        #
+        # `_lite_enrich_error_content` is the `isError` counterpart of
+        # `_lite_enrich_error`; routing through it keeps one helper per shape
+        # rather than adding a third.
+        #
+        # ``arguments`` is passed here and at no other enrich site: this is the
+        # one failure that is against the MEMBER tool's schema, so it is the one
+        # where echoing the dispatcher's schema would answer the wrong question.
+        content = _lite_enrich_error_content(
+            {"error": str(exc), "status_code": 400}, tool_name, _lite, request, arguments
+        )
+        return _jsonrpc_success(
+            request_id,
+            {
+                "content": [{"type": "text", "text": json.dumps(content)}],
+                "isError": True,
+            },
         )
     except ToolInvocationError as exc:
         # Backend returned ToolResult.is_error=True (non-DRF exception in the ViewSet).
@@ -2216,6 +2396,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             )
         from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
             _extract_lean_envelope,
+            _object_id,
         )
 
         _w_token = secrets.token_urlsafe(16)
@@ -2247,19 +2428,70 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
             # The outer entry's schema is authoritative, matching the size
             # backstop: it is the schema this caller validated against.
             #
-            # This costs tokens — affected writes now return the full result
-            # instead of a lean envelope.  That is the correct trade.  The lean
-            # envelope's "saving" was achieved by making the data unreachable,
-            # and a larger response beats a lost one.
+            # CL-9: the token is the only unusable part of the envelope, so it
+            # is the only part dropped.  CR-9 returned the FULL result here,
+            # which cost a 60-item bulk create 25 -> 7,143 tokens; the envelope
+            # itself is ordinary data and the object stays reachable by
+            # ``verify=True`` (injected into every auto-discovered write schema)
+            # or a ``retrieve`` on the id it carries.
+            #
+            # CR-9's gate is unchanged and still governs whether we MINT — this
+            # decides only what is returned instead.  Nothing is cached on this
+            # arm, so no entry is pinned for a token nobody can send back.
+            #
+            # ``_lean_envelope_without_token`` returns None when the envelope
+            # would not let the caller reach what was written — no id, no ids on
+            # a bulk result, or no ``retrieve`` visible to this caller to spend
+            # an id on.  Then, and only then, the full result is still the right
+            # answer: a larger response beats a confirmation the caller cannot
+            # act on.
             if _hc is None or not schema_discloses_continuation(
                 getattr(_write_entry, "input_schema", None)
             ):
+                from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
+                    _lean_envelope_without_token,
+                )
+
+                _tokenless = _lean_envelope_without_token(
+                    result,
+                    _http_status,
+                    tool_name=tool_name,
+                    retrieve_reachable=_retrieve_counterpart_visible(
+                        request, _write_entry, tool_name
+                    ),
+                )
                 return _usage_success(
-                    request, request_id, result, tool_name=tool_name, usage_args=_usage_args
+                    request,
+                    request_id,
+                    result if _tokenless is None else _tokenless,
+                    tool_name=tool_name,
+                    usage_args=_usage_args,
                 )
             _hc.set(
                 f"{_HEAVY_CACHE_PREFIX}{_w_token}",
-                _build_heavy_cache_entry(result, request, tool_name),
+                # ``single_object`` is a claim about the RESULT, not about
+                # the tool's tier.  It was stamped unconditionally here on the
+                # reasoning that a write result is the object just written —
+                # true for the standard write actions, false for the rest.
+                # ``is_write`` is derived from the router's HTTP method, so
+                # every custom ``@action(methods=["post"])`` is auto-discovered
+                # as a write; a POST-search action returns a paginated envelope
+                # through this same mint and stopped paging.
+                #
+                # An extractable id is the discriminator: an object carries one
+                # and its lists are attributes, an envelope carries none and its
+                # one list IS the payload.  Deriving it from the action instead
+                # is wrong in both directions — it re-breaks GH #66 for custom
+                # write actions, and keeps this defect for ``create`` itself.
+                #
+                # Residual, accepted: an id-less single object with exactly one
+                # list field paginates.  It is indistinguishable from a one-page
+                # envelope by shape, and it took this same arm before
+                # ``single_object`` existed, so this restores that behaviour
+                # rather than regressing it.
+                _build_heavy_cache_entry(
+                    result, request, tool_name, single_object=_object_id(result) is not None
+                ),
                 _heavy_cache_ttl(),
             )
         elif _lean.get("deleted") is True:
@@ -2286,6 +2518,7 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                 )
             from frisian_mcp.backends.invocation import (  # pylint: disable=import-outside-toplevel
                 _extract_lean_envelope,
+                _object_id,
             )
 
             _w_token = secrets.token_urlsafe(16)
@@ -2306,8 +2539,14 @@ def _handle_tools_call(  # pylint: disable=too-many-locals,too-many-return-state
                     f"{_HEAVY_CACHE_PREFIX}{_w_token}",
                     # ADR-011 §5: bind the server-resolved child, not the outer
                     # dispatcher name, so redemption has something to re-authorize.
+                    # single_object: derived from the result, as on the flat
+                    # write path above and for the same reasons.
                     _build_heavy_cache_entry(
-                        result, request, tool_name, getattr(_d_entry, "name", None)
+                        result,
+                        request,
+                        tool_name,
+                        getattr(_d_entry, "name", None),
+                        single_object=_object_id(result) is not None,
                     ),
                     _heavy_cache_ttl(),
                 )

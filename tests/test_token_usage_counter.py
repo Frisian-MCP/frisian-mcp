@@ -5,11 +5,28 @@ Pure, Django-free helpers: pinned ``cl100k_base`` counting with a deterministic
 and the real cl100k_base golden vectors only when the optional tiktoken extra is
 installed (marked ``usage_real_tokenizer``).
 
-NOTE on provenance: this default CI venv has NO tiktoken, so
-``encoding_name()`` reports ``"approx-char4"`` and every count here runs the
-character-based fallback.  The golden-vector class documents the real numbers
-and asserts them the moment ``frisian-mcp[usage]`` (+ ``TIKTOKEN_CACHE_DIR`` for
-offline) makes the real encoder available -- that is the drift guard.
+NOTE on provenance -- CI and a bare local venv do NOT agree, and the difference
+is not in a consistent direction:
+
+* **CI counts the real ``cl100k_base``.**  Every job in ``pr-validation.yml``
+  installs with ``uv sync --all-extras``, which includes the ``usage`` extra,
+  and ``uv.lock`` resolves tiktoken, so the golden-vector class below is
+  expected to run rather than skip.  It is not guaranteed to: the encoder still
+  has to LOAD, and the ranks are fetched over the network on first use unless a
+  ``TIKTOKEN_CACHE_DIR`` is populated.  If that load fails, ``_load_encoder()``
+  collapses to ``None``, counting drops to the fallback, and the golden-vector
+  class skips -- silently, as a pass.  Read ``encoding_name()`` rather than
+  assuming which path was active.
+* **A bare local venv counts ``approx-char4``.**  Without the extra,
+  ``encoding_name()`` reports the fallback and the golden-vector class skips.
+
+So a token-budget assertion written against local numbers can pass locally and
+fail in CI, or the reverse.  Pin counts against the encoding you name, and use
+``tiktoken_available()`` to branch -- never assume the ambient one.
+
+The fallback maths below is pinned unconditionally; the golden-vector class
+documents the real numbers and asserts them whenever the real encoder loads --
+that is the drift guard.
 """
 
 from __future__ import annotations
@@ -97,8 +114,14 @@ class TestGoldenVectorsRealTokenizer:
     """Real cl100k_base golden vectors -- the drift guard for TUR-2.
 
     Skipped unless the optional ``frisian-mcp[usage]`` extra provides a working
-    encoder.  A tiktoken bump that shifts any of these counts should fail HERE
-    (and the nightly canary) rather than silently changing every ``_usage``.
+    encoder.  When it does, a tiktoken bump that shifts any of these counts
+    fails HERE rather than silently changing every ``_usage`` block.
+
+    Installing the extra is NOT sufficient: ``setup_method`` below asks
+    ``tiktoken_available()``, which is false whenever the encoder fails to load
+    (see the module docstring), and a failed load skips this class as a pass.
+    So this is a best-effort drift guard, not a mandatory one -- drift can cross
+    CI green on a run where the encoder never loaded.
     """
 
     GOLDEN = {

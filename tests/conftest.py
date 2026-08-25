@@ -15,6 +15,49 @@ from frisian_mcp.registry import ToolRegistry
 from tests._mcp_mock_guard import mock_fabrication_guard
 
 # ---------------------------------------------------------------------------
+# Testing from an isolated copy of the tree — read this first
+# ---------------------------------------------------------------------------
+#
+# The package is installed editable, so site-packages holds a ``.pth`` file
+# containing the ABSOLUTE path of this checkout's ``src/``.  ``import
+# frisian_mcp`` therefore resolves to the LIVE tree no matter what directory
+# you run pytest from.  Copying the repo somewhere else and running the suite
+# there does NOT test the copy — it re-tests the original, from inside a
+# directory that looks isolated.
+#
+# Set ``PYTHONPATH=<copy>/src`` to actually exercise a copy.  Measured, both
+# directions, with a marker added to the copy only:
+#
+#     cd <copy> && python -c "import frisian_mcp; print(frisian_mcp.__file__)"
+#       -> <original>/src/frisian_mcp/__init__.py   (marker absent)
+#     cd <copy> && PYTHONPATH=<copy>/src \
+#         python -c "import frisian_mcp; print(frisian_mcp.__file__)"
+#       -> <copy>/src/frisian_mcp/__init__.py       (marker present)
+#
+# ``print()`` is load-bearing: ``python -c`` evaluates an expression but does
+# not echo it the way the REPL does, so the bare attribute access above used to
+# produce a blank line -- a check that silently answered nothing, in the note
+# written to stop this trap costing anyone else a day.
+#
+# What makes it expensive is that the run is a HYBRID, not simply "the original
+# re-tested": pytest collects the tests from the COPY (they are cwd-relative)
+# while ``import frisian_mcp`` resolves to the ORIGINAL's ``src``.  So you are
+# running the copy's tests against the original's source.  Measured — a test
+# present only in the copy was collected, ran, and failed, with
+# ``frisian_mcp.__file__`` pointing at the original.
+#
+# **Neither colour is self-certifying.**  A green may mean the fix works, or
+# that the original was already green.  A red may mean the change is wrong, or
+# merely that the copy's tests do not hold against the original's source —
+# which is what you would expect when the change under test is the thing that
+# is missing.  A red does NOT prove the isolation worked.
+#
+# So confirm which tree was imported BEFORE interpreting either result.
+# Cheapest check is to print ``frisian_mcp.__file__`` first.
+#
+# This has cost real debugging time more than once.
+
+# ---------------------------------------------------------------------------
 # H22 — fabrication guard, active for the whole suite
 # ---------------------------------------------------------------------------
 #

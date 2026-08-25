@@ -271,9 +271,16 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             existing.update(serializer_schema.get("properties", {}))
             # Merge required lists, preserving id if present.
             # partial_update (PATCH) makes all body fields optional — skip required merge.
+            #
+            # A custom action only inherits these when the ViewSet actually
+            # selected a serializer for it; otherwise the parent's create
+            # contract would be demanded by an action that never consumes it.
+            # See _inherits_parent_required.  ``properties`` are still merged
+            # either way: an over-broad optional property is a hint, while an
+            # over-broad ``required`` entry is a call the caller cannot make.
             if action != "partial_update":
                 extra_required: list[str] = serializer_schema.get("required", [])
-                if extra_required:
+                if extra_required and self._inherits_parent_required(view_class, action):
                     current_required: list[str] = schema.get("required", [])
                     merged = list({*current_required, *extra_required})
                     schema["required"] = merged
@@ -509,24 +516,85 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             )
             logger.debug("frisian_mcp discovered tool %s.%s", resource, action_name)
 
+    @staticmethod
+    def _serializer_class_for(view_class: type, action: str) -> Any:
+        """
+        Resolve the serializer class *view_class* selects for *action*.
+
+        Returns ``None`` when resolution fails.  ``viewset.action`` is set
+        before asking, which is how DRF lets a ViewSet return a different
+        serializer per action — the mechanism :meth:`_inherits_parent_required`
+        relies on.
+        """
+        viewset = view_class()
+        # Use a minimal stub request so that get_serializer_class() implementations
+        # that inspect self.request.method or self.request.user do not raise
+        # AttributeError.  The stub carries the most common write-action method
+        # (POST) and an anonymous user to avoid any auth-dependent branching.
+        viewset.request = types.SimpleNamespace(
+            method="POST",
+            auth=None,
+            META={},
+            user=AnonymousUser(),
+        )
+        viewset.format_kwarg = None
+        viewset.action = action
+        # ``@action(serializer_class=...)`` is the canonical way to select a
+        # serializer per action, and it does not reach the class: DRF's
+        # decorator parks the kwargs on the method, its router merges them into
+        # the dynamic route's initkwargs, and ``as_view()`` applies them with
+        # setattr.  Building the ViewSet directly skips all of that, so redo
+        # the one assignment that selects the serializer.  Only that key is
+        # applied — DRF also injects ``name`` and ``description`` into the same
+        # dict, and neither belongs on a synthetic view.  An overridden
+        # ``get_serializer_class()`` still wins, because it is consulted after
+        # this, which is the order ``as_view()`` produces.
+        action_kwargs = getattr(getattr(view_class, action, None), "kwargs", None)
+        if isinstance(action_kwargs, dict) and "serializer_class" in action_kwargs:
+            viewset.serializer_class = action_kwargs["serializer_class"]
+        return viewset.get_serializer_class()
+
+    def _inherits_parent_required(self, view_class: type, action: str) -> bool:
+        """
+        May *action* inherit ``required`` fields from the resolved serializer?
+
+        Standard actions always may: ``create`` and ``update`` are what the
+        ViewSet's serializer is *for*.
+
+        A **custom** action may only when the ViewSet actually selects a
+        different serializer for it.  ``_schema_from_viewset`` resolves the
+        ViewSet's serializer, which for the common fixed-``serializer_class``
+        shape is the parent model's regardless of action — so a custom
+        body-carrying detail action was registered as requiring the parent's
+        entire create contract.  Because ``ToolRegistry.dispatch`` validates
+        against this schema, such an action could never be called with only an
+        id: it demanded fields it does not consume.
+
+        DRF already exposes per-action serializer selection, and
+        :meth:`_serializer_class_for` drives it.  When a host uses it, the
+        answer is trustworthy and inherited.  When the host has said nothing —
+        the same class comes back for this action as for ``create`` — nothing
+        has told us what the action consumes, so nothing is inherited.  **An
+        empty required list is honest; a wrong one is not.**
+
+        A failure to resolve either side is treated as "cannot tell", which
+        takes the same conservative branch.
+        """
+        if action in _STANDARD_ACTIONS:
+            return True
+        try:
+            action_serializer = self._serializer_class_for(view_class, action)
+            create_serializer = self._serializer_class_for(view_class, "create")
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+        if action_serializer is None or create_serializer is None:
+            return False
+        return action_serializer is not create_serializer
+
     def _schema_from_viewset(self, view_class: type, action: str) -> dict[str, Any]:
         """Attempt to derive a JSON Schema from a ViewSet's serializer."""
         try:
-            viewset = view_class()
-            # Use a minimal stub request so that get_serializer_class() implementations
-            # that inspect self.request.method or self.request.user do not raise
-            # AttributeError.  The stub carries the most common write-action method
-            # (POST) and an anonymous user to avoid any auth-dependent branching.
-            viewset.request = types.SimpleNamespace(
-                method="POST",
-                auth=None,
-                META={},
-                user=AnonymousUser(),
-            )
-            viewset.format_kwarg = None
-            viewset.action = action
-            serializer_class = viewset.get_serializer_class()
-            return _schema_from_serializer(serializer_class)
+            return _schema_from_serializer(self._serializer_class_for(view_class, action))
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning(
                 "frisian_mcp: schema derivation failed for %s.%s — falling back to empty schema. "

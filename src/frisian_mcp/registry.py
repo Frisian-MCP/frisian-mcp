@@ -157,6 +157,21 @@ def _resolve_unauthenticated_tier() -> str:
 #: each item individually.  Mirrors ``_LIST_BODY_KEYS`` in ``backends.invocation``.
 _BULK_LIST_BODY_KEYS: frozenset[str] = frozenset({"objects", "data", "items", "_items", "body"})
 
+#: Argument-tree positions where a list supplied for an object genuinely means
+#: "the bulk body arrived without its wrapper", so the wrapper keys above are
+#: the remedy.  Exactly two, enumerated against the real dispatch shapes:
+#:
+#:   ()            the arguments themselves are the list  (flat tool)
+#:   ("params",)   the dispatcher payload is the list     (both dispatcher kinds)
+#:
+#: Anywhere else the object-typed thing is a HOST serializer field — a JSON or
+#: nested-serializer field that happens to have received a list — and wrapping
+#: cannot make the call valid, so the advice would name the wrong field and
+#: send the caller somewhere there is nothing to find.  Matched exactly rather
+#: than by prefix: ``("params", "metadata")`` is a host field inside a grouped
+#: call, and a prefix test would admit it.
+_BULK_LIST_WRAPPABLE_PATHS: frozenset[tuple[str, ...]] = frozenset({(), ("params",)})
+
 #: Recognised role-keys for ``FRISIAN_MCP_TOKEN_TIER_MAP`` lookup.  Probed in
 #: this order against ``request.user`` attributes — the first match wins.
 _TOKEN_TIER_MAP_ROLE_PROBES: tuple[tuple[str, str], ...] = (
@@ -363,6 +378,76 @@ class ToolNotFoundError(LookupError):
 
 class ToolInputError(ValueError):
     """Raised when tool arguments fail JSON Schema validation."""
+
+
+def format_validation_errors(schema: dict[str, Any], instance: Any) -> str | None:
+    """
+    Validate *instance* against *schema* and describe **every** fault at once.
+
+    Returns ``None`` when the instance validates.
+
+    Replaces ``jsonschema.validate()``, which raises on the FIRST error it
+    finds.  A create missing four required fields therefore disclosed them one
+    per call, so a caller spent four blind round-trips before reaching the
+    serializer at all — and each round-trip looks identical to the previous
+    one from the outside, which is indistinguishable from a client retrying
+    without progress.
+
+    A single fault renders exactly as ``jsonschema`` renders it, so the common
+    case gains no scaffolding; several are joined with ``"; "``.
+
+    Sorted, because ``iter_errors`` promises no ordering.  Without that the
+    same input reads differently between runs, and a caller cannot tell a new
+    fault from a reshuffled one.  Duplicates are collapsed: a schema using
+    ``anyOf``/``allOf`` can yield the same message from more than one branch.
+    """
+    validator = jsonschema.validators.validator_for(schema)(schema)
+    seen: list[tuple[tuple[Any, ...], str]] = []
+    sent_list_for_object = False
+    for error in validator.iter_errors(instance):
+        key = (tuple(error.absolute_path), error.message)
+        if key not in seen:
+            seen.append(key)
+        # A list supplied where an object was required is the bulk-write shape
+        # sent without its wrapper.  Detected from the error rather than from
+        # *instance* because the value is usually NESTED — a grouped call fails
+        # on ``params``, so the top-level instance is an ordinary arguments
+        # dict and only the failing sub-value is the list.
+        #
+        # Restricted to the positions where wrapping is actually the remedy
+        # (see _BULK_LIST_WRAPPABLE_PATHS).  Unrestricted, ANY object-typed
+        # host field receiving a list was told to wrap it under a bulk key —
+        # advice that cannot make the call valid and names a field the caller
+        # never mentioned.  This function exists to end correction loops, so a
+        # confidently wrong remedy is the one failure it must not produce.
+        if (
+            error.validator == "type"
+            and error.validator_value == "object"
+            and isinstance(error.instance, list)
+            and tuple(error.absolute_path) in _BULK_LIST_WRAPPABLE_PATHS
+        ):
+            sent_list_for_object = True
+    if not seen:
+        return None
+    rendered = "; ".join(
+        message for _, message in sorted(seen, key=lambda item: (item[0], item[1]))
+    )
+
+    # The bare message — "[...] is not of type 'object'" — says what is wrong
+    # and not what to do, so a caller whose list has just been rejected has to
+    # guess the wrapper key.  One did, in preference to reading it.  That is
+    # the same fault one level down from the reason this error moved into the
+    # payload at all: readable, and still not actionable.
+    #
+    # The keys are listed from _BULK_LIST_BODY_KEYS rather than restated, so
+    # the guidance cannot drift from what the invocation layer accepts.
+    if sent_list_for_object:
+        accepted = ", ".join(sorted(_BULK_LIST_BODY_KEYS))
+        rendered += (
+            f". To send a list, wrap it under one of these keys: {accepted}"
+            f' — for example {{"data": [...]}}.'
+        )
+    return rendered
 
 
 class ToolInvocationError(Exception):
@@ -944,10 +1029,9 @@ class ToolRegistry:
                 }
 
         if not is_dispatcher_help and not _is_list_body:
-            try:
-                jsonschema.validate(instance=arguments, schema=_validation_schema)
-            except jsonschema.exceptions.ValidationError as exc:
-                raise ToolInputError(exc.message) from exc
+            _problems = format_validation_errors(_validation_schema, arguments)
+            if _problems is not None:
+                raise ToolInputError(_problems)
 
         if asyncio.iscoroutinefunction(entry.fn):
             return async_to_sync(entry.fn)(arguments, request)

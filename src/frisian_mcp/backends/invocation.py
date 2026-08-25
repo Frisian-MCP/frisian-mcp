@@ -20,8 +20,11 @@ from typing import Any
 from urllib.parse import urlencode
 
 from django.contrib.auth.models import AnonymousUser
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.http import HttpRequest, QueryDict
+from django.core.exceptions import (
+    PermissionDenied as DjangoPermissionDenied,
+    ValidationError as DjangoValidationError,
+)
+from django.http import Http404, HttpRequest, QueryDict
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.renderers import JSONRenderer
@@ -208,6 +211,47 @@ def _exception_envelope_message(exc: BaseException) -> str:
     return _flatten_error_detail(detail)
 
 
+#: Status the error envelope reports when the exception carries no usable one.
+_DEFAULT_ERROR_STATUS = 500
+
+
+def _exception_envelope_status(exc: BaseException) -> int:
+    """
+    Resolve the HTTP status *exc* should report in the ``ToolResult`` envelope.
+
+    Counterpart to :func:`_exception_envelope_message`: that reaches into
+    ``.detail`` for the text, this reaches into ``.status_code`` for the code.
+    Without it every failure defaulted to 500 downstream, so a not-found
+    retrieve reported ``status_code: 500`` — and 404 and 500 mean very
+    different things to an agent deciding whether to retry, because a 500
+    invites a retry that can never succeed.
+
+    Mirrors ``rest_framework.views.exception_handler``, which normalises
+    Django's ``Http404`` and ``PermissionDenied`` into their DRF equivalents
+    *before* reading ``.status_code``.  That normalisation matters here rather
+    than being a nicety: the synthetic invocation path calls the ViewSet action
+    directly and never runs ``APIView.handle_exception``, and
+    ``rest_framework.generics.get_object_or_404`` raises a bare ``Http404``
+    that carries neither ``.detail`` nor ``.status_code``.  A plain
+    ``.status_code`` lookup would therefore miss the most common case of all.
+
+    A status outside the 4xx/5xx range is discarded in favour of the default:
+    ``status_code`` is whatever the exception class declares, a host app is
+    free to declare anything on its own ``APIException`` subclass, and an
+    envelope flagged ``is_error`` must never carry a code a caller could read
+    as success.
+    """
+    if isinstance(exc, Http404):
+        return 404
+    if isinstance(exc, DjangoPermissionDenied):
+        return 403
+
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
+        return status
+    return _DEFAULT_ERROR_STATUS
+
+
 # Standard ViewSet actions that need a primary-key URL kwarg.
 _DETAIL_ACTIONS: frozenset[str] = frozenset({"retrieve", "update", "partial_update", "destroy"})
 
@@ -295,6 +339,100 @@ def _apply_meta_light_key(result: dict[str, Any], tool_name: str, envelope: dict
             envelope[key] = result[key]
 
 
+#: Keys carrying an object's primary identifier, in preference order.  Shared
+#: so the lean envelope and the tokenless variant cannot drift apart on what
+#: counts as identifiable.
+_ID_KEYS: tuple[str, ...] = ("id", "pk")
+
+
+def _object_id(item: Any) -> Any | None:
+    """Return *item*'s identifier under :data:`_ID_KEYS`, or ``None``."""
+    if not isinstance(item, dict):
+        return None
+    for key in _ID_KEYS:
+        if key in item:
+            return item[key]
+    return None
+
+
+def _lean_envelope_without_token(
+    result: Any,
+    http_status: int = 200,
+    tool_name: str | None = None,
+    *,
+    retrieve_reachable: bool,
+) -> dict[str, Any] | None:
+    """
+    Build the lean write envelope with **no** ``continuation_token``.
+
+    Returns ``None`` when the caller could not reach the written object from the
+    envelope, in which case the caller should return *result* whole.
+
+    CR-9 stopped minting a token for a write whose published schema does not
+    declare one — correctly, since a schema-validating client cannot legally
+    send an undeclared field back.  But it returned the FULL serialised result
+    instead, so an ungrouped write went from roughly 25 tokens to the whole
+    payload: a 60-item bulk create measured 25 -> 7,143.
+
+    The token was the only unusable part of that envelope.  Everything else is
+    ordinary data, so the envelope is kept and the token dropped — **provided
+    the caller can still fetch what was written.**
+
+    **Reachability is the precondition, and it takes two things: an identifier,
+    and somewhere to spend it.**  Both are checked.
+
+    * *Identifier* — a bulk envelope is ``{accepted: N, ...}`` with no ids, and a
+      single write whose serialised result carries no ``id``/``pk`` has the same
+      problem one object at a time.  Bulk therefore echoes the accepted **ids**
+      in place of the token (the planned ``bulk_create`` id-echo, landing here
+      because this is where it becomes load-bearing); a single write without one
+      returns ``None``.
+    * *Somewhere to spend it* — ``retrieve_reachable`` says whether a
+      ``retrieve`` for this resource is visible to **this caller on this route**.
+      An id proves the object can be named, not that it can be fetched: a route
+      may allow ``create`` and deny ``retrieve``, the effective tier may hide it,
+      or the ViewSet may expose no ``retrieve`` at all.  In those cases dropping
+      the payload loses the server-assigned fields outright — the CR-9 data-loss
+      class this whole path exists to prevent.
+
+    ``retrieve_reachable`` is **required, not defaulted**, so a future call site
+    has to answer the question rather than inherit an assumption.
+
+    ⚠️ ``verify=True`` is deliberately **not** counted as a recovery route,
+    though an earlier version of this docstring claimed it.  It is a parameter of
+    the write that already happened: by the time a caller holds this envelope the
+    choice is spent, and obtaining the object would mean issuing the write a
+    second time.  It is a pre-call preference, not a way back.
+
+    Every ``None`` here falls back to returning *result* whole — the pre-CL-9
+    behaviour — so the fallback is the status quo and never a new loss.
+    """
+    # Asked first: without somewhere to spend an identifier, no envelope this
+    # function can build is usable, whatever the result shape.
+    if not retrieve_reachable:
+        return None
+
+    # Built on _extract_lean_envelope so the two cannot disagree about what the
+    # envelope contains; only the token differs.
+    envelope = _extract_lean_envelope(result, "", http_status, tool_name=tool_name)
+    envelope.pop("continuation_token", None)
+
+    if isinstance(result, list):
+        if not result:
+            return None
+        ids = [_object_id(item) for item in result]
+        if any(item_id is None for item_id in ids):
+            # A partial echo is not usable: the caller cannot tell which of the
+            # accepted objects the listed ids belong to.
+            return None
+        envelope["ids"] = ids
+        return envelope
+
+    if "id" not in envelope:
+        return None
+    return envelope
+
+
 def _extract_lean_envelope(
     result: Any, token: str, http_status: int = 200, tool_name: str | None = None
 ) -> dict[str, Any]:
@@ -342,7 +480,7 @@ def _extract_lean_envelope(
 
     envelope: dict[str, Any] = {}
     if isinstance(result, dict):
-        for key in ("id", "pk"):
+        for key in _ID_KEYS:
             if key in result:
                 envelope["id"] = result[key]
                 break
@@ -520,13 +658,14 @@ class SyncInvocation(BaseInvocationBackend):
             # DRF APIException.detail is unwrapped instead of str()-ified into
             # a string-in-string envelope.
             message = _exception_envelope_message(exc)
+            status = _exception_envelope_status(exc)
             logger.warning(
                 "SyncInvocation: viewset.initial() denied call — %s: %s",
                 type(exc).__name__,
                 message,
-                extra={"tool": tool.name},
+                extra={"tool": tool.name, "status_code": status},
             )
-            return ToolResult(content={"error": message}, is_error=True)
+            return ToolResult(content={"error": message, "status_code": status}, is_error=True)
 
         try:
             response = getattr(viewset, tool.action)(drf_request, **view_kwargs)
@@ -540,11 +679,12 @@ class SyncInvocation(BaseInvocationBackend):
             raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
             message = _exception_envelope_message(exc)
+            status = _exception_envelope_status(exc)
             logger.exception(
                 "SyncInvocation error",
-                extra={"tool": tool.name, "error": message},
+                extra={"tool": tool.name, "error": message, "status_code": status},
             )
-            return ToolResult(content={"error": message}, is_error=True)
+            return ToolResult(content={"error": message, "status_code": status}, is_error=True)
 
         # Response normalisation lives in its own try/except so that a failure
         # to render DRF-native types (e.g. an unrenderable custom field) becomes

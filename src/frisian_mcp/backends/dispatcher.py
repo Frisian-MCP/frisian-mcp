@@ -9,12 +9,15 @@ import difflib
 from collections.abc import Callable, Container
 from typing import Any, NoReturn
 
-import jsonschema
-import jsonschema.exceptions
 from django.http import HttpRequest
 
 from frisian_mcp.negotiation import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
-from frisian_mcp.registry import _TIER_RANK, ToolInputError, _caller_rank
+from frisian_mcp.registry import (
+    _TIER_RANK,
+    ToolInputError,
+    _caller_rank,
+    format_validation_errors,
+)
 
 
 @dataclasses.dataclass
@@ -388,12 +391,12 @@ def _make_dispatcher_invoke(cls: type, meta: DispatcherMeta) -> Callable[..., di
             )
 
         if entry.input_schema is not None:
-            try:
-                jsonschema.validate(instance=params, schema=entry.input_schema)
-            except jsonschema.exceptions.ValidationError as exc:
-                raise ToolInputError(
-                    f"Invalid params for action {action!r}: {exc.message}"
-                ) from exc
+            # Every fault at once, not just the first: this is the site a
+            # grouped call reaches, so one-at-a-time disclosure here is what
+            # made a multi-field create cost a round-trip per field.
+            problems = format_validation_errors(entry.input_schema, params)
+            if problems is not None:
+                raise ToolInputError(f"Invalid params for action {action!r}: {problems}")
 
         return entry.method(instance, request, params)  # type: ignore[no-any-return]
 

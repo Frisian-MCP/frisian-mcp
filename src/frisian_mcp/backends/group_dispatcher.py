@@ -31,6 +31,7 @@ from django.conf import settings
 from django.http import HttpRequest
 
 from frisian_mcp.backends.dispatcher import _reject_misplaced_continuation_token
+from frisian_mcp.backends.invocation import _LIST_BODY_KEYS
 from frisian_mcp.negotiation import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
 from frisian_mcp.registry import _TIER_RANK, _caller_rank
 
@@ -154,6 +155,73 @@ def build_group_input_schema() -> dict[str, Any]:
     return _merge_negotiation_schema(schema)
 
 
+def _required_fields_by_action(
+    resource: str,
+    actions: list[str],
+    registry: ToolRegistry,
+    sep: str,
+) -> dict[str, list[str]]:
+    """
+    Return ``{action: [required field names]}`` for *resource*, derived facts only.
+
+    **Read from the registered ``input_schema``, never re-derived from the
+    serializer.**  That schema is the artifact ``ToolRegistry.dispatch``
+    validates against, so what ``help`` promises and what validation enforces
+    are the same object read twice.  Introspecting DRF a second time here would
+    create a source that can disagree with the validator, and "help said one
+    thing, validation wanted another" is a worse defect than the silence this
+    replaces.
+
+    Actions with no required fields are omitted rather than mapped to an empty
+    list: ``help`` should carry information, not padding, and an absent key
+    already means "nothing is required".
+
+    ``continuation_token`` and its four negotiation companions are protocol
+    fields, not action parameters, and never appear in an action's ``required``.
+    No filtering is needed for them.
+    """
+    requires: dict[str, list[str]] = {}
+    for action in actions:
+        entry = registry.get_entry(f"{resource}{sep}{action}")
+        if entry is None:
+            continue
+        schema = getattr(entry, "input_schema", None)
+        if not isinstance(schema, dict):
+            continue
+        required = schema.get("required")
+        if isinstance(required, list) and required:
+            requires[action] = sorted(str(name) for name in required)
+    return requires
+
+
+def _bulk_params_disclosure(actions: list[str]) -> dict[str, Any] | None:
+    """
+    Return the accepted wrapper shape for ``bulk_*`` actions, or ``None``.
+
+    ``params`` is typed ``object``, so the natural array form is rejected by
+    schema validation before the host is reached.  The list has to be wrapped
+    in a single key — and until now nothing in ``help`` or the published schema
+    named one, which made every ``bulk_*`` action advertised and effectively
+    uncallable.
+
+    The key set is **derived from the constant the request path actually uses**
+    (:data:`frisian_mcp.backends.invocation._LIST_BODY_KEYS`) rather than
+    restated here, for the same reason the required list is read off the
+    registered schema: a restatement is a second source that can drift from the
+    behaviour it describes.
+    """
+    if not any(action.startswith("bulk") for action in actions):
+        return None
+    accepted = sorted(_LIST_BODY_KEYS)
+    # "objects" is the convention both call sites use in their own examples;
+    # fall back to the first accepted key so this cannot raise if the set moves.
+    canonical = "objects" if "objects" in accepted else accepted[0]
+    return {
+        "wrap_list_in_one_of": accepted,
+        "example": {canonical: [{"...": "..."}]},
+    }
+
+
 def build_group_help(  # pylint: disable=too-many-locals
     group_name: str,
     tool_names: list[str],
@@ -263,12 +331,19 @@ def build_group_help(  # pylint: disable=too-many-locals
 
     if resource is not None:
         # Resource-scoped view: just show this resource's actions + its hints.
+        resource_actions = sorted(resources_map.get(resource, []))
         payload: dict[str, Any] = {
             "help": True,
             "group": group_name,
             "resource": resource,
-            "actions": sorted(resources_map.get(resource, [])),
+            "actions": resource_actions,
         }
+        requires = _required_fields_by_action(resource, resource_actions, registry, sep)
+        if requires:
+            payload["requires"] = requires
+        bulk_params = _bulk_params_disclosure(resource_actions)
+        if bulk_params:
+            payload["bulk_params"] = bulk_params
         if hints:
             resource_hints = _filter_hints(
                 {k: v for k, v in hints.items() if k.startswith(f"{resource}{sep}")}
