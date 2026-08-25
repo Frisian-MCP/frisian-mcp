@@ -898,3 +898,114 @@ class TestMcpDoctorCiGateFixture:
 
         assert "error(s) found" not in out
         assert "mounted per-route" in out
+
+
+THREE_DOORS: dict[str, Any] = {
+    "default": {"path": "openread", "highest_tier": "read"},
+    "elevated": {"path": "scopedwrite", "highest_tier": "read_write"},
+    "admin": {"path": "mySuperSecureAdminPath", "highest_tier": "admin"},
+}
+
+
+@pytest.mark.django_db
+class TestDiscoveryReachability:
+    """
+    PRA-4 — the doctor must report what a client can reach, not what is configured.
+
+    The precedent this check exists to avoid: a documented
+    ``FRISIAN_MCP_UNAUTHENTICATED_TIER`` lockdown was a no-op, and mcp_doctor
+    greenlit the locked-down host anyway, because the check read the *setting*
+    instead of the *effect*.
+
+    So the load-bearing test here is
+    :meth:`test_routes_mounted_but_discovery_closed_is_reported`: a host with
+    three routes mounted and ``FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False`` is
+    fully and correctly configured by every other measure the doctor applies,
+    and no client can discover a thing.  A check that passes there is the wrong
+    check.
+    """
+
+    @override_settings(
+        FRISIAN_MCP_ROUTES=THREE_DOORS,
+        FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+    )
+    def test_routes_mounted_but_discovery_closed_is_reported(self) -> None:
+        """The exact configuration that makes the release's fix inert."""
+        out, _ = _run()
+        assert "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False" in out
+        assert "no OAuth client can discover" in out
+        assert _WARN in out
+
+    @override_settings(
+        FRISIAN_MCP_ROUTES=THREE_DOORS,
+        FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+    )
+    def test_the_finding_names_both_settings_and_the_consequence(self) -> None:
+        """The message is the documentation — an operator needs nothing else."""
+        out, _ = _run()
+        line = next(ln for ln in out.splitlines() if "no OAuth client can discover" in ln)
+        assert "FRISIAN_MCP_ROUTES" in line
+        assert "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY" in line
+        # Names the way out, not just the problem.
+        assert "Set FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=True" in line
+
+    @override_settings(FRISIAN_MCP_ROUTES=THREE_DOORS)
+    def test_the_same_host_with_discovery_open_passes(self) -> None:
+        """
+        The other half of proving it is a real check rather than a green light.
+
+        Identical routes; only ``PUBLIC_DISCOVERY`` differs.  A guard that has
+        never been observed to *stop* refusing is as untrustworthy as one never
+        observed to refuse.
+        """
+        out, _ = _run()
+        assert "no OAuth client can discover" not in out
+        assert "OAuth discovery reachable" in out
+        assert "3 authenticated route(s)" not in out  # the open door is not one
+        assert "2 authenticated route(s) mounted" in out
+        # The bare document carries ONE resource, so the line must name the one
+        # door it resolves to rather than implying it describes both (PRA-8).
+        assert "resolves to /scopedwrite" in out
+
+    @override_settings(
+        FRISIAN_MCP_ROUTES={"default": {"path": "openread", "highest_tier": "read"}},
+        FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+    )
+    def test_an_all_open_host_is_not_warned(self) -> None:
+        """
+        Scoped to hosts that have something to advertise.
+
+        No route requires authentication, so there is genuinely no protected
+        resource and the endpoint's 404 is the honest answer.  Warning here would
+        fire on the open-demo posture the package explicitly supports — a false
+        positive on a working deployment.
+        """
+        out, _ = _run()
+        assert "no OAuth client can discover" not in out
+        assert "OAuth discovery reachable" not in out
+
+    @override_settings(FRISIAN_MCP_ROUTES=None)
+    def test_a_legacy_single_door_host_is_not_warned(self) -> None:
+        """Per-route discovery is not applicable without per-route mounting."""
+        out, _ = _run()
+        assert "no OAuth client can discover" not in out
+        assert "OAuth discovery reachable" not in out
+
+    @override_settings(
+        FRISIAN_MCP_ROUTES=THREE_DOORS,
+        FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+    )
+    def test_strict_does_not_escalate_it_to_an_error(self) -> None:
+        """
+        Deliberate: closed discovery is a posture, not a defect.
+
+        ``--strict`` exists so CI can gate on the route *surface*.  A host that
+        issues pre-provisioned credentials only — a posture that gets *more*
+        attractive now that the bare endpoint names the most privileged route —
+        would otherwise fail a gate for a setting it chose on purpose.  Contrast
+        an audit that could not run, which strict mode does escalate, because
+        that has proved nothing.
+        """
+        out, _ = _run(strict=True)
+        assert "no OAuth client can discover" in out
+        assert "error(s) found" not in out

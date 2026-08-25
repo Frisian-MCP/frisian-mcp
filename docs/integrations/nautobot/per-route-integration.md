@@ -68,7 +68,7 @@ FRISIAN_MCP_ROUTES = {
     # Full-surface admin route. The resources the scoped routes carved out
     # (secrets, the audit trail, user accounts) exist here and only here.
     "admin": {
-        "path": "api/mcp/admin",
+        "path": "api/mcp/ops",
         "highest_tier": "admin",
         "allow_list": ["*"],
     },
@@ -78,7 +78,7 @@ FRISIAN_MCP_ROUTES = {
 A few things worth calling out about this block:
 
 - **The three outer keys are fixed** — `default`, `elevated`, `admin`. They name the *tier slot*, not the path or the ceiling. A tier you omit is simply not mounted (pure absence). Any other outer key is a hard configuration error at startup.
-- **The paths are independent siblings.** `api/mcp/read`, `api/mcp/write`, and `api/mcp/admin` share a parent but none is a prefix of another, so no proxy path-normalization can confuse a read door for the admin door. Prefer this over nesting a privileged path *under* a public one.
+- **The paths are independent siblings.** `api/mcp/read`, `api/mcp/write`, and `api/mcp/ops` share a parent but none is a prefix of another, so no proxy path-normalization can confuse a read door for the admin door. Prefer this over nesting a privileged path *under* a public one.
 - **`users` is never in an allow list**, so account, API-token, and object-permission resources are absent from both scoped routes — not merely denied. Absence is byte-identical to a resource that was never registered (see [Per-Route Permissions → the deny-all firewall](../../v1.1/Guide/per-route-permissions.md#allow--deny-a-deny-all-firewall)).
 - **The ceiling only narrows, never grants.** A `read_write` route ceiling does not give a read-only token write access; it caps everyone at read-write and lets an already-write-capable token through.
 
@@ -165,7 +165,7 @@ OAuth metadata discovery is route-aware in 1.1.0. When a client is challenged on
 
 - **An anonymous-reachable route is never advertised as a protected resource.** Asking for its protected-resource metadata returns a 404 — the gateway does not describe a door it is not guarding.
 - **The resource a client is told about is the route it was challenged from.** A 401 from `api/mcp/write` hands back `api/mcp/write`'s metadata (the RFC 9728 path-suffixed form), not some other route's.
-- **The bare `/.well-known/oauth-protected-resource`** (for clients that ignore the `resource_metadata` pointer) resolves to the **lowest-privilege authenticated route**, so a client that will not say which door it wants is steered to the least-privileged one.
+- **The bare `/.well-known/oauth-protected-resource`** resolves to the **lowest-privilege authenticated route**. A client that reads it while configured for a *different* route is not downgraded to that route — it fails to connect, because the `resource` it is handed does not match the URL it was given.
 
 Keep `FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = True` (the default) for any spec-compliant browser client — the metadata documents advertise endpoint URLs, not credentials, and `registration_endpoint` is only advertised when `REGISTRATION_OPEN` is `True` (which it is not here).
 
@@ -236,7 +236,7 @@ nautobot-server mcp_doctor
 On a per-route deployment the gateway check reports each mounted route rather than probing for the single-mount name:
 
 ```text
-✓ MCP gateway mounted per-route at 3 path(s): api/mcp/read, api/mcp/write, api/mcp/admin
+✓ MCP gateway mounted per-route at 3 path(s): api/mcp/read, api/mcp/write, api/mcp/ops
   (FRISIAN_MCP_ROUTES; the legacy frisian_mcp:gateway mount is intentionally absent)
 ```
 
