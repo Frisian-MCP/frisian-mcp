@@ -61,8 +61,9 @@ A tier key you do not list is **not mounted** — it does not exist. Configure o
 > Other segments may behave the same way, and the server log is how you tell. A
 > client refusing the path either sends nothing at all, or skips the challenge
 > and fetches the bare `/.well-known/oauth-protected-resource` instead of the
-> path-suffixed form — then binds to whichever route that document names. If you
-> see either shape, change the path suffix.
+> path-suffixed form. That document names exactly one route; where it is not the
+> route you configured, the connection then fails rather than falling back to it.
+> If you see either shape, change the path suffix.
 
 ### Permission tiers
 
