@@ -1035,3 +1035,26 @@ class TestDiscoveryReachability:
         out, _ = _run()
         assert "OAuth discovery reachable" not in out
         assert "OAuth .well-known URLs not mounted" in out
+
+    @override_settings(
+        FRISIAN_MCP_ROUTES=THREE_DOORS,
+        ROOT_URLCONF="tests.urls_wellknown_partial",
+    )
+    def test_a_partially_mounted_wellknown_is_not_reported_as_reachable(self) -> None:
+        """
+        CodeRabbit: the two well-known URLs are separately mountable.
+
+        This URLconf mounts the authorization-server endpoint and omits the
+        protected-resource one.  Reversing the neighbour would report discovery
+        reachable while a client GET on ``/.well-known/oauth-protected-resource``
+        takes a URLconf 404 the view never sees — so the gate must reverse the
+        endpoint it actually probes.
+
+        ``_check_url_mounting`` still ticks here, because it asks a different and
+        looser question ("is the include present at all?").  That is pre-existing
+        behaviour and is asserted, not silently tolerated: if it ever tightens,
+        this test says so rather than quietly passing for a new reason.
+        """
+        out, _ = _run()
+        assert "OAuth discovery reachable" not in out
+        assert "OAuth .well-known URLs mounted" in out

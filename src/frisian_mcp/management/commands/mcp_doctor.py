@@ -318,20 +318,28 @@ class Command(BaseCommand):
             "(FRISIAN_MCP_ROUTES; the legacy frisian_mcp:gateway mount is intentionally absent)"
         )
 
-    def _wellknown_urls_mounted(self) -> bool:
+    def _wellknown_url_mounted(self, url_name: str) -> bool:
         """
-        Return ``True`` when the OAuth ``.well-known`` URLs resolve in this URLconf.
+        Return ``True`` when *url_name* resolves in this URLconf.
 
         One definition, shared by :meth:`_check_url_mounting` and
         :meth:`_check_discovery_reachable`.  Open-coding the same question twice
-        is how the protected-resource derivation drifted (V11-16), and here it
-        would let one check call discovery reachable while the other reports the
-        URLs missing.
+        is how the protected-resource derivation drifted (V11-16).
+
+        It is **parameterised by URL name on purpose**: the two callers ask about
+        two different endpoints, and they are separately mountable.  The package
+        ships them in one ``include()``, so they normally travel together — but a
+        host that hand-rolls its ``.well-known`` patterns can mount the
+        authorization-server URL and omit the protected-resource one.  Reversing
+        the authorization-server name would then report discovery reachable while
+        a client GET on ``/.well-known/oauth-protected-resource`` takes a URLconf
+        404 the view never sees.  **Reverse the URL you are about to make a claim
+        about, not a neighbour of it.**
         """
         from django.urls import reverse  # pylint: disable=import-outside-toplevel
 
         try:
-            reverse("frisian_mcp_oauth_wellknown:oauth_authorization_server")
+            reverse(f"frisian_mcp_oauth_wellknown:{url_name}")
         except Exception:  # pylint: disable=broad-exception-caught
             return False
         return True
@@ -340,7 +348,7 @@ class Command(BaseCommand):
         """Check that the MCP gateway is reachable in the URL configuration."""
         self._check_gateway_mounted(warnings)
 
-        if self._wellknown_urls_mounted():
+        if self._wellknown_url_mounted("oauth_authorization_server"):
             self._ok("OAuth .well-known URLs mounted")
         else:
             self._warn_msg(
@@ -650,13 +658,15 @@ class Command(BaseCommand):
             return
 
         # The probe calls the view directly, which answers "would the view serve
-        # this?" but not "is the view routable?".  When the .well-known URLs are
-        # not mounted a client gets a URLconf 404 the view never sees, so
-        # claiming discovery is reachable would be exactly the mechanism-not-
-        # effect error this check exists to avoid.  ``_check_url_mounting`` has
-        # already reported that cause and named the fix, so say nothing rather
-        # than emit a second message for one root cause.
-        if not self._wellknown_urls_mounted():
+        # this?" but not "is the view routable?".  When the endpoint is not
+        # mounted a client gets a URLconf 404 the view never sees, so claiming
+        # discovery is reachable would be exactly the mechanism-not-effect error
+        # this check exists to avoid.  Reverse the PROTECTED-RESOURCE name --
+        # the endpoint actually probed -- not the authorization-server one
+        # beside it, which is separately mountable.  ``_check_url_mounting`` has
+        # already reported the common cause and named the fix, so say nothing
+        # rather than emit a second message for one root cause.
+        if not self._wellknown_url_mounted("oauth_protected_resource"):
             return
 
         # pylint: disable-next=import-outside-toplevel
