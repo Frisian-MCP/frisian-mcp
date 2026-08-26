@@ -318,16 +318,31 @@ class Command(BaseCommand):
             "(FRISIAN_MCP_ROUTES; the legacy frisian_mcp:gateway mount is intentionally absent)"
         )
 
+    def _wellknown_urls_mounted(self) -> bool:
+        """
+        Return ``True`` when the OAuth ``.well-known`` URLs resolve in this URLconf.
+
+        One definition, shared by :meth:`_check_url_mounting` and
+        :meth:`_check_discovery_reachable`.  Open-coding the same question twice
+        is how the protected-resource derivation drifted (V11-16), and here it
+        would let one check call discovery reachable while the other reports the
+        URLs missing.
+        """
+        from django.urls import reverse  # pylint: disable=import-outside-toplevel
+
+        try:
+            reverse("frisian_mcp_oauth_wellknown:oauth_authorization_server")
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+        return True
+
     def _check_url_mounting(self, warnings: list[str]) -> None:
         """Check that the MCP gateway is reachable in the URL configuration."""
         self._check_gateway_mounted(warnings)
 
-        try:
-            from django.urls import reverse  # pylint: disable=import-outside-toplevel
-
-            reverse("frisian_mcp_oauth_wellknown:oauth_authorization_server")
+        if self._wellknown_urls_mounted():
             self._ok("OAuth .well-known URLs mounted")
-        except Exception:  # pylint: disable=broad-exception-caught
+        else:
             self._warn_msg(
                 warnings,
                 "OAuth .well-known URLs not mounted — add"
@@ -632,6 +647,16 @@ class Command(BaseCommand):
         run, which strict mode does escalate because it has proved nothing.
         """
         if not getattr(settings, "FRISIAN_MCP_ROUTES", None):
+            return
+
+        # The probe calls the view directly, which answers "would the view serve
+        # this?" but not "is the view routable?".  When the .well-known URLs are
+        # not mounted a client gets a URLconf 404 the view never sees, so
+        # claiming discovery is reachable would be exactly the mechanism-not-
+        # effect error this check exists to avoid.  ``_check_url_mounting`` has
+        # already reported that cause and named the fix, so say nothing rather
+        # than emit a second message for one root cause.
+        if not self._wellknown_urls_mounted():
             return
 
         # pylint: disable-next=import-outside-toplevel

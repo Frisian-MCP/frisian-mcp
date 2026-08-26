@@ -928,6 +928,7 @@ class TestDiscoveryReachability:
     @override_settings(
         FRISIAN_MCP_ROUTES=THREE_DOORS,
         FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+        ROOT_URLCONF="tests.urls_wellknown",
     )
     def test_routes_mounted_but_discovery_closed_is_reported(self) -> None:
         """The exact configuration that makes the release's fix inert."""
@@ -939,6 +940,7 @@ class TestDiscoveryReachability:
     @override_settings(
         FRISIAN_MCP_ROUTES=THREE_DOORS,
         FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+        ROOT_URLCONF="tests.urls_wellknown",
     )
     def test_the_finding_names_both_settings_and_the_consequence(self) -> None:
         """The message is the documentation — an operator needs nothing else."""
@@ -949,7 +951,7 @@ class TestDiscoveryReachability:
         # Names the way out, not just the problem.
         assert "Set FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=True" in line
 
-    @override_settings(FRISIAN_MCP_ROUTES=THREE_DOORS)
+    @override_settings(FRISIAN_MCP_ROUTES=THREE_DOORS, ROOT_URLCONF="tests.urls_wellknown")
     def test_the_same_host_with_discovery_open_passes(self) -> None:
         """
         The other half of proving it is a real check rather than a green light.
@@ -970,6 +972,7 @@ class TestDiscoveryReachability:
     @override_settings(
         FRISIAN_MCP_ROUTES={"default": {"path": "openread", "highest_tier": "read"}},
         FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+        ROOT_URLCONF="tests.urls_wellknown",
     )
     def test_an_all_open_host_is_not_warned(self) -> None:
         """
@@ -984,7 +987,7 @@ class TestDiscoveryReachability:
         assert "no OAuth client can discover" not in out
         assert "OAuth discovery reachable" not in out
 
-    @override_settings(FRISIAN_MCP_ROUTES=None)
+    @override_settings(FRISIAN_MCP_ROUTES=None, ROOT_URLCONF="tests.urls_wellknown")
     def test_a_legacy_single_door_host_is_not_warned(self) -> None:
         """Per-route discovery is not applicable without per-route mounting."""
         out, _ = _run()
@@ -994,6 +997,7 @@ class TestDiscoveryReachability:
     @override_settings(
         FRISIAN_MCP_ROUTES=THREE_DOORS,
         FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=False,
+        ROOT_URLCONF="tests.urls_wellknown",
     )
     def test_strict_does_not_escalate_it_to_an_error(self) -> None:
         """
@@ -1009,3 +1013,25 @@ class TestDiscoveryReachability:
         out, _ = _run(strict=True)
         assert "no OAuth client can discover" in out
         assert "error(s) found" not in out
+
+    @override_settings(
+        FRISIAN_MCP_ROUTES=THREE_DOORS,
+        ROOT_URLCONF="frisian_mcp._ci_doctor_urls",
+    )
+    def test_unmounted_wellknown_urls_are_not_reported_as_reachable(self) -> None:
+        """
+        CodeRabbit: the probe calls the view, which cannot see URL resolution.
+
+        With the ``.well-known`` URLs absent from the URLconf a client gets a
+        404 the view never sees, so a "discovery reachable" tick would be the
+        mechanism-not-effect error this check exists to avoid.
+
+        It stays *silent* rather than warning: ``_check_url_mounting`` already
+        reports this cause and names the fix, and two messages for one root
+        cause is the pattern E011 deliberately avoids.  The assertion on that
+        existing warning is what makes silence safe rather than a new blind
+        spot — if it ever stops firing, this test fails too.
+        """
+        out, _ = _run()
+        assert "OAuth discovery reachable" not in out
+        assert "OAuth .well-known URLs not mounted" in out
