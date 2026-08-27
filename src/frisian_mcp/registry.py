@@ -465,6 +465,28 @@ class ToolInvocationError(Exception):
         super().__init__(str(content))
 
 
+def _parse_tool_name(
+    tool_name: str,
+    sep: str,
+    resource_prefixes: frozenset[str] | None,
+) -> tuple[str, str] | None:
+    """
+    Split *tool_name* into ``(resource, action)`` using the configured separator.
+
+    When *resource_prefixes* is supplied, prefix matching is used so that
+    multi-word resources (e.g. ``location_type``) are correctly identified
+    even when the separator is ``"_"``.  Falls back to a plain ``split`` when
+    no prefixes are available.  Returns ``None`` when the name cannot be parsed.
+    """
+    if resource_prefixes:
+        for prefix in resource_prefixes:
+            if tool_name.startswith(f"{prefix}{sep}"):
+                return prefix, tool_name[len(prefix) + len(sep) :]
+        return None
+    parts = tool_name.split(sep, 1)
+    return (parts[0], parts[1]) if len(parts) == 2 else None
+
+
 def _group_listing_members(
     entry: Any,
     entries: Any,
@@ -473,12 +495,6 @@ def _group_listing_members(
     entry_filter: Callable[[Any], bool] | None,
 ) -> tuple[list[str], frozenset[str]]:
     """Return the visible members and resources for a group dispatcher."""
-    # Lazy-import to avoid the registry/group-dispatcher import cycle.  The
-    # same parser is used by ``action='help'`` so multi-word resource prefixes
-    # and configured separator handling cannot drift between the two surfaces.
-    # pylint: disable=import-outside-toplevel
-    from frisian_mcp.backends.group_dispatcher import _parse_tool_name
-
     groups = getattr(settings, "FRISIAN_MCP_DISPATCH_GROUPS", None)
     resource_prefixes: frozenset[str] | None = None
     if groups and entry.name in groups:

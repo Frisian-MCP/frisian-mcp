@@ -33,34 +33,12 @@ from django.http import HttpRequest
 from frisian_mcp.backends.dispatcher import _reject_misplaced_continuation_token
 from frisian_mcp.backends.invocation import _LIST_BODY_KEYS
 from frisian_mcp.negotiation import NEGOTIATION_PROTOCOL_ONLY_KEY, _merge_negotiation_schema
-from frisian_mcp.registry import _TIER_RANK, _caller_rank
+from frisian_mcp.registry import _TIER_RANK, _caller_rank, _parse_tool_name
 
 if TYPE_CHECKING:
     from frisian_mcp.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_tool_name(
-    tool_name: str,
-    sep: str,
-    resource_prefixes: frozenset[str] | None,
-) -> tuple[str, str] | None:
-    """
-    Split *tool_name* into ``(resource, action)`` using the configured separator.
-
-    When *resource_prefixes* is supplied, prefix matching is used so that
-    multi-word resources (e.g. ``location_type``) are correctly identified
-    even when the separator is ``"_"``.  Falls back to a plain ``split`` when
-    no prefixes are available.  Returns ``None`` when the name cannot be parsed.
-    """
-    if resource_prefixes:
-        for prefix in resource_prefixes:
-            if tool_name.startswith(f"{prefix}{sep}"):
-                return prefix, tool_name[len(prefix) + len(sep) :]
-        return None
-    parts = tool_name.split(sep, 1)
-    return (parts[0], parts[1]) if len(parts) == 2 else None
 
 
 def _resolve_request_tier(request: HttpRequest) -> str:
