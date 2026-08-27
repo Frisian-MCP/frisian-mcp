@@ -213,6 +213,26 @@ class TestPruneSites:
         assert view.advertised_counts["catalog"] == 1
 
     @override_settings(FRISIAN_MCP_TOOL_NAME_SEPARATOR=SEP)
+    def test_tier_filtered_group_description_matches_help(self, registry: ToolRegistry) -> None:
+        """A route tier ceiling is reflected in both group discovery surfaces."""
+        from frisian_mcp.backends.group_dispatcher import build_group_help
+
+        view = RouteView.build(registry, _cfg(allow=("*",)))
+        listed = {tool["name"]: tool for tool in view.list_tools(max_tier="read")}
+        help_payload = build_group_help(
+            "catalog",
+            sorted(view.entries["catalog"].group_tool_names),
+            registry,
+            max_tier="read",
+            resource_prefixes=frozenset({"item", "order"}),
+        )
+
+        assert listed["catalog"]["description"] == (
+            "Group dispatcher for 2 tools across 2 resources. Use action='help' to discover."
+        )
+        assert help_payload["resources"] == {"item": ["list"], "order": ["list"]}
+
+    @override_settings(FRISIAN_MCP_TOOL_NAME_SEPARATOR=SEP)
     def test_site1_and_2_denied_resource_not_suggested(self, registry: ToolRegistry) -> None:
         """Sites 1+2: a near-miss for a denied resource is not echoed back."""
         view = RouteView.build(registry, _cfg(allow=("*",), deny=("catalog:item",)))
