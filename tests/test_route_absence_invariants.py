@@ -298,12 +298,12 @@ class TestAdvertisedCounts:
         assert set(payload["resources"]) == {"order"}
 
     @override_settings(FRISIAN_MCP_RESOLVE_TIER=_tier_hook("read"))
-    def test_intact_group_keeps_global_counts(self, registry: ToolRegistry) -> None:
-        """No carve-out: the shared-by-reference entry advertises the full set."""
+    def test_intact_group_counts_match_effective_tier(self, registry: ToolRegistry) -> None:
+        """No carve-out: listing still reflects the request's effective tier."""
         view = _mount(_cfg("default", GATEWAY), registry)
         response = _post_jsonrpc(view, GATEWAY, "tools/list", user=_StubUser())
         catalog = next(t for t in _rpc_result(response)["tools"] if t["name"] == "catalog")
-        assert "3 tools across 2 resources" in catalog["description"]
+        assert "2 tools across 2 resources" in catalog["description"]
 
 
 # ---------------------------------------------------------------------------

@@ -2019,6 +2019,7 @@ class TestH15GroupVisibleToNonSuperuser:
                 perm_app_label="catalog",
                 perm_model="item",
                 perm_drf_action=action,
+                permission_tier="read_write" if action == "create" else "read",
                 hidden=True,
             )
         reg.register(
@@ -2102,6 +2103,79 @@ class TestH15GroupVisibleToNonSuperuser:
             )
         }
         assert via_registry == via_route
+
+    @pytest.mark.parametrize("listing_path", ["registry", "route"])
+    @pytest.mark.parametrize(
+        ("max_tier", "caps", "expected_resources"),
+        [
+            (
+                "read",
+                frozenset({"catalog.view_item", "catalog.add_item"}),
+                {"item": ["list"]},
+            ),
+            ("read_write", frozenset({"catalog.view_item"}), {"item": ["list"]}),
+            (
+                "read_write",
+                frozenset({"catalog.view_item", "catalog.add_item"}),
+                {"item": ["create", "list"]},
+            ),
+        ],
+    )
+    def test_filtered_group_description_matches_help(
+        self,
+        listing_path: str,
+        max_tier: str,
+        caps: frozenset[str],
+        expected_resources: dict[str, list[str]],
+    ) -> None:
+        """Descriptions and help agree across route and principal combinations."""
+        from frisian_mcp.backends.group_dispatcher import build_group_help
+        from frisian_mcp.route_views import _list_entries
+
+        reg = self._registry()
+        entry_filter, action_factory = self._filters(caps)
+        if listing_path == "registry":
+            listing = reg.list_tools(
+                max_tier=max_tier,
+                entry_filter=entry_filter,
+                action_filter_factory=action_factory,
+            )
+        else:
+            entries = {n: reg.get_entry(n) for n in ("item_list", "item_create", "catalog")}
+            listing = _list_entries(
+                entries,
+                max_tier=max_tier,
+                entry_filter=entry_filter,
+                action_filter_factory=action_factory,
+            )
+
+        action_count = sum(len(actions) for actions in expected_resources.values())
+        expected = (
+            f"Group dispatcher for {action_count} tools across "
+            f"{len(expected_resources)} resources. Use action='help' to discover."
+        )
+        group = next(tool for tool in listing if tool["name"] == "catalog")
+        assert group["description"] == expected
+
+        help_payload = build_group_help(
+            "catalog",
+            ["item_list", "item_create"],
+            reg,
+            max_tier=max_tier,
+            resource_prefixes=frozenset({"item"}),
+            entry_filter=entry_filter,
+        )
+        assert help_payload["resources"] == expected_resources
+
+    @override_settings(FRISIAN_MCP_DISPATCH_GROUPS={"catalog": ["item", "missing"]})
+    def test_group_description_ignores_unresolved_resource_prefixes(self) -> None:
+        """A configured resource with no registered child is not advertised."""
+        reg = self._registry()
+        listed = reg.list_tools(max_tier="read")
+        group = next(tool for tool in listed if tool["name"] == "catalog")
+        assert group["description"] == (
+            "Group dispatcher for 1 tools across 1 resources. Use action='help' to discover."
+        )
 
     def test_group_still_hidden_when_no_child_is_visible(self) -> None:
         """The fix must not become fail-open: no usable child, no group."""

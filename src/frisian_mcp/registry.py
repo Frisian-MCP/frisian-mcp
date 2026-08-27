@@ -465,6 +465,43 @@ class ToolInvocationError(Exception):
         super().__init__(str(content))
 
 
+def _group_listing_members(
+    entry: Any,
+    entries: Any,
+    *,
+    max_rank: int,
+    entry_filter: Callable[[Any], bool] | None,
+) -> tuple[list[str], frozenset[str]]:
+    """Return the visible members and resources for a group dispatcher."""
+    # Lazy-import to avoid the registry/group-dispatcher import cycle.  The
+    # same parser is used by ``action='help'`` so multi-word resource prefixes
+    # and configured separator handling cannot drift between the two surfaces.
+    # pylint: disable=import-outside-toplevel
+    from frisian_mcp.backends.group_dispatcher import _parse_tool_name
+
+    groups = getattr(settings, "FRISIAN_MCP_DISPATCH_GROUPS", None)
+    resource_prefixes: frozenset[str] | None = None
+    if groups and entry.name in groups:
+        resource_prefixes = frozenset(
+            str(prefix).replace("-", "_") for prefix in groups[entry.name]
+        )
+    sep: str = getattr(settings, "FRISIAN_MCP_TOOL_NAME_SEPARATOR", "_")
+    visible: list[str] = []
+    resources: set[str] = set()
+    for tool_name in entry.group_tool_names or ():
+        parsed = _parse_tool_name(tool_name, sep, resource_prefixes)
+        if parsed is None:
+            continue
+        child = entries.get(tool_name)
+        if child is None or _TIER_RANK.get(child.permission_tier, 0) > max_rank:
+            continue
+        if entry_filter is not None and not entry_filter(child):
+            continue
+        visible.append(tool_name)
+        resources.add(parsed[0])
+    return visible, frozenset(resources)
+
+
 def shape_tools_listing(  # pylint: disable=too-many-branches
     entries: Any,
     *,
@@ -523,10 +560,24 @@ def shape_tools_listing(  # pylint: disable=too-many-branches
         #
         # This IS the group's capability determination, which is why it REPLACES
         # the generic entry filter above rather than stacking on it.
-        if entry.group_tool_names and entry_filter is not None:
-            children = [entries[t] for t in entry.group_tool_names if t in entries]
-            if not any(entry_filter(c) for c in children):
+        group_members: list[str] | None = None
+        group_resources = frozenset[str]()
+        if entry.group_tool_names is not None:
+            group_members, group_resources = _group_listing_members(
+                entry,
+                entries,
+                max_rank=max_rank,
+                entry_filter=entry_filter,
+            )
+            if entry_filter is not None and entry.group_tool_names and not group_members:
                 continue
+
+        description = entry.description
+        if group_members is not None:
+            description = (
+                f"Group dispatcher for {len(group_members)} tools across "
+                f"{len(group_resources)} resources. Use action='help' to discover."
+            )
 
         # Plain (non-dispatcher) tool: include the registered schema verbatim —
         # the entry's own permission_tier already gated it above.
@@ -534,7 +585,7 @@ def shape_tools_listing(  # pylint: disable=too-many-branches
             tools.append(
                 {
                     "name": entry.name,
-                    "description": entry.description,
+                    "description": description,
                     "inputSchema": entry.input_schema,
                     "tier": entry.permission_tier,
                 }
@@ -557,7 +608,7 @@ def shape_tools_listing(  # pylint: disable=too-many-branches
         tools.append(
             {
                 "name": entry.name,
-                "description": entry.description,
+                "description": description,
                 "inputSchema": filtered_schema,
                 "tier": entry.permission_tier,
             }

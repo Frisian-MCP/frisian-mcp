@@ -52,6 +52,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Issue #71 — permission-aware group descriptions.** Group dispatcher descriptions
+  in `tools/list` now count the same tier- and permission-filtered actions and
+  resolved resources returned by `action="help"`, including on scoped routes.
+
 - **Issue #12 — custom detail actions:** Auto-discovered DRF `@action(detail=True)` handlers
   now require an `id` in their MCP schema and pass it through as `pk` during invocation,
   preventing missing-`pk` tracebacks for integrations such as Nautobot `napalm`.

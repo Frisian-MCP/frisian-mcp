@@ -9,7 +9,7 @@ frisian-mcp turns your existing Django REST Framework ViewSets into [Model Conte
 
 **Designed for token-efficient agent workflows.** A 50-action Django app loads in 500–2,000 tokens of `tools/list` schema instead of the 15,000–25,000 conventional flat MCP would emit; a 60-device bulk-write response is 24 tokens instead of ~10,800 of full echo. Same surface, two orders of magnitude less context burned before the agent has done any reasoning. Full numbers in [Token efficiency](#token-efficiency).
 
-**Version:** 1.1.0 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
+**Version:** 1.1.1 | **License:** Apache 2.0 | **Python:** 3.11+ | **Django:** 5.x
 
 ```bash
 pip install frisian-mcp
