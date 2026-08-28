@@ -1,5 +1,11 @@
 # Releasing frisian-mcp
 
+> **Who may do this.** Cutting a release — and changing the version — is restricted to
+> **Code Owners and Maintainers** listed in [MAINTAINERS.md](MAINTAINERS.md). Contributors
+> must not bump the version in a PR; see
+> [CONTRIBUTING.md § Versioning](CONTRIBUTING.md#versioning). This document is the only
+> place a version bump should be performed from.
+
 The release pipeline is in `.github/workflows/release.yml`.  It is **tag-driven**:
 push a tag, the workflow takes over.  No manual upload, no API tokens, no
 `twine` from a laptop.
@@ -62,8 +68,18 @@ the names you registered with PyPI:
 ```bash
 # 1. Pick the version.  Use PEP 440 canonical form in pyproject.toml — no
 #    dashes inside the rc segment.
+#    Move ALL FOUR.  Bumping only the two authoritative sources leaves
+#    server.json and uv.lock behind, and a split version is a release bug.
 sed -i '' 's/^version = .*/version = "1.0.12rc1"/' pyproject.toml
 sed -i '' 's/^__version__ = .*/__version__ = "1.0.12rc1"/' src/frisian_mcp/__init__.py
+sed -i '' 's/"version": ".*"/"version": "1.0.12rc1"/' server.json
+uv lock   # regenerates uv.lock; never hand-edit it
+
+# Confirm they agree before committing:
+grep -m1 '^version' pyproject.toml
+grep '__version__' src/frisian_mcp/__init__.py
+grep '"version"' server.json
+grep -A1 'name = "frisian-mcp"' uv.lock | grep version
 
 # 2. Commit + tag.  The tag itself can be the prettier dash form — the
 #    workflow normalises both to PEP 440 before comparing or installing.
@@ -83,6 +99,8 @@ Same flow, no `rc` segment in either pyproject or tag:
 ```bash
 sed -i '' 's/^version = .*/version = "1.0.12"/' pyproject.toml
 sed -i '' 's/^__version__ = .*/__version__ = "1.0.12"/' src/frisian_mcp/__init__.py
+sed -i '' 's/"version": ".*"/"version": "1.0.12"/' server.json
+uv lock   # regenerates uv.lock; never hand-edit it
 
 git commit -am "Release v1.0.12"
 git tag v1.0.12
