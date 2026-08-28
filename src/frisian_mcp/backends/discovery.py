@@ -15,14 +15,16 @@ from __future__ import annotations
 import inspect
 import logging
 import re
-import types
 import typing
+from io import BytesIO
 from typing import Any
 
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.http import HttpRequest, QueryDict
 from django.urls import URLPattern, URLResolver, get_resolver
 from rest_framework.relations import ManyRelatedField, RelatedField, SlugRelatedField
+from rest_framework.request import Request
 from rest_framework.serializers import ListSerializer
 from rest_framework.viewsets import ViewSetMixin
 
@@ -527,16 +529,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         relies on.
         """
         viewset = view_class()
-        # Use a minimal stub request so that get_serializer_class() implementations
-        # that inspect self.request.method or self.request.user do not raise
-        # AttributeError.  The stub carries the most common write-action method
-        # (POST) and an anonymous user to avoid any auth-dependent branching.
-        viewset.request = types.SimpleNamespace(
-            method="POST",
-            auth=None,
-            META={},
-            user=AnonymousUser(),
-        )
+        viewset.request = _build_discovery_stub_request()
         viewset.format_kwarg = None
         viewset.action = action
         # ``@action(serializer_class=...)`` is the canonical way to select a
@@ -595,12 +588,19 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         """Attempt to derive a JSON Schema from a ViewSet's serializer."""
         try:
             return _schema_from_serializer(self._serializer_class_for(view_class, action))
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Name the actual exception.  The previous message asserted a cause
+            # it had not established — "check that get_serializer_class() does
+            # not require a real request object" — and sent readers to the host
+            # app's code when the fault was this function's own stub request.
+            # A swallowed exception type is the one fact that identifies which.
             logger.warning(
-                "frisian_mcp: schema derivation failed for %s.%s — falling back to empty schema. "
-                "Check that get_serializer_class() does not require a real request object.",
+                "frisian_mcp: schema derivation failed for %s.%s (%s: %s) — falling back to "
+                "an empty schema; this tool is advertised with no field information.",
                 view_class.__name__,
                 action,
+                type(exc).__name__,
+                exc,
             )
             return {"type": "object", "properties": {}}
 
@@ -608,6 +608,51 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_discovery_stub_request() -> Request:
+    """Return a stand-in request for deriving schemas at discovery time.
+
+    Discovery runs at startup, with no HTTP request in flight, but many
+    ``get_serializer_class()`` implementations branch on the request.  This
+    used to be a hand-built ``SimpleNamespace`` carrying four attributes —
+    ``method``, ``auth``, ``META``, ``user``.  Any implementation touching a
+    fifth raised ``AttributeError``, the schema silently fell back to empty,
+    and the tool was advertised to agents with no field information at all.
+
+    Measured on two hosts, and they needed *different* missing attributes:
+    one branched on ``request.query_params``, another on ``request.version``.
+    Adding attributes one host at a time is a losing game — each new host
+    discovers the next gap in production — so this builds a real DRF
+    ``Request`` instead of imitating one, which supplies the whole surface at
+    once.
+
+    ``version`` and ``versioning_scheme`` are set explicitly because DRF
+    assigns them in ``APIView.initialize_request()``, **not** in
+    ``Request.__init__``; a bare ``Request`` still raises on ``.version``.
+    Do not remove them as redundant.
+
+    Deliberately built from ``HttpRequest`` rather than
+    ``rest_framework.test.APIRequestFactory``: this is production code and
+    should not import a test helper.
+    """
+    base = HttpRequest()
+    # POST is the most common write-action method, and anonymous avoids any
+    # auth-dependent branching in the host's get_serializer_class().
+    base.method = "POST"
+    base.GET = QueryDict("")
+    base.META["SERVER_NAME"] = "localhost"
+    base.META["SERVER_PORT"] = "80"
+    # DRF's _load_stream() reads both of these directly; HttpRequest only
+    # establishes them on first read().
+    base._read_started = False  # type: ignore[attr-defined]  # pylint: disable=protected-access
+    base._stream = BytesIO(b"")  # pylint: disable=protected-access
+
+    request = Request(base)
+    request.user = AnonymousUser()
+    request.version = None
+    request.versioning_scheme = None
+    return request
 
 
 def _schema_from_action_signature(
