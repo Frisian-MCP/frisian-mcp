@@ -93,10 +93,17 @@ FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
 # Reverse Proxy
 # ---------------------------------------------------------------------------
 
-# Set to True when Paperless-ngx runs behind nginx, Caddy, or a cloud
-# load balancer. Reads X-Forwarded-Proto and X-Forwarded-Host for
-# issuer URL construction and OAuth redirect URI validation.
-FRISIAN_MCP_TRUST_PROXY = os.environ.get("FRISIAN_MCP_TRUST_PROXY", "false").lower() == "true"
+# Required when Paperless-ngx runs behind nginx, Caddy, or a cloud load balancer.
+# Governs how many X-Forwarded-For hops are trusted when deriving the
+# client IP for OAuth rate limiting, and the host used for issuer URL
+# construction and OAuth redirect URI validation.
+#
+# This is an INTEGER hop count, not a boolean: 1 for a single nginx or
+# Caddy in front, 2 for nginx behind a cloud load balancer, 0 (the
+# default) when nothing is in front. Set it to the number of proxies you
+# actually control — set it too high and a caller can spoof the leftmost
+# hop with a forged X-Forwarded-For header.
+FRISIAN_MCP_TRUSTED_PROXY_COUNT = int(os.environ.get("FRISIAN_MCP_TRUSTED_PROXY_COUNT", "0"))
 
 # Trusted origins for CSRF. Add your public domain and any AI client origins.
 CSRF_TRUSTED_ORIGINS = [

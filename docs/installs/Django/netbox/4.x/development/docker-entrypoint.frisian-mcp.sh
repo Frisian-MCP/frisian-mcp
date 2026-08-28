@@ -26,6 +26,16 @@ elif [ -x /usr/local/bin/uv ]; then
     /usr/local/bin/uv pip install setuptools -q
     INSTALL_CMD="/usr/local/bin/uv pip install -q"
     INSTALL_EDITABLE="/usr/local/bin/uv pip install -q --no-build-isolation -e"
+elif command -v pip >/dev/null 2>&1; then
+    # Custom builds from the Dockerfile beside this script (python:3.12-slim):
+    # no venv at $VENV, no uv, pip on PATH at /usr/local/bin/pip.  This is the
+    # case the header comment above describes and the branches above miss.
+    # The VIRTUAL_ENV/PATH exports above are inert here: $VENV does not exist
+    # in this image, and pip resolves its target from sys.prefix, not from
+    # VIRTUAL_ENV (uv is the one that honours it).
+    PIP="$(command -v pip)"
+    INSTALL_CMD="$PIP install -q"
+    INSTALL_EDITABLE="$PIP install -q --no-build-isolation -e"
 else
     echo "ERROR: neither pip nor uv found in the container" >&2
     exit 1

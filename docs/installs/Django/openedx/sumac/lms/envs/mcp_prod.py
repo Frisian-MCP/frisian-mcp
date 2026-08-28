@@ -128,9 +128,16 @@ FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
 # ---------------------------------------------------------------------------
 
 # Required when the LMS runs behind nginx, Caddy, or a cloud load balancer.
-# Reads X-Forwarded-Proto and X-Forwarded-Host for issuer URL construction
-# and OAuth redirect URI validation.
-FRISIAN_MCP_TRUST_PROXY = os.environ.get("FRISIAN_MCP_TRUST_PROXY", "false").lower() == "true"
+# Governs how many X-Forwarded-For hops are trusted when deriving the
+# client IP for OAuth rate limiting, and the host used for issuer URL
+# construction and OAuth redirect URI validation.
+#
+# This is an INTEGER hop count, not a boolean: 1 for a single nginx or
+# Caddy in front, 2 for nginx behind a cloud load balancer, 0 (the
+# default) when nothing is in front. Set it to the number of proxies you
+# actually control — set it too high and a caller can spoof the leftmost
+# hop with a forged X-Forwarded-For header.
+FRISIAN_MCP_TRUSTED_PROXY_COUNT = int(os.environ.get("FRISIAN_MCP_TRUSTED_PROXY_COUNT", "0"))
 
 # Add your LMS domain and AI client origins to CSRF trusted origins.
 _lms_issuer = os.environ.get("FRISIAN_MCP_OAUTH_ISSUER", "")
