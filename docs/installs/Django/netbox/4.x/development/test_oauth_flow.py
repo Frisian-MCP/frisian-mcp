@@ -11,7 +11,7 @@ development/configuration.py ships the hardened posture, and every line below
 relaxes it for a local dev run only.
 
     FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = True    — step 1 reads .well-known
-    FRISIAN_MCP_OAUTH_AUTO_APPROVE = True        — remembers consent, see below
+    FRISIAN_MCP_OAUTH_AUTO_APPROVE = True        — see the consent note below
     FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True  — unknown PKCE clients auto-register
     FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["localhost"]
     FRISIAN_MCP_OAUTH_ISSUER = "http://localhost:8080"
@@ -21,9 +21,10 @@ is empty, and the wire response is a bare invalid_client indistinguishable
 from a genuinely unknown client.  The real cause reaches the server log only,
 as oauth_pkce_auto_register_allowlist_empty.
 
-AUTO_APPROVE = True does NOT mean "no consent page".  A first-time client
-always renders the form; AUTO_APPROVE grants silent RE-approval for a repeat
-of the same (user, client_id, redirect_uri, scope).  Step 3 submits it.
+AUTO_APPROVE = True does NOT mean "no consent page".  The consent form renders
+on EVERY run of this script, and that is expected: silent re-approval is keyed
+to an authenticated user, and this script is an anonymous PKCE walk-up with no
+Django session, so re-approval can never engage.  Step 3 submits the form.
 """
 
 import base64
@@ -146,10 +147,10 @@ def _authorize(method, url, data=None, cookie=""):
 status, resp_headers, page = _authorize("GET", authorize_url)
 location = resp_headers.get("Location", "")
 
-# A 200 here is the consent form, not an error: the first authorization for a
-# given client always passes the consent gate, whatever AUTO_APPROVE is set to.
+# A 200 here is the consent form, not an error — see the consent note in the
+# module docstring.
 if status == 200:
-    info("Consent form returned (first-time client) — submitting approval")
+    info("Consent form returned — submitting approval")
     token_match = re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', page)
     if not token_match:
         fail("Consent page carried no csrfmiddlewaretoken", page[:300])
