@@ -506,7 +506,7 @@ client-credential entry as described above.
 
 ### Verifying the OAuth Flow
 
-A standalone end-to-end OAuth test script is included at `development/test_oauth_flow.py`. It validates well-known discovery, PKCE authorization code flow, token exchange, and a live `tools/list` call against a running NetBox instance. Run it against your dev environment before deploying to production:
+A standalone end-to-end OAuth test script is included at `development/test_oauth_flow.py`. It validates well-known discovery, PKCE authorization code flow, token exchange, and a live `tools/list` call against a running NetBox instance. **It needs five settings relaxed from the hardened posture before it will run — they are listed in the script's docstring.** Run it against your dev environment, never against production:
 
 ```bash
 NETBOX_BASE_URL=http://localhost:8080 python development/test_oauth_flow.py
