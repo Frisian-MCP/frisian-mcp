@@ -26,6 +26,7 @@ from django.urls import URLPattern, URLResolver, get_resolver
 from rest_framework.relations import ManyRelatedField, RelatedField, SlugRelatedField
 from rest_framework.request import Request
 from rest_framework.serializers import ListSerializer
+from rest_framework.settings import api_settings
 from rest_framework.viewsets import ViewSetMixin
 
 try:
@@ -532,6 +533,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         viewset.request = _build_discovery_stub_request()
         viewset.format_kwarg = None
         viewset.action = action
+        _apply_discovery_versioning(viewset)
         # ``@action(serializer_class=...)`` is the canonical way to select a
         # serializer per action, and it does not reach the class: DRF's
         # decorator parks the kwargs on the method, its router merges them into
@@ -627,10 +629,14 @@ def _build_discovery_stub_request() -> Request:
     ``Request`` instead of imitating one, which supplies the whole surface at
     once.
 
-    ``version`` and ``versioning_scheme`` are set explicitly because DRF
-    assigns them in ``APIView.initialize_request()``, **not** in
-    ``Request.__init__``; a bare ``Request`` still raises on ``.version``.
-    Do not remove them as redundant.
+    ``version`` and ``versioning_scheme`` are deliberately **not** set here.
+    They are properties of the *view*, not the request: DRF assigns them in
+    ``APIView.initial()`` from the view's ``versioning_class``.  A bare
+    ``Request`` does raise on ``.version``, but setting it here only replaced
+    that ``AttributeError`` with a wrong value — a host reading
+    ``int(request.version)`` then failed on ``None`` instead.
+    :func:`_apply_discovery_versioning` fills both in per viewset, from the
+    host's own configuration.
 
     Deliberately built from ``HttpRequest`` rather than
     ``rest_framework.test.APIRequestFactory``: this is production code and
@@ -650,9 +656,54 @@ def _build_discovery_stub_request() -> Request:
 
     request = Request(base)
     request.user = AnonymousUser()
-    request.version = None
-    request.versioning_scheme = None
+    # No ``version`` / ``versioning_scheme`` here — see the docstring;
+    # ``_apply_discovery_versioning`` sets them per viewset.
     return request
+
+
+def _apply_discovery_versioning(viewset: Any) -> None:
+    """Give the discovery request the version a dispatched request would have.
+
+    A dispatched request gets ``version`` and ``versioning_scheme`` from
+    ``APIView.initial()``.  The discovery request never goes through
+    ``initial()``, so those attributes were previously absent (raising
+    ``AttributeError``) and then hardcoded to ``None`` (raising ``TypeError``
+    in any host that dereferences them unguarded, e.g. ``int(request.version)``).
+
+    Neither is right.  The host's own configuration already says what the
+    version should be -- ``DEFAULT_VERSIONING_CLASS`` and ``DEFAULT_VERSION``,
+    or a ``versioning_class`` on the view -- so this runs DRF's real
+    determination instead of inventing a value.  A host with no versioning
+    configured still gets ``None``, because that is what a dispatched request
+    would carry; matching DRF is the point, not avoiding ``None``.
+
+    ⚠️ This deliberately runs only the *version* part of ``initial()``.
+    ``initial()`` also calls ``perform_authentication``, ``check_permissions``
+    and ``check_throttles``, and **none of those may run at discovery time**:
+    discovery enumerates the whole surface at startup with a synthetic
+    anonymous request, so evaluating permissions here would either fail
+    spuriously or, worse, answer a permission question with the wrong
+    principal.  Tier and capability filtering happen per request, elsewhere.
+
+    Content negotiation is included because it is a prerequisite:
+    ``AcceptHeaderVersioning`` reads ``request.accepted_media_type``, which
+    ``initial()`` sets immediately before determining the version.
+    """
+    request = viewset.request
+    try:
+        renderer, media_type = viewset.perform_content_negotiation(request)
+        request.accepted_renderer, request.accepted_media_type = renderer, media_type
+    except Exception:  # pylint: disable=broad-exception-caught
+        # A host whose renderers cannot negotiate against our synthetic request
+        # must not take discovery down; the versioning scheme below falls back.
+        request.accepted_renderer, request.accepted_media_type = None, None
+    try:
+        version, scheme = viewset.determine_version(request)
+    except Exception:  # pylint: disable=broad-exception-caught
+        # NotAcceptable and friends: fall back to the configured default rather
+        # than leaving ``version`` unset.
+        version, scheme = api_settings.DEFAULT_VERSION, None
+    request.version, request.versioning_scheme = version, scheme
 
 
 def _schema_from_action_signature(

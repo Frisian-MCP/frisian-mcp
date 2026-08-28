@@ -31,8 +31,14 @@ from __future__ import annotations
 from typing import Any
 
 from rest_framework import serializers, viewsets
+from rest_framework.exceptions import NotAcceptable
+from rest_framework.versioning import AcceptHeaderVersioning
 
-from frisian_mcp.backends.discovery import DRFSyncDiscovery
+from frisian_mcp.backends.discovery import (
+    DRFSyncDiscovery,
+    _apply_discovery_versioning,
+    _build_discovery_stub_request,
+)
 
 
 class ThingSerializer(serializers.Serializer):  # type: ignore[type-arg]
@@ -164,3 +170,148 @@ class TestUnderivableSerializerStillDegrades:
         message = caplog.text
         assert "RuntimeError" in message
         assert "distinctive-marker-text" in message
+
+
+# Provenance: mirrors a real host measured during the server tests, which
+# configures AcceptHeaderVersioning with DEFAULT_VERSION = "9".
+class NineVersioning(AcceptHeaderVersioning):
+    """A versioning scheme whose configured default version is ``"9"``."""
+
+    default_version = "9"
+
+
+# Provenance: this is the shape of a real host ViewSet measured during the
+# server tests, which calls int(self.request.version) with no None guard.
+class VersionedViewSet(viewsets.ViewSet):
+    """Dereferences ``request.version`` unguarded.
+
+    ``int(self.request.version)`` raises ``TypeError`` on ``None``, which is
+    what the discovery request carried before the version was determined.
+    """
+
+    versioning_class = NineVersioning
+
+    def get_serializer_class(self) -> type[serializers.Serializer[Any]]:
+        """Return the serializer, branching on the negotiated API version."""
+        if int(self.request.version) == 1:
+            return BriefSerializer
+        return ThingSerializer
+
+
+class UnversionedViewSet(viewsets.ViewSet):
+    """A host with no versioning configured."""
+
+    versioning_class = None
+
+    def get_serializer_class(self) -> type[serializers.Serializer[Any]]:
+        """Return the serializer without consulting the version."""
+        return ThingSerializer
+
+
+def _prepared(view_class: type, action: str = "update") -> Any:
+    """Return a viewset prepared the way discovery prepares one."""
+    viewset = view_class()
+    viewset.request = _build_discovery_stub_request()
+    viewset.format_kwarg = None
+    viewset.action = action
+    _apply_discovery_versioning(viewset)
+    return viewset
+
+
+class TestVersionComesFromTheHostConfiguration:
+    """``request.version`` must match what a dispatched request would carry."""
+
+    def test_configured_default_version_is_resolved(self) -> None:
+        """The value comes from the host's versioning scheme, not a constant.
+
+        Hardcoding ``version = None`` fixed the ``AttributeError`` and created
+        a ``TypeError`` for any host that dereferences it unguarded.  Neither
+        value was ever *correct* -- the host's own configuration says what it
+        should be.
+        """
+        request = _prepared(VersionedViewSet).request
+        assert request.version == "9"
+        assert isinstance(request.versioning_scheme, NineVersioning)
+
+    def test_unversioned_host_still_gets_none(self) -> None:
+        """No versioning configured means ``None`` -- matching DRF, not avoiding it."""
+        request = _prepared(UnversionedViewSet).request
+        assert request.version is None
+        assert request.versioning_scheme is None
+
+    def test_content_negotiation_runs_because_versioning_needs_it(self) -> None:
+        """``AcceptHeaderVersioning`` reads ``accepted_media_type``.
+
+        ``initial()`` negotiates immediately before determining the version;
+        skipping that step leaves the scheme unable to resolve anything.
+        """
+        assert _prepared(VersionedViewSet).request.accepted_media_type == "application/json"
+
+    def test_versioned_viewset_derives_a_real_schema(self) -> None:
+        """End-to-end: a version-dereferencing host no longer falls back to empty.
+
+        Also the wiring test -- the assertions above call the helper directly,
+        so this is the one that fails if discovery stops invoking it.
+        """
+        schema = _derive(VersionedViewSet)
+        assert sorted(schema["properties"]) == ["name", "status"]
+
+    def test_unversioned_viewset_is_unaffected(self) -> None:
+        """The host shape that already worked keeps working."""
+        assert sorted(_derive(UnversionedViewSet)["properties"]) == ["name", "status"]
+
+
+class TestDiscoveryNeverEvaluatesAuthorisation:
+    """🔴 Only the *version* half of ``initial()`` may run at discovery time."""
+
+    def test_permission_checks_are_not_invoked(self) -> None:
+        """Discovery must not answer a permission question with a synthetic principal.
+
+        ``initial()`` also runs ``perform_authentication``, ``check_permissions``
+        and ``check_throttles``.  Discovery enumerates the whole surface at
+        startup with an anonymous stub, so running those would either fail
+        spuriously or evaluate authorisation against the wrong principal --
+        tier and capability filtering happen per request, elsewhere.
+        """
+        called: list[str] = []
+
+        class GuardedViewSet(UnversionedViewSet):
+            """A ViewSet whose authorisation hooks must never fire here."""
+
+            def perform_authentication(self, request: Any) -> None:
+                called.append("authentication")
+                raise AssertionError("discovery must not authenticate")
+
+            def check_permissions(self, request: Any) -> None:
+                called.append("permissions")
+                raise AssertionError("discovery must not check permissions")
+
+            def check_throttles(self, request: Any) -> None:
+                called.append("throttles")
+                raise AssertionError("discovery must not check throttles")
+
+        schema = _derive(GuardedViewSet)
+
+        assert called == []
+        assert sorted(schema["properties"]) == ["name", "status"]
+
+
+class TestVersioningFailureDegrades:
+    """A scheme that rejects the synthetic request must not break discovery."""
+
+    def test_not_acceptable_falls_back_instead_of_raising(self) -> None:
+        """``NotAcceptable`` from the scheme leaves derivation working."""
+
+        class RejectingVersioning(AcceptHeaderVersioning):
+            """A scheme that refuses whatever the discovery request offers."""
+
+            def determine_version(self, request: Any, *args: Any, **kwargs: Any) -> str:
+                """Reject every version."""
+                raise NotAcceptable("nope")
+
+        class RejectingViewSet(UnversionedViewSet):
+            """Host view whose versioning scheme rejects the stub request."""
+
+            versioning_class = RejectingVersioning
+
+        assert sorted(_derive(RejectingViewSet)["properties"]) == ["name", "status"]
