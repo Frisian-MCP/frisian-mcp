@@ -53,7 +53,7 @@ jobs:
           # Update this list when team membership changes:
           # https://github.com/orgs/Frisian-MCP/teams/core-maintainers
           case "$AUTHOR" in
-            Jeremy-Friese|salehkabuawad)
+            Jeremy-Friese|PineapppleBun|drewelliott)
               echo "✓ $AUTHOR is a Core Maintainer — workflow edit allowed."
               ;;
             *)
