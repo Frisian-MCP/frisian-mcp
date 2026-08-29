@@ -74,6 +74,7 @@ class Command(BaseCommand):
         discovery_error = self._force_discovery()
         self._check_performance_hints(warnings, discovery_error=discovery_error)
         self._check_oauth_registration(warnings)
+        self._check_discovery_reachable(warnings)
         self._check_oauth_authorize_url(warnings)
         self._check_oauth_tier_permissions(warnings)
         self._check_oauth_pkce_redirect_tier_map(warnings)
@@ -317,16 +318,39 @@ class Command(BaseCommand):
             "(FRISIAN_MCP_ROUTES; the legacy frisian_mcp:gateway mount is intentionally absent)"
         )
 
+    def _wellknown_url_mounted(self, url_name: str) -> bool:
+        """
+        Return ``True`` when *url_name* resolves in this URLconf.
+
+        One definition, shared by :meth:`_check_url_mounting` and
+        :meth:`_check_discovery_reachable`.  Open-coding the same question twice
+        is how the protected-resource derivation drifted (V11-16).
+
+        It is **parameterised by URL name on purpose**: the two callers ask about
+        two different endpoints, and they are separately mountable.  The package
+        ships them in one ``include()``, so they normally travel together — but a
+        host that hand-rolls its ``.well-known`` patterns can mount the
+        authorization-server URL and omit the protected-resource one.  Reversing
+        the authorization-server name would then report discovery reachable while
+        a client GET on ``/.well-known/oauth-protected-resource`` takes a URLconf
+        404 the view never sees.  **Reverse the URL you are about to make a claim
+        about, not a neighbour of it.**
+        """
+        from django.urls import reverse  # pylint: disable=import-outside-toplevel
+
+        try:
+            reverse(f"frisian_mcp_oauth_wellknown:{url_name}")
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
+        return True
+
     def _check_url_mounting(self, warnings: list[str]) -> None:
         """Check that the MCP gateway is reachable in the URL configuration."""
         self._check_gateway_mounted(warnings)
 
-        try:
-            from django.urls import reverse  # pylint: disable=import-outside-toplevel
-
-            reverse("frisian_mcp_oauth_wellknown:oauth_authorization_server")
+        if self._wellknown_url_mounted("oauth_authorization_server"):
             self._ok("OAuth .well-known URLs mounted")
-        except Exception:  # pylint: disable=broad-exception-caught
+        else:
             self._warn_msg(
                 warnings,
                 "OAuth .well-known URLs not mounted — add"
@@ -561,6 +585,132 @@ class Command(BaseCommand):
                 " the .well-known metadata and must use pre-provisioned credentials."
                 " Set to True if you want end-to-end agent autodiscovery.",
             )
+
+    def _probe_bare_metadata(self) -> int:
+        """
+        Return the status a client would get from the bare RFC 9728 endpoint.
+
+        This **calls the real view** rather than re-deriving its conditions.  The
+        derivation being duplicated in a second place is how V11-16 happened, and
+        a check that reads settings instead of behaviour is how a documented
+        ``UNAUTHENTICATED_TIER`` lockdown was greenlit while being a no-op.  What
+        an operator needs to know is what a client actually receives.
+
+        A management command serves no request, so the probe supplies a synthetic
+        one.  The view's two refusal branches — discovery disabled, and no
+        resolvable resource — both ``return`` a response and touch nothing on the
+        request; only the success path reads it, to build the absolute base URL.
+        So an exception here proves **neither refusal fired**, and is reported as
+        ``200``: the document exists, and this check's question ("can a client
+        discover a route?") is answered yes even though a base URL could not be
+        constructed outside a request cycle.
+
+        That is measured, not assumed — a host with three routes and no
+        ``FRISIAN_MCP_OAUTH_ISSUER`` raises ``KeyError('SERVER_NAME')`` from
+        ``build_absolute_uri`` on the success path, while both refusals return a
+        clean ``404`` from the same synthetic request.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from django.http import HttpRequest
+
+        # pylint: disable-next=import-outside-toplevel
+        from frisian_mcp.contrib.oauth.views import OAuthProtectedResourceView
+
+        request = HttpRequest()
+        request.method = "GET"
+        request.path = "/.well-known/oauth-protected-resource"
+        try:
+            response = OAuthProtectedResourceView.as_view()(request)
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            return 200
+        return int(response.status_code)
+
+    def _check_discovery_reachable(self, warnings: list[str]) -> None:
+        """
+        Warn when authenticated routes exist but no client can discover them.
+
+        The cell: ``FRISIAN_MCP_ROUTES`` mounts routes OAuth guards, and the bare
+        ``/.well-known/oauth-protected-resource`` refuses to describe them.  The
+        route is mounted, configured and correct, and every discovering client is
+        turned away — the defect being fixed in this release, found by a human
+        noticing an agent could not authenticate rather than by any check.
+
+        Scoped to hosts that *have* something to advertise.  When no route
+        requires authentication there is genuinely no protected resource, the
+        endpoint's 404 is the honest answer, and warning about it would fire on
+        the open-demo posture the package explicitly supports.
+
+        **Warning, not error.**  Running with discovery closed is a legitimate
+        deliberate posture — a host issuing pre-provisioned credentials only, and
+        one that becomes *more* attractive now that the bare endpoint names the
+        most privileged route.  Refusing to boot it, or failing its CI, would be
+        a false positive on a working deployment.  By the ``checks.py``
+        convention this is configuration hygiene, not indeterminate security
+        metadata, so it takes the ``Warning`` side.
+
+        For the same reason ``--strict`` deliberately does **not** escalate it:
+        strict mode exists so CI can gate on the route *surface*, and a host that
+        has chosen closed discovery would otherwise fail a gate for a setting it
+        set on purpose.  That is a different thing from an audit that could not
+        run, which strict mode does escalate because it has proved nothing.
+        """
+        if not getattr(settings, "FRISIAN_MCP_ROUTES", None):
+            return
+
+        # The probe calls the view directly, which answers "would the view serve
+        # this?" but not "is the view routable?".  When the endpoint is not
+        # mounted a client gets a URLconf 404 the view never sees, so claiming
+        # discovery is reachable would be exactly the mechanism-not-effect error
+        # this check exists to avoid.  Reverse the PROTECTED-RESOURCE name --
+        # the endpoint actually probed -- not the authorization-server one
+        # beside it, which is separately mountable.  ``_check_url_mounting`` has
+        # already reported the common cause and named the fix, so say nothing
+        # rather than emit a second message for one root cause.
+        if not self._wellknown_url_mounted("oauth_protected_resource"):
+            return
+
+        # pylint: disable-next=import-outside-toplevel
+        from frisian_mcp.route_resources import (
+            default_protected_resource,
+            protected_resources,
+        )
+
+        try:
+            resources = protected_resources()
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            self._warn_msg(warnings, f"OAuth discovery reachability check could not run: {exc}")
+            return
+
+        if not resources:
+            return
+
+        if self._probe_bare_metadata() == 200:
+            # Say *mounts*, and name the one door the bare document resolves to.
+            # The count comes from ``protected_resources()``; the reachability
+            # comes from the bare view, and that document carries exactly ONE
+            # ``resource``.  Welding the two into "describes N routes" obscures
+            # the precise fact this release is about -- the others are reachable
+            # only via their path-suffixed metadata.
+            chosen = default_protected_resource()
+            named = f"/{chosen.url_path}" if chosen is not None else "(none)"
+            self._ok(
+                f"OAuth discovery reachable — {len(resources)} authenticated route(s) "
+                f"mounted; the bare /.well-known/oauth-protected-resource resolves "
+                f"to {named}"
+            )
+            return
+
+        discovery = getattr(settings, "FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY", True)
+        self._warn_msg(
+            warnings,
+            f"FRISIAN_MCP_ROUTES mounts {len(resources)} authenticated route(s), but the bare"
+            f" /.well-known/oauth-protected-resource returns 404"
+            f" (FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY={discovery}) — no OAuth client can discover"
+            " any of them. The path-suffixed metadata is refused by the same gate, so a client"
+            " that follows the resource_metadata pointer in a 401 challenge is turned away too:"
+            " agents must be given the route URL out of band and pre-provisioned credentials."
+            " Set FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY=True to advertise them.",
+        )
 
     def _check_oauth_authorize_url(self, warnings: list[str]) -> None:
         """Check that FRISIAN_MCP_OAUTH_AUTHORIZE_URL is reachable when set."""

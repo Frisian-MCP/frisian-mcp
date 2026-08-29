@@ -33,7 +33,7 @@ FRISIAN_MCP_ROUTES = {
     "default":  {"path": "/mcp",          "highest_tier": "read"},
     "elevated": {"path": "/mcp/elevated", "highest_tier": "read_write",
                  "allow_list": ["*"]},
-    "admin":    {"path": "/mcp/admin",    "highest_tier": "admin",
+    "admin":    {"path": "/mcp/ops",      "highest_tier": "admin",
                  "allow_list": ["*"], "deny_list": ["billing"]},
 }
 ```
@@ -52,6 +52,18 @@ to a route config with these fields:
 
 A tier key you do not list is **not mounted** — it does not exist. Configure only
 `default` and only `/mcp` exists.
+
+> **Avoid `admin` in the `path`.** A route mounted at `/mcp/admin` was refused
+> client-side by ChatGPT, Claude.ai and Grok — before any request reached the
+> server. Renaming the path, tier key unchanged, let all three connect. The tier
+> key is `admin`; the path does not have to be.
+>
+> Other segments may behave the same way, and the server log is how you tell. A
+> client refusing the path either sends nothing at all, or skips the challenge
+> and fetches the bare `/.well-known/oauth-protected-resource` instead of the
+> path-suffixed form. That document names exactly one route; where it is not the
+> route you configured, the connection then fails rather than falling back to it.
+> If you see either shape, change the path suffix.
 
 ### Permission tiers
 

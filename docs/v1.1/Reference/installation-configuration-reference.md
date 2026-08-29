@@ -101,7 +101,7 @@ Mounts read / read-write / admin surfaces on separate paths, each with its own t
 FRISIAN_MCP_ROUTES = {
     "default":  {"path": "/mcp",          "highest_tier": "read"},
     "elevated": {"path": "/mcp/elevated", "highest_tier": "read_write", "allow_list": ["*"]},
-    "admin":    {"path": "/mcp/admin",    "highest_tier": "admin",      "allow_list": ["*"], "deny_list": ["billing"]},
+    "admin":    {"path": "/mcp/ops",      "highest_tier": "admin",      "allow_list": ["*"], "deny_list": ["billing"]},
 }
 ```
 
