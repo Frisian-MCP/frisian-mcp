@@ -263,8 +263,9 @@ python manage.py lms migrate
 >
 > Open edX runs on MySQL. The `frisian_mcp_oauth.0003` migration declares a
 > `UniqueConstraint` whose combined column length exceeds MySQL's 3,072-byte
-> index limit, so `migrate` aborts and the OAuth consent table is never created.
-> Every OAuth-dependent step in this document is blocked behind it.
+> index limit, so `migrate` aborts partway through — which can leave an orphaned
+> consent table behind, as the upgrade note below explains. Every OAuth-dependent
+> step in this document is blocked behind it.
 >
 > This is tracked as
 > [frisian-mcp #72](https://github.com/Frisian-MCP/frisian-mcp/issues/72).

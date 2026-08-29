@@ -103,6 +103,11 @@ FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = False
 # default) when nothing is in front. Set it to the number of proxies you
 # actually control — set it too high and a caller can spoof the leftmost
 # hop with a forged X-Forwarded-For header.
+#
+# If you previously set FRISIAN_MCP_TRUST_PROXY — an earlier revision of this
+# template shipped that name — it was NEVER read by the package. Proxy trust was
+# inert whatever you set it to: issuer URLs fell back to build_absolute_uri()
+# and rate limiting keyed on REMOTE_ADDR. Set the count below instead.
 FRISIAN_MCP_TRUSTED_PROXY_COUNT = int(os.environ.get("FRISIAN_MCP_TRUSTED_PROXY_COUNT", "0"))
 
 # Trusted origins for CSRF. Add your public domain and any AI client origins.
