@@ -26,7 +26,6 @@ from django.urls import URLPattern, URLResolver, get_resolver
 from rest_framework.relations import ManyRelatedField, RelatedField, SlugRelatedField
 from rest_framework.request import Request
 from rest_framework.serializers import ListSerializer
-from rest_framework.settings import api_settings
 from rest_framework.viewsets import ViewSetMixin
 
 try:
@@ -664,29 +663,24 @@ def _build_discovery_stub_request() -> Request:
 def _apply_discovery_versioning(viewset: Any) -> None:
     """Give the discovery request the version a dispatched request would have.
 
-    A dispatched request gets ``version`` and ``versioning_scheme`` from
-    ``APIView.initial()``.  The discovery request never goes through
-    ``initial()``, so those attributes were previously absent (raising
-    ``AttributeError``) and then hardcoded to ``None`` (raising ``TypeError``
-    in any host that dereferences them unguarded, e.g. ``int(request.version)``).
+    A dispatched request gets ``version`` / ``versioning_scheme`` from
+    ``APIView.initial()``, which the discovery request never goes through.  So
+    they were first absent (``AttributeError``) and then hardcoded to ``None``
+    (``TypeError`` in a host doing ``int(request.version)``).  Neither is right:
+    the host's own configuration says what the version should be, so this runs
+    DRF's determination rather than inventing a value.  No versioning
+    configured still yields ``None`` -- matching dispatch is the point, not
+    avoiding ``None``.
 
-    Neither is right.  The host's own configuration already says what the
-    version should be -- ``DEFAULT_VERSIONING_CLASS`` and ``DEFAULT_VERSION``,
-    or a ``versioning_class`` on the view -- so this runs DRF's real
-    determination instead of inventing a value.  A host with no versioning
-    configured still gets ``None``, because that is what a dispatched request
-    would carry; matching DRF is the point, not avoiding ``None``.
+    ⚠️ Runs ONLY the version part of ``initial()``.  ``initial()`` also calls
+    ``perform_authentication``, ``check_permissions`` and ``check_throttles``,
+    and **none may run at discovery time**: discovery enumerates the whole
+    surface at startup with a synthetic anonymous request, so evaluating
+    permissions here would fail spuriously or answer a permission question with
+    the wrong principal.  Tier and capability filtering happen per request.
 
-    ⚠️ This deliberately runs only the *version* part of ``initial()``.
-    ``initial()`` also calls ``perform_authentication``, ``check_permissions``
-    and ``check_throttles``, and **none of those may run at discovery time**:
-    discovery enumerates the whole surface at startup with a synthetic
-    anonymous request, so evaluating permissions here would either fail
-    spuriously or, worse, answer a permission question with the wrong
-    principal.  Tier and capability filtering happen per request, elsewhere.
-
-    Content negotiation is included because it is a prerequisite:
-    ``AcceptHeaderVersioning`` reads ``request.accepted_media_type``, which
+    Content negotiation IS included -- it is a prerequisite:
+    ``AcceptHeaderVersioning`` reads ``accepted_media_type``, which
     ``initial()`` sets immediately before determining the version.
     """
     request = viewset.request
@@ -700,9 +694,21 @@ def _apply_discovery_versioning(viewset: Any) -> None:
     try:
         version, scheme = viewset.determine_version(request)
     except Exception:  # pylint: disable=broad-exception-caught
-        # NotAcceptable and friends: fall back to the configured default rather
-        # than leaving ``version`` unset.
-        version, scheme = api_settings.DEFAULT_VERSION, None
+        # Fall back to the VIEW's own scheme default, NOT the global setting.
+        # ``api_settings.DEFAULT_VERSION`` discards a ``versioning_class`` that
+        # declares its own ``default_version`` — substituting a wrong value for
+        # an absent one, the failure this function exists to remove, via the
+        # error path.  ``BaseVersioning.default_version`` already defaults to
+        # the global, so a scheme declaring nothing still degrades to it.
+        # Reachable where a scheme resolves from data the stub lacks, e.g.
+        # ``HostNameVersioning`` reading a version out of the hostname.
+        # No versioning configured yields ``None`` for both, matching dispatch.
+        scheme_class = getattr(viewset, "versioning_class", None)
+        try:
+            scheme = scheme_class() if scheme_class is not None else None
+        except Exception:  # pylint: disable=broad-exception-caught
+            scheme = None  # a scheme doing work in __init__ must not kill discovery
+        version = getattr(scheme, "default_version", None)
     request.version, request.versioning_scheme = version, scheme
 
 

@@ -32,7 +32,7 @@ from typing import Any
 
 from rest_framework import serializers, viewsets
 from rest_framework.exceptions import NotAcceptable
-from rest_framework.versioning import AcceptHeaderVersioning
+from rest_framework.versioning import AcceptHeaderVersioning, HostNameVersioning
 
 from frisian_mcp.backends.discovery import (
     DRFSyncDiscovery,
@@ -296,22 +296,90 @@ class TestDiscoveryNeverEvaluatesAuthorisation:
         assert sorted(schema["properties"]) == ["name", "status"]
 
 
+class RejectingVersioning(AcceptHeaderVersioning):
+    """A scheme that refuses whatever the discovery request offers.
+
+    Declares its own ``default_version`` so the fallback has something to lose.
+    """
+
+    default_version = "9"
+
+    def determine_version(self, request: Any, *args: Any, **kwargs: Any) -> str:
+        """Reject every version."""
+        raise NotAcceptable("nope")
+
+
+class RejectingViewSet(UnversionedViewSet):
+    """Host view whose versioning scheme rejects the stub request."""
+
+    versioning_class = RejectingVersioning
+
+
+# HostNameVersioning reads the version out of the hostname.  The discovery
+# request has no meaningful host, so this scheme genuinely cannot resolve one
+# and raises -- which is what makes it the realistic route into the fallback.
+class HostNameNineVersioning(HostNameVersioning):
+    """A hostname-based scheme declaring its own default version."""
+
+    default_version = "9"
+
+
+class HostVersionedViewSet(viewsets.ViewSet):
+    """A view whose versioning scheme cannot read the synthetic request."""
+
+    versioning_class = HostNameNineVersioning
+
+    def get_serializer_class(self) -> type[serializers.Serializer[Any]]:
+        """Dereference the version unguarded, as a real host does."""
+        if int(self.request.version) == 1:
+            return BriefSerializer
+        return ThingSerializer
+
+
 class TestVersioningFailureDegrades:
     """A scheme that rejects the synthetic request must not break discovery."""
 
     def test_not_acceptable_falls_back_instead_of_raising(self) -> None:
         """``NotAcceptable`` from the scheme leaves derivation working."""
-
-        class RejectingVersioning(AcceptHeaderVersioning):
-            """A scheme that refuses whatever the discovery request offers."""
-
-            def determine_version(self, request: Any, *args: Any, **kwargs: Any) -> str:
-                """Reject every version."""
-                raise NotAcceptable("nope")
-
-        class RejectingViewSet(UnversionedViewSet):
-            """Host view whose versioning scheme rejects the stub request."""
-
-            versioning_class = RejectingVersioning
-
         assert sorted(_derive(RejectingViewSet)["properties"]) == ["name", "status"]
+
+    def test_fallback_keeps_the_views_own_scheme_default(self) -> None:
+        """The fallback must not discard a ``versioning_class``'s own default.
+
+        Falling back to the **global** ``DEFAULT_VERSION`` throws away a scheme
+        that declares its own, substituting a wrong value for an absent one --
+        the same failure this module exists to remove, via the error path.
+        The global default is ``None`` in this suite, so a fallback that used it
+        would yield ``None`` here.
+        """
+        request = _prepared(RejectingViewSet).request
+        assert request.version == "9"
+        assert isinstance(request.versioning_scheme, RejectingVersioning)
+
+    def test_unversioned_view_still_falls_back_to_none(self) -> None:
+        """No ``versioning_class`` means ``None`` -- matching a dispatched request."""
+        request = _prepared(UnversionedViewSet).request
+        assert request.version is None
+        assert request.versioning_scheme is None
+
+
+class TestSchemeThatCannotReadTheStubRequest:
+    """A scheme that resolves from data the synthetic request lacks.
+
+    This is the realistic route into the fallback, not a contrived one:
+    ``HostNameVersioning`` reads the version out of the hostname, and the
+    discovery request has no meaningful host to read.
+    """
+
+    def test_hostname_scheme_falls_back_to_its_own_default(self) -> None:
+        """The view's declared default survives a scheme that cannot resolve."""
+        request = _prepared(HostVersionedViewSet).request
+        assert request.version == "9"
+
+    def test_hostname_scheme_still_derives_a_real_schema(self) -> None:
+        """End-to-end: a host using hostname versioning is not left with ``{}``.
+
+        Before this fix the chain was: scheme raises -> fallback discards the
+        scheme -> version ``None`` -> ``int(None)`` -> empty schema.
+        """
+        assert sorted(_derive(HostVersionedViewSet)["properties"]) == ["name", "status"]
