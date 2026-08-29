@@ -11,6 +11,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Django 6.0 support declared.** The package is now classified for Django 6.0 in
+  addition to 5.0–5.2. No code change was required; the classifier previously stopped at
+  5.2 while `django>=5.0` carried no upper bound, so the package installed onto 6.0
+  without claiming to support it.
+
 - **Opt-in token-usage reporting.** Successful dispatcher results can carry a `_usage` block
   (`schema_tokens`, `request_tokens`, `result_tokens`, `total_tokens`, `encoding`) as an
   additive sibling of `content`/`isError`, counted with the pinned tiktoken `cl100k_base`
@@ -51,6 +56,37 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preferred explicit mechanism for known-heavy tools.
 
 ### Fixed
+
+- **Issue #74 — responses no longer advertise `http://localhost`.** Absolute URLs built by a
+  host serializer (hyperlinked fields, pagination `next`/`previous`, `Location` headers) now
+  carry the caller's real origin, port included, instead of a hardcoded `localhost`. On hosts
+  whose `ALLOWED_HOSTS` is strict this was a hard failure — every ViewSet-backed tool call
+  raised `DisallowedHost` — and elsewhere it silently produced links an agent could not
+  follow. The same fix forwards the caller's **scheme**, so an HTTPS deployment no longer
+  emits protocol-downgraded `http://` URLs. The two are inseparable: forwarding the scheme
+  without also deriving the port from it yields `https://host:80/`.
+
+  The Host is taken from `request.get_host()`, which enforces `ALLOWED_HOSTS` and honours
+  `USE_X_FORWARDED_HOST`. Note this validates only where `ALLOWED_HOSTS` is a real list — a
+  host configured with `["*"]` accepts any `Host` header by definition, and no package-level
+  change can alter that.
+
+- **Issue #74 — write actions are no longer advertised with an empty schema.** Schema
+  derivation failed for ViewSets whose `get_serializer_class()` reads the request — for
+  example `request.query_params` or `request.version` — because discovery supplied a
+  hand-built stand-in carrying only four attributes. The action was still offered, with no
+  field information, so an agent had to guess the payload; calls succeeded because an empty
+  schema imposes no validation, which is why nothing failed visibly. Discovery now builds a
+  real DRF `Request`, supplying the whole attribute surface at once.
+
+- **Issue #74 — the discovery request resolves its API version from the host.** Following the
+  fix above, `version` and `versioning_scheme` are now determined from the host's own
+  versioning class rather than being hardcoded, so a ViewSet that branches on
+  `request.version` derives the same serializer discovery would see at dispatch. Previously
+  the value was fixed at `None`, which any host dereferencing it unguarded (e.g.
+  `int(request.version)`) turned into a failed derivation. Hosts with no versioning
+  configured still resolve to `None`, matching a dispatched request. Authentication,
+  permission and throttle checks are deliberately **not** run during discovery.
 
 - **Issue #71 — permission-aware group descriptions.** Group dispatcher descriptions
   in `tools/list` now count the same tier- and permission-filtered actions and
