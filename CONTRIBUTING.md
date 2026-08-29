@@ -220,17 +220,6 @@ Coverage is measured but not gated at a hard threshold. Aim to keep coverage abo
 Record what your change does in `CHANGELOG.md` under `[Unreleased]` instead. That entry is
 how your work reaches the release notes; the number is assigned later.
 
-### Why the rule changed
-
-A version is a claim that a particular set of changes was released together. When each PR
-advances it, the number moves on merge rather than on release, and it stops describing
-anything: the repository ends up with a version that matches no tag, no PyPI artifact, and
-no changelog heading. That is recoverable but confusing, and it has happened here.
-
-It also splits the version across files. The two authoritative sources are not the only
-places a version appears — `server.json` and `uv.lock` carry it too — and a PR-time bump
-routinely moves some and not others.
-
 ### The scheme maintainers apply at release
 
 Ordered by precedence; the **first** that matches wins.
