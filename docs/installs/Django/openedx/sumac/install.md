@@ -3,7 +3,7 @@
 **Audience:** Open edX platform engineers adding MCP gateway support  
 **Platform:** Open edX **Ulmo or later** · Django 5.0+ · Python 3.11+
 
-> ### ⛔ Do not follow this guide on Sumac, Teak, or Redwood
+> ## ⛔ Do not follow this guide on Sumac, Teak, or Redwood
 >
 > **This directory is named `sumac/` for historical reasons, and Sumac cannot
 > run frisian-mcp.** The path is kept only so existing links do not break.
@@ -23,7 +23,10 @@
 > to 5.x underneath a platform that pins 4.2.20** — the second outcome is worse,
 > because it looks like it worked. The supported target is **Ulmo or later**.
 
-> ### ⚠️ Integration status — read before deploying
+<!-- Separates two adjacent callouts; without it markdownlint reads the blank
+     line as a gap inside a single blockquote (MD028). -->
+
+> ## ⚠️ Integration status — read before deploying
 >
 > **What is validated:** the plugin-app wiring (`PluginURLs` registration, URL
 > mounting, settings propagation) and the settings template in
