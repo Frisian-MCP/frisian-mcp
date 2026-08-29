@@ -15,7 +15,7 @@ The **Affiliation** column reflects the capacity in which each person maintains 
 | Maintainer | GitHub ID | Affiliation |
 | --- | --- | --- |
 | Jeremy Friese  | [Jeremy-Friese](https://github.com/Jeremy-Friese) | Independent |
-| Paul Vulf | [PineappleBun](https://github.com/PineappleBun) | Independent |
+| Paul Vulf | [PineapppleBun](https://github.com/PineapppleBun) | Independent |
 | Drew Elliott | [drewelliott](https://github.com/drewelliott) | Independent |
 
 ## Emeritus
