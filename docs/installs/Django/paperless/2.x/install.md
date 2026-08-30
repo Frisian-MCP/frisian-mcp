@@ -85,6 +85,8 @@ FRISIAN_MCP_PATH = "mcp"
 FRISIAN_MCP_UNAUTHENTICATED_TIER = "read"
 ```
 
+> **One door, or several?** `FRISIAN_MCP_PATH` mounts a *single* endpoint that every caller shares, so the caller's own permissions are the only limit on what they reach. To put a **tier ceiling on the path itself** — separate read-only, read-write and admin URLs, where the route caps what *any* caller can reach regardless of who they are — configure [`FRISIAN_MCP_ROUTES`](../../../../v1.1/Guide/per-route-permissions.md) instead. The two are alternatives: when `FRISIAN_MCP_ROUTES` is set, `FRISIAN_MCP_PATH` mounts nothing. See also [ADR-010](../../../../ADR/adr-010-per-route-permission-model.md).
+
 ### Recommended production configuration
 
 See [paperless_frisian_mcp.py](paperless_frisian_mcp.py) for the full production settings template with OAuth, dispatch groups, and reverse proxy support.
