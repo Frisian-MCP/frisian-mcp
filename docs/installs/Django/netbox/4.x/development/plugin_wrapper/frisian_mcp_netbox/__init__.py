@@ -78,28 +78,36 @@ class FrisianMcpNetBoxConfig(PluginConfig):
         # ─────────────────────────────────────────────────────────────────
         routes = getattr(settings, "FRISIAN_MCP_ROUTES", None) or {}
         if routes:
-            mounted = []
-            # Reversed so that, after successive insert(0) calls, the patterns
-            # end up in declaration order — the order a reader of the settings
-            # file expects to see them resolved in.
-            for route_name, spec in reversed(list(routes.items())):
-                raw = (spec or {}).get("path")
-                if not raw:
-                    logger.warning(
-                        "frisian-mcp: route %r has no 'path'; not mounted", route_name
-                    )
-                    continue
-                escaped = re_module.escape(str(raw).strip("/"))
-                route_resolver = re_path(
-                    rf"^{escaped}/?", include("frisian_mcp.urls")
-                )
-                setattr(route_resolver, _MCP_AUTO_ATTR, True)
-                resolver.url_patterns.insert(0, route_resolver)
-                mounted.append(str(raw).strip("/"))
+            # Delegate to the package's OWN route installer rather than
+            # mounting the paths here.
+            #
+            # ⚠️ DO NOT include("frisian_mcp.urls") PER ROUTE. It is the
+            # obvious implementation and it is wrong: that include mounts the
+            # LEGACY gateway view, which serves the full unfiltered registry.
+            # Mounting it three times gives three URLs that all behave
+            # identically — every tier ceiling and deny_list silently absent.
+            # Measured: the admin token on the read-only door was offered
+            # create, destroy, update, partial_update and the bulk_* actions.
+            #
+            # Three doors that look right and enforce nothing is a worse
+            # failure than the 404s this replaced, because nothing about it
+            # looks broken.
+            #
+            # `_install_route_urls()` builds one McpView subclass per route
+            # from the validated route configs, with exact-match patterns, and
+            # is idempotent via its own sentinel. It is the same code path
+            # every other host gets from AppConfig.ready(); NetBox just needs
+            # it invoked once the plugin is loaded and ROOT_URLCONF exists.
+            from frisian_mcp.apps import _install_route_urls
+
+            installed = _install_route_urls()
             logger.info(
                 "frisian-mcp: mounted %d route(s): %s",
-                len(mounted),
-                ", ".join(reversed(mounted)),
+                installed,
+                ", ".join(
+                    str((spec or {}).get("path", "?")).strip("/")
+                    for spec in routes.values()
+                ),
             )
         else:
             # No routes configured — the original single-door behaviour.

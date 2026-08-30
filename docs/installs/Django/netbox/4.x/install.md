@@ -339,6 +339,21 @@ If you configured `FRISIAN_MCP_ROUTES`, every route path is listed instead, and 
 [frisian-mcp] registered N tools at /api/mcp/read-only/, /api/mcp/read-write/, /api/mcp/ops/
 ```
 
+**Mounting is not the same as enforcing.** Three routes that all answer `401` prove only that the paths exist — a wrapper that mounts the legacy gateway view once per path passes that check while applying no ceiling at all. Confirm the ceilings differ by asking one **admin** token for the same resource on two doors:
+
+```bash
+for door in read-only read-write; do
+  echo "== $door"
+  curl -sS -X POST \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"dcim","arguments":{"resource":"site","action":"help"}}}' \
+    "https://netbox.example.com/api/mcp/$door/"
+done
+```
+
+The `read-only` door must offer `list` and `retrieve` only. The `read-write` door must additionally offer `create`, `update`, `partial_update` and `destroy`. **If both doors return the same actions, the routes are mounted but the ceiling is not being applied** — see the wrapper note above.
+
 If you see `registered 0 tools`, verify that `frisian_mcp_netbox` appears in `PLUGINS` and that the plugin wrapper is installed in the Python environment NetBox is running from.
 
 You may also see schema derivation warnings for a small number of NetBox ViewSets whose `get_serializer_class()` requires a live request object. These are cosmetic — the affected tools are still registered with an empty input schema and remain callable:
