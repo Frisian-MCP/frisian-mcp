@@ -147,10 +147,10 @@ FRISIAN_MCP_ROUTES = {
 }
 ```
 
-When `FRISIAN_MCP_ROUTES` is set, `FRISIAN_MCP_PATH` mounts nothing — the routes replace it.
+When `FRISIAN_MCP_ROUTES` contains one or more routes, `FRISIAN_MCP_PATH` mounts nothing — the routes replace it. An **empty** mapping (`FRISIAN_MCP_ROUTES = {}`) is treated as unset and falls back to the single `FRISIAN_MCP_PATH` door, so clearing the dict to "turn routes off" restores the unceilinged default rather than closing everything.
 
 > **Requires a wrapper new enough to mount routes.** Earlier versions read only `FRISIAN_MCP_PATH` and mounted a single door. On those, configured routes return 404 while the default `/mcp/` answers, with nothing logged to say why. If you see that, update the wrapper from `development/plugin_wrapper/`.
-
+>
 > **Do not end a route path with `admin`.** MCP clients strip an `admin` suffix and retry the bare URL, so the caller silently lands on a different route with a different tier ceiling. Use `ops` or similar.
 
 ### Minimum configuration

@@ -111,9 +111,9 @@ urlpatterns = [
 
 This mounts the gateway at `/mcp`. Clients connect to `https://your-domain.example/mcp`.
 
-> **One door, or several?** This mounts a *single* endpoint that every caller shares, so the caller's own permissions are the only limit on what they reach. To put a **tier ceiling on the path itself** — separate read-only, read-write and admin URLs, where the route caps what *any* caller can reach regardless of who they are — configure [`FRISIAN_MCP_ROUTES`](../../../../v1.1/Guide/per-route-permissions.md) instead. The two are alternatives: when `FRISIAN_MCP_ROUTES` is set, the single-path mount is replaced. See also [ADR-010](../../../../ADR/adr-010-per-route-permission-model.md).
-
 > **Why `re_path`?** MCP clients like Claude.ai and Cursor may strip the trailing slash from the server URL. Django's `APPEND_SLASH` would normally issue a 301 redirect from `/mcp` → `/mcp/`, which those clients don't follow. The `re_path` pattern with an optional trailing slash (`/?`) matches both forms directly, and the package also auto-installs `McpTrailingSlashMiddleware`, which suppresses the `APPEND_SLASH` redirect on the gateway path — so both `/mcp` and `/mcp/` reach the endpoint with no redirect either way.
+>
+> **One door, or several?** This mounts a *single* endpoint that every caller shares, so the caller's own permissions are the only limit on what they reach. To put a **tier ceiling on the path itself** — separate read-only, read-write and admin URLs, where the route caps what *any* caller can reach regardless of who they are — configure [`FRISIAN_MCP_ROUTES`](../../../../v1.1/Guide/per-route-permissions.md) instead. The two are alternatives: when `FRISIAN_MCP_ROUTES` contains one or more routes, the single-path mount is replaced. An empty mapping is treated as unset and falls back to the single door. See also [ADR-010](../../../../ADR/adr-010-per-route-permission-model.md).
 
 ---
 
