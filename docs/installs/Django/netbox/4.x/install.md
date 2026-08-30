@@ -135,6 +135,24 @@ services:
 
 > **Do not set `NETBOX_CONFIGURATION`** to point to a frisian-mcp config file. NetBox's own `settings.py` reads the `NETBOX_CONFIGURATION` environment variable to locate its primary config module. Overriding it causes NetBox to fail at startup with `Required parameter ALLOWED_HOSTS is missing from configuration`.
 
+### Multiple routes (per-route permission model)
+
+NetBox is the one host where frisian-mcp does not mount its own URLs — it routes third-party URLs through `PluginConfig`, so the plugin wrapper does the mounting. The wrapper reads `FRISIAN_MCP_ROUTES` and mounts every route:
+
+```python
+FRISIAN_MCP_ROUTES = {
+    "default":  {"path": "api/mcp/read-only",  "highest_tier": "read"},
+    "elevated": {"path": "api/mcp/read-write", "highest_tier": "read_write"},
+    "admin":    {"path": "api/mcp/ops",        "highest_tier": "admin"},
+}
+```
+
+When `FRISIAN_MCP_ROUTES` is set, `FRISIAN_MCP_PATH` mounts nothing — the routes replace it.
+
+> **Requires a wrapper new enough to mount routes.** Earlier versions read only `FRISIAN_MCP_PATH` and mounted a single door. On those, configured routes return 404 while the default `/mcp/` answers, with nothing logged to say why. If you see that, update the wrapper from `development/plugin_wrapper/`.
+
+> **Do not end a route path with `admin`.** MCP clients strip an `admin` suffix and retry the bare URL, so the caller silently lands on a different route with a different tier ceiling. Use `ops` or similar.
+
 ### Minimum configuration
 
 The minimal configuration mounts frisian-mcp at `/api/mcp` and requires
@@ -313,6 +331,13 @@ Start NetBox normally. Look for this line in the server output:
 ```
 
 The path shown reflects your `FRISIAN_MCP_PATH` setting. If `FRISIAN_MCP_PATH` is not set, the default path is `mcp` and the endpoint is `/mcp/` rather than `/api/mcp/`.
+
+If you configured `FRISIAN_MCP_ROUTES`, every route path is listed instead, and the wrapper logs what it mounted:
+
+```text
+[frisian-mcp] mounted 3 route(s): api/mcp/read-only, api/mcp/read-write, api/mcp/ops
+[frisian-mcp] registered N tools at /api/mcp/read-only/, /api/mcp/read-write/, /api/mcp/ops/
+```
 
 If you see `registered 0 tools`, verify that `frisian_mcp_netbox` appears in `PLUGINS` and that the plugin wrapper is installed in the Python environment NetBox is running from.
 

@@ -17,10 +17,13 @@ class FrisianMcpNetBoxConfig(PluginConfig):
 
     def ready(self):
         import importlib
+        import logging
         import os
         import re as re_module
         from django.conf import settings
         from django.urls import clear_url_caches, get_resolver, include, path, re_path
+
+        logger = logging.getLogger(__name__)
 
         # Propagate FRISIAN_MCP_* settings from three sources (priority order):
         # 1. os.environ (docker-compose env vars), 2. netbox-docker loaded_configurations,
@@ -51,12 +54,62 @@ class FrisianMcpNetBoxConfig(PluginConfig):
             p for p in resolver.url_patterns
             if not getattr(p, _MCP_AUTO_ATTR, False)
         ]
-        mcp_path = re_module.escape(
-            getattr(settings, "FRISIAN_MCP_PATH", "mcp").strip("/")
-        )
-        auto_resolver = re_path(rf"^{mcp_path}/?", include("frisian_mcp.urls"))
-        setattr(auto_resolver, _MCP_AUTO_ATTR, True)
-        resolver.url_patterns.insert(0, auto_resolver)
+
+        # ─────────────────────────────────────────────────────────────────
+        # Mount EVERY configured route, not just one path.
+        #
+        # NetBox is the only supported host where frisian-mcp does not mount
+        # its own URLs: everywhere else `AppConfig.ready()` does it, and
+        # FRISIAN_MCP_ROUTES is honoured there for free. NetBox routes
+        # third-party URLs through PluginConfig instead, so THIS is the only
+        # thing that mounts anything — and it used to read FRISIAN_MCP_PATH
+        # and mount exactly one door.
+        #
+        # The failure that caused was silent and bad. With three routes
+        # configured, all three 404 while the default `/mcp/` answered 401:
+        # the settings were accepted, no warning was emitted, and a
+        # deployment believing it had a read-only door had an undifferentiated
+        # one at a different URL. Configuration that is plausible, accepted
+        # and inert is worse than configuration that fails.
+        #
+        # Each route gets the same `frisian_mcp.urls` include. The package
+        # resolves which route a request belongs to from the matched path, so
+        # mounting the paths is what makes the ceilings and carve-outs apply.
+        # ─────────────────────────────────────────────────────────────────
+        routes = getattr(settings, "FRISIAN_MCP_ROUTES", None) or {}
+        if routes:
+            mounted = []
+            # Reversed so that, after successive insert(0) calls, the patterns
+            # end up in declaration order — the order a reader of the settings
+            # file expects to see them resolved in.
+            for route_name, spec in reversed(list(routes.items())):
+                raw = (spec or {}).get("path")
+                if not raw:
+                    logger.warning(
+                        "frisian-mcp: route %r has no 'path'; not mounted", route_name
+                    )
+                    continue
+                escaped = re_module.escape(str(raw).strip("/"))
+                route_resolver = re_path(
+                    rf"^{escaped}/?", include("frisian_mcp.urls")
+                )
+                setattr(route_resolver, _MCP_AUTO_ATTR, True)
+                resolver.url_patterns.insert(0, route_resolver)
+                mounted.append(str(raw).strip("/"))
+            logger.info(
+                "frisian-mcp: mounted %d route(s): %s",
+                len(mounted),
+                ", ".join(reversed(mounted)),
+            )
+        else:
+            # No routes configured — the original single-door behaviour.
+            mcp_path = re_module.escape(
+                getattr(settings, "FRISIAN_MCP_PATH", "mcp").strip("/")
+            )
+            auto_resolver = re_path(rf"^{mcp_path}/?", include("frisian_mcp.urls"))
+            setattr(auto_resolver, _MCP_AUTO_ATTR, True)
+            resolver.url_patterns.insert(0, auto_resolver)
+            logger.info("frisian-mcp: mounted single path %r", mcp_path)
 
         from django.contrib.auth import get_user_model
         NetBoxUser = get_user_model()
