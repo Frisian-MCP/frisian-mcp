@@ -1,7 +1,14 @@
 # Installing frisian-mcp with NetBox
 
 **Audience:** NetBox administrators adding MCP gateway support  
-**Platform:** NetBox 4.x · Django 5.x · Python 3.12+
+**Platform:** NetBox 4.x · Django 5.0 – 6.0 · Python 3.12+
+
+> **The NetBox major version does not tell you the Django version.** NetBox 4.5
+> ships Django 5.2; NetBox **4.6 moved to Django 6.0**. "4.x" therefore spans
+> Django 5.0 → 6.0, and naming the NetBox major says nothing about the Django
+> underneath it. frisian-mcp requires `django>=5.0` with no upper bound, so it
+> installs on both — validated end to end against **NetBox 4.6.2 on Django
+> 6.0.5 / DRF 3.17.1**.
 
 ---
 
@@ -9,7 +16,7 @@
 
 frisian-mcp is a Django package that turns your existing Django REST Framework ViewSets into Model Context Protocol (MCP) tools with zero boilerplate. When installed in NetBox, every API endpoint the application exposes — devices, interfaces, IP addresses, circuits, VPNs, and more — automatically becomes callable by any MCP-compatible AI client.
 
-NetBox exposes several hundred ViewSet actions across its DCIM, IPAM, circuits, virtualization, VPN, and extras surfaces. frisian-mcp's dispatch-group system bundles those into 9 topic-level tools so agents see a manageable surface rather than all operations at once.
+NetBox exposes a very large ViewSet surface. Measured on NetBox 4.6.2: **1164 auto-discoverable actions**, which frisian-mcp's dispatch-group system bundles into **10 topic-level tools** — dcim, extras, ipam, circuits, vpn, virtualization, tenancy, users, wireless, and core. Agents load ten tool descriptions on connection rather than 1164 operations.
 
 ---
 
@@ -17,10 +24,10 @@ NetBox exposes several hundred ViewSet actions across its DCIM, IPAM, circuits, 
 
 | Requirement | Version |
 |---|---|
-| NetBox | 4.x |
+| NetBox | 4.x — validated on 4.6.2 |
 | Python | 3.12 or newer |
-| Django | 5.x (bundled with NetBox 4.x) |
-| Django REST Framework | 3.14+ (bundled with NetBox 4.x) |
+| Django | 5.0 – 6.0 — **not implied by the NetBox major**: 4.5 bundles Django 5.2, 4.6 bundles Django 6.0 |
+| Django REST Framework | 3.14+ required by frisian-mcp; NetBox 4.6.2 bundles 3.17.1 |
 
 No additional infrastructure is required for the basic install. OAuth support requires a shared cache backend (Redis) in multi-worker deployments — NetBox already ships with Redis, so no additional setup is needed.
 
@@ -46,7 +53,17 @@ No NetBox source files are modified.
 ## Step 1 — Install the Packages
 
 ```bash
-pip install frisian-mcp
+pip install "frisian-mcp[usage]"
+```
+
+**Install the `[usage]` extra.** Without it frisian-mcp cannot load a real
+tokenizer and silently falls back to a characters-divided-by-four estimate:
+every tool result reports `"encoding": "approx-char4"` rather than
+`"encoding": "cl100k_base"`, and nothing announces the downgrade. Verify:
+
+```bash
+python -c "from frisian_mcp.usage import encoding_name; print(encoding_name())"
+# expect: cl100k_base
 ```
 
 Then install the plugin wrapper from the `development/plugin_wrapper/` directory of this documentation repository:
@@ -59,7 +76,13 @@ For Docker-based deployments, add both installs to the Dockerfile or entrypoint 
 
 ### Official netbox-docker image (netboxcommunity/netbox)
 
-The official netbox-docker image (`netboxcommunity/netbox`) uses Python 3.14 and ships `uv` as the package manager. The Python venv does **not** include `pip`. Use `uv pip install` instead, and install `setuptools` first (frisian-mcp's build backend requires it):
+The official netbox-docker image (`netboxcommunity/netbox`) uses Python 3.14 and ships `uv` as the package manager. The Python venv does **not** include `pip`. Use `uv pip install` instead, and install `setuptools` first — frisian-mcp uses the setuptools build backend and `uv` does not bundle it:
+
+```bash
+uv pip install setuptools
+uv pip install "frisian-mcp[usage]"
+uv pip install ./development/plugin_wrapper/
+```
 
 The venv (`/opt/netbox/venv`) is owned by root. Run the install commands as root (`docker exec -u root` or `user: "0:0"` in docker-compose).
 
@@ -305,7 +328,25 @@ frisian_mcp: schema derivation failed for DeviceViewSet.create — falling back 
 
 NetBox exposes a large ViewSet surface across DCIM, IPAM, circuits, and more. Dispatch groups compress this into one tool per NetBox app boundary, dramatically reducing the context an AI client loads on connection.
 
-Add `FRISIAN_MCP_DISPATCH_GROUPS` to `configuration.py`. See `development/configuration.py` for the full reference grouping used during integration testing. A trimmed version covering the most common surfaces:
+Measured on NetBox 4.6.2 with the reference grouping in
+[`development/configuration.py`](development/configuration.py) — the group sizes
+sum to exactly the discovered total:
+
+| group | actions | resources |
+|---|---|---|
+| dcim | 417 | 47 |
+| extras | 177 | 21 |
+| ipam | 162 | 18 |
+| circuits | 101 | 11 |
+| vpn | 90 | 10 |
+| virtualization | 64 | 7 |
+| tenancy | 54 | 6 |
+| users | 54 | 7 |
+| wireless | 27 | 3 |
+| core | 18 | 12 |
+| **total** | **1164** | **142** |
+
+Add `FRISIAN_MCP_DISPATCH_GROUPS` to `configuration.py`. See `development/configuration.py` for the full reference grouping used during integration testing. Below is a trimmed version covering the most common surfaces — it lists **9 of the 10 groups** (`core` is omitted for brevity) and only the most-used resources within each:
 
 ```python
 FRISIAN_MCP_DISPATCH_GROUPS = {
@@ -465,7 +506,7 @@ client-credential entry as described above.
 
 ### Verifying the OAuth Flow
 
-A standalone end-to-end OAuth test script is included at `development/test_oauth_flow.py`. It validates well-known discovery, PKCE authorization code flow, token exchange, and a live `tools/list` call against a running NetBox instance. Run it against your dev environment before deploying to production:
+A standalone end-to-end OAuth test script is included at `development/test_oauth_flow.py`. It validates well-known discovery, PKCE authorization code flow, token exchange, and a live `tools/list` call against a running NetBox instance. **It needs five settings relaxed from the hardened posture before it will run — they are listed in the script's docstring.** Run it against your dev environment, never against production:
 
 ```bash
 NETBOX_BASE_URL=http://localhost:8080 python development/test_oauth_flow.py

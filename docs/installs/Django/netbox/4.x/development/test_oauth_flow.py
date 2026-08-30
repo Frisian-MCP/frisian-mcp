@@ -6,10 +6,25 @@ Usage (run from the repo root or any directory):
 
 Requires the NetBox dev harness running at http://localhost:8080.
 
-Config pre-conditions (already in development/configuration.py):
-    FRISIAN_MCP_OAUTH_AUTO_APPROVE = True        — no consent page
+Config pre-conditions — apply these first.  They are NOT the shipped defaults:
+development/configuration.py ships the hardened posture, and every line below
+relaxes it for a local dev run only.
+
+    FRISIAN_MCP_OAUTH_PUBLIC_DISCOVERY = True    — step 1 reads .well-known
+    FRISIAN_MCP_OAUTH_AUTO_APPROVE = True        — see the consent note below
     FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER = True  — unknown PKCE clients auto-register
+    FRISIAN_MCP_OAUTH_PKCE_AUTO_REGISTER_HOST_ALLOWLIST = ["localhost"]
     FRISIAN_MCP_OAUTH_ISSUER = "http://localhost:8080"
+
+The allowlist is required, not optional: AUTO_REGISTER fails closed while it
+is empty, and the wire response is a bare invalid_client indistinguishable
+from a genuinely unknown client.  The real cause reaches the server log only,
+as oauth_pkce_auto_register_allowlist_empty.
+
+AUTO_APPROVE = True does NOT mean "no consent page".  The consent form renders
+on EVERY run of this script, and that is expected: silent re-approval is keyed
+to an authenticated user, and this script is an anonymous PKCE walk-up with no
+Django session, so re-approval can never engage.  Step 3 submits the form.
 """
 
 import base64
@@ -94,7 +109,7 @@ info(f"code_challenge:  {code_challenge[:20]}...")
 ok("PKCE values generated")
 
 # ---------------------------------------------------------------------------
-# Step 3 — authorization code request (AUTO_APPROVE skips consent)
+# Step 3 — authorization code request (consent form, then 302 with code)
 # ---------------------------------------------------------------------------
 step("3. Authorization code request (expect 302 redirect with code)")
 params = urllib.parse.urlencode({
@@ -113,22 +128,54 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 opener = urllib.request.build_opener(NoRedirect)
-req = urllib.request.Request(authorize_url)
-try:
-    with opener.open(req) as resp:
-        status = resp.status
-        location = resp.headers.get("Location", "")
-except urllib.error.HTTPError as e:
-    status = e.code
-    location = e.headers.get("Location", "")
-    if status not in (301, 302, 303, 307, 308):
-        body = e.read().decode()
-        fail(f"Authorization endpoint returned {status}", body[:500])
+
+
+def _authorize(method, url, data=None, cookie=""):
+    headers = {"Cookie": cookie} if cookie else {}
+    body = None
+    if data is not None:
+        body = urllib.parse.urlencode(data).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with opener.open(req) as resp:
+            return resp.status, resp.headers, resp.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read().decode()
+
+
+status, resp_headers, page = _authorize("GET", authorize_url)
+location = resp_headers.get("Location", "")
+
+# A 200 here is the consent form, not an error — see the consent note in the
+# module docstring.
+if status == 200:
+    info("Consent form returned — submitting approval")
+    token_match = re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', page)
+    if not token_match:
+        fail("Consent page carried no csrfmiddlewaretoken", page[:300])
+    cookie = "; ".join(
+        c.split(";", 1)[0] for c in (resp_headers.get_all("Set-Cookie") or [])
+    )
+    status, resp_headers, page = _authorize(
+        "POST",
+        authorize_url,
+        data={
+            "csrfmiddlewaretoken": token_match.group(1),
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "state": state,
+            "allow": "true",
+        },
+        cookie=cookie,
+    )
+    location = resp_headers.get("Location", "")
 
 info(f"Response status: {status}")
 info(f"Location: {location}")
 if status not in (301, 302, 303, 307, 308):
-    fail(f"Expected redirect, got {status}")
+    fail(f"Expected redirect, got {status}", page[:500])
 
 parsed = urllib.parse.urlparse(location)
 qs = urllib.parse.parse_qs(parsed.query)

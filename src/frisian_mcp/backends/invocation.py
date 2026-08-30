@@ -510,6 +510,39 @@ def _extract_lean_envelope(
     return envelope
 
 
+class _InnerHttpRequest(HttpRequest):
+    """Synthetic request that inherits the caller's URL scheme.
+
+    ``HttpRequest._get_scheme()`` returns the literal string ``"http"`` and
+    does **not** read ``META`` -- only ``WSGIRequest`` overrides it, to read
+    ``wsgi.url_scheme``.  A bare ``HttpRequest`` is therefore permanently
+    ``http://``, so on every HTTPS deployment the absolute URLs a host
+    serializer builds come back protocol-downgraded.  That matters more here
+    than in a normal app: an agent may follow such a link with its Bearer
+    token attached, in cleartext.
+
+    Setting ``META["wsgi.url_scheme"]`` does not help -- the base class never
+    reads it.  Overriding the hook is the only way in.
+    """
+
+    def __init__(self, scheme: str) -> None:
+        super().__init__()
+        self._forwarded_scheme = scheme
+        # Initialised here rather than assigned ad hoc by the builder.
+        # ``HttpRequest.__init__`` sets none of these: ``_stream`` and
+        # ``_read_started`` are only established on first ``read()``, and
+        # ``user`` is normally attached by ``AuthenticationMiddleware``.  DRF
+        # 3.17's ``_load_stream()`` reads ``_read_started`` directly, so a
+        # synthetic request that never sets it raises.  The builder overwrites
+        # all three; these are the safe defaults.
+        self._stream: BytesIO = BytesIO(b"")
+        self._read_started: bool = False
+        self.user: Any = AnonymousUser()
+
+    def _get_scheme(self) -> str:
+        return self._forwarded_scheme
+
+
 class SyncInvocation(BaseInvocationBackend):
     """
     Default synchronous invocation backend.
@@ -770,11 +803,41 @@ class SyncInvocation(BaseInvocationBackend):
             DRF :class:`~rest_framework.request.Request`.
 
         """
-        req = HttpRequest()
+        req = _InnerHttpRequest(original.scheme or "http")
         req.method = http_method.upper()
         req.path = "/"
-        req.META["SERVER_NAME"] = "localhost"
-        req.META["SERVER_PORT"] = "80"
+        # Forward the caller's host so absolute URLs a host serializer builds
+        # -- DRF hyperlinked fields, pagination next/previous, Location
+        # headers -- carry the real origin.  Hardcoding "localhost" here made
+        # every such URL wrong, and outright broke hosts with a strict
+        # ALLOWED_HOSTS (DisallowedHost on every tool call).
+        #
+        # ``get_host()`` rather than a raw ``META["HTTP_HOST"]`` copy: it
+        # enforces ALLOWED_HOSTS and honours USE_X_FORWARDED_HOST by
+        # construction, neither of which a raw copy does.  Note this defends
+        # only where ALLOWED_HOSTS is a real list -- ``validate_host`` treats
+        # "*" as matching anything, so a host configured that way accepts a
+        # spoofed Host header either way.  That is a deployment hazard, not
+        # something this line can close.
+        #
+        # SERVER_NAME rather than HTTP_HOST is also deliberate: precedence in
+        # ``_get_raw_host`` is HTTP_X_FORWARDED_HOST -> HTTP_HOST ->
+        # SERVER_NAME, so writing the already-validated value into the LOWEST
+        # slot leaves no header behind that could re-poison it.
+        #
+        # ``get_host()`` may raise DisallowedHost, but only when the outer
+        # gateway request already carries a host the deployment forbids -- in
+        # which case raising is correct.  It must not be caught and defaulted.
+        #
+        # SERVER_PORT must be the DEFAULT PORT FOR THE FORWARDED SCHEME, not a
+        # constant.  get_host() already returns "host:port" for non-default
+        # ports, and _get_raw_host appends SERVER_PORT only when it differs
+        # from the scheme's default -- "443" when is_secure(), else "80".
+        # Hardcoding "80" was correct only while the synthetic request was
+        # permanently http; now that the scheme is forwarded, an HTTPS caller
+        # would get a spurious ":80" glued onto every absolute URL.
+        req.META["SERVER_NAME"] = original.get_host()
+        req.META["SERVER_PORT"] = "443" if req.is_secure() else "80"
 
         qs = urlencode(query_args, doseq=True) if query_args else ""
         req.META["QUERY_STRING"] = qs
@@ -792,11 +855,6 @@ class SyncInvocation(BaseInvocationBackend):
             req._stream = BytesIO(body_bytes)  # pylint: disable=protected-access
         else:
             req._stream = BytesIO(b"")  # pylint: disable=protected-access
-        # DRF 3.17 _load_stream() accesses _request._read_started directly; the
-        # attribute is not initialised in HttpRequest.__init__ but only set on
-        # first read().  Set it explicitly so the synthetic request works.
-        req._read_started = False  # type: ignore[attr-defined]  # pylint: disable=protected-access
-
         req.user = self._resolve_effective_user(original)
         return req
 

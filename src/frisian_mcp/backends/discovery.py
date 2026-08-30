@@ -15,14 +15,16 @@ from __future__ import annotations
 import inspect
 import logging
 import re
-import types
 import typing
+from io import BytesIO
 from typing import Any
 
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.http import HttpRequest, QueryDict
 from django.urls import URLPattern, URLResolver, get_resolver
 from rest_framework.relations import ManyRelatedField, RelatedField, SlugRelatedField
+from rest_framework.request import Request
 from rest_framework.serializers import ListSerializer
 from rest_framework.viewsets import ViewSetMixin
 
@@ -527,18 +529,10 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         relies on.
         """
         viewset = view_class()
-        # Use a minimal stub request so that get_serializer_class() implementations
-        # that inspect self.request.method or self.request.user do not raise
-        # AttributeError.  The stub carries the most common write-action method
-        # (POST) and an anonymous user to avoid any auth-dependent branching.
-        viewset.request = types.SimpleNamespace(
-            method="POST",
-            auth=None,
-            META={},
-            user=AnonymousUser(),
-        )
+        viewset.request = _build_discovery_stub_request()
         viewset.format_kwarg = None
         viewset.action = action
+        _apply_discovery_versioning(viewset)
         # ``@action(serializer_class=...)`` is the canonical way to select a
         # serializer per action, and it does not reach the class: DRF's
         # decorator parks the kwargs on the method, its router merges them into
@@ -595,12 +589,19 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         """Attempt to derive a JSON Schema from a ViewSet's serializer."""
         try:
             return _schema_from_serializer(self._serializer_class_for(view_class, action))
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Name the actual exception.  The previous message asserted a cause
+            # it had not established — "check that get_serializer_class() does
+            # not require a real request object" — and sent readers to the host
+            # app's code when the fault was this function's own stub request.
+            # A swallowed exception type is the one fact that identifies which.
             logger.warning(
-                "frisian_mcp: schema derivation failed for %s.%s — falling back to empty schema. "
-                "Check that get_serializer_class() does not require a real request object.",
+                "frisian_mcp: schema derivation failed for %s.%s (%s: %s) — falling back to "
+                "an empty schema; this tool is advertised with no field information.",
                 view_class.__name__,
                 action,
+                type(exc).__name__,
+                exc,
             )
             return {"type": "object", "properties": {}}
 
@@ -608,6 +609,107 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_discovery_stub_request() -> Request:
+    """Return a stand-in request for deriving schemas at discovery time.
+
+    Discovery runs at startup, with no HTTP request in flight, but many
+    ``get_serializer_class()`` implementations branch on the request.  This
+    used to be a hand-built ``SimpleNamespace`` carrying four attributes —
+    ``method``, ``auth``, ``META``, ``user``.  Any implementation touching a
+    fifth raised ``AttributeError``, the schema silently fell back to empty,
+    and the tool was advertised to agents with no field information at all.
+
+    Measured on two hosts, and they needed *different* missing attributes:
+    one branched on ``request.query_params``, another on ``request.version``.
+    Adding attributes one host at a time is a losing game — each new host
+    discovers the next gap in production — so this builds a real DRF
+    ``Request`` instead of imitating one, which supplies the whole surface at
+    once.
+
+    ``version`` and ``versioning_scheme`` are deliberately **not** set here.
+    They are properties of the *view*, not the request: DRF assigns them in
+    ``APIView.initial()`` from the view's ``versioning_class``.  A bare
+    ``Request`` does raise on ``.version``, but setting it here only replaced
+    that ``AttributeError`` with a wrong value — a host reading
+    ``int(request.version)`` then failed on ``None`` instead.
+    :func:`_apply_discovery_versioning` fills both in per viewset, from the
+    host's own configuration.
+
+    Deliberately built from ``HttpRequest`` rather than
+    ``rest_framework.test.APIRequestFactory``: this is production code and
+    should not import a test helper.
+    """
+    base = HttpRequest()
+    # POST is the most common write-action method, and anonymous avoids any
+    # auth-dependent branching in the host's get_serializer_class().
+    base.method = "POST"
+    base.GET = QueryDict("")
+    base.META["SERVER_NAME"] = "localhost"
+    base.META["SERVER_PORT"] = "80"
+    # DRF's _load_stream() reads both of these directly; HttpRequest only
+    # establishes them on first read().
+    base._read_started = False  # type: ignore[attr-defined]  # pylint: disable=protected-access
+    base._stream = BytesIO(b"")  # pylint: disable=protected-access
+
+    request = Request(base)
+    request.user = AnonymousUser()
+    # No ``version`` / ``versioning_scheme`` here — see the docstring;
+    # ``_apply_discovery_versioning`` sets them per viewset.
+    return request
+
+
+def _apply_discovery_versioning(viewset: Any) -> None:
+    """Give the discovery request the version a dispatched request would have.
+
+    A dispatched request gets ``version`` / ``versioning_scheme`` from
+    ``APIView.initial()``, which the discovery request never goes through.  So
+    they were first absent (``AttributeError``) and then hardcoded to ``None``
+    (``TypeError`` in a host doing ``int(request.version)``).  Neither is right:
+    the host's own configuration says what the version should be, so this runs
+    DRF's determination rather than inventing a value.  No versioning
+    configured still yields ``None`` -- matching dispatch is the point, not
+    avoiding ``None``.
+
+    ⚠️ Runs ONLY the version part of ``initial()``.  ``initial()`` also calls
+    ``perform_authentication``, ``check_permissions`` and ``check_throttles``,
+    and **none may run at discovery time**: discovery enumerates the whole
+    surface at startup with a synthetic anonymous request, so evaluating
+    permissions here would fail spuriously or answer a permission question with
+    the wrong principal.  Tier and capability filtering happen per request.
+
+    Content negotiation IS included -- it is a prerequisite:
+    ``AcceptHeaderVersioning`` reads ``accepted_media_type``, which
+    ``initial()`` sets immediately before determining the version.
+    """
+    request = viewset.request
+    try:
+        renderer, media_type = viewset.perform_content_negotiation(request)
+        request.accepted_renderer, request.accepted_media_type = renderer, media_type
+    except Exception:  # pylint: disable=broad-exception-caught
+        # A host whose renderers cannot negotiate against our synthetic request
+        # must not take discovery down; the versioning scheme below falls back.
+        request.accepted_renderer, request.accepted_media_type = None, None
+    try:
+        version, scheme = viewset.determine_version(request)
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Fall back to the VIEW's own scheme default, NOT the global setting.
+        # ``api_settings.DEFAULT_VERSION`` discards a ``versioning_class`` that
+        # declares its own ``default_version`` — substituting a wrong value for
+        # an absent one, the failure this function exists to remove, via the
+        # error path.  ``BaseVersioning.default_version`` already defaults to
+        # the global, so a scheme declaring nothing still degrades to it.
+        # Reachable where a scheme resolves from data the stub lacks, e.g.
+        # ``HostNameVersioning`` reading a version out of the hostname.
+        # No versioning configured yields ``None`` for both, matching dispatch.
+        scheme_class = getattr(viewset, "versioning_class", None)
+        try:
+            scheme = scheme_class() if scheme_class is not None else None
+        except Exception:  # pylint: disable=broad-exception-caught
+            scheme = None  # a scheme doing work in __init__ must not kill discovery
+        version = getattr(scheme, "default_version", None)
+    request.version, request.versioning_scheme = version, scheme
 
 
 def _schema_from_action_signature(
