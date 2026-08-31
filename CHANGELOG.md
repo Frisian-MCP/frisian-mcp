@@ -88,6 +88,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configured still resolve to `None`, matching a dispatched request. Authentication,
   permission and throttle checks are deliberately **not** run during discovery.
 
+- **Issue #72 — MySQL `OAuthAuthorizeConsent` migration failed on key-length limits.** The
+  `(user, client_id, redirect_uri, scope)` unique constraint exceeded MySQL's 3072-byte index
+  key limit. Replaced with a single indexed `grant_fingerprint` (SHA-256 of the exact consent
+  tuple) plus an explicit tuple comparison to guard against hash collisions.
+
 - **Issue #71 — permission-aware group descriptions.** Group dispatcher descriptions
   in `tools/list` now count the same tier- and permission-filtered actions and
   resolved resources returned by `action="help"`, including on scoped routes.
