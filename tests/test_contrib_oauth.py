@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from django.db import IntegrityError
 from django.test import RequestFactory, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 
-from frisian_mcp.contrib.oauth._consent_gate import OAUTH_AUTHORIZE_CONSENT_REQUIRED
+from frisian_mcp.contrib.oauth._consent_gate import (
+    OAUTH_AUTHORIZE_CONSENT_REQUIRED,
+    has_prior_consent,
+    record_consent,
+)
 from frisian_mcp.contrib.oauth._redirect_uri_allowlist import (
     OAUTH_PKCE_AUTO_REGISTER_ALLOWLIST_EMPTY,
     OAUTH_PKCE_AUTO_REGISTER_HOST_REJECTED,
@@ -3045,10 +3051,254 @@ class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-met
             scope=client.permission,
         )
         assert consent_filter.count() == 1
-        # Re-POST the same tuple — unique_together must keep the count at 1.
+        # Re-POST the same tuple — fingerprint uniqueness must keep the count at 1.
         second = _consent_post()
         assert second.status_code == 302
         assert consent_filter.count() == 1
+
+    # ------------------------------------------------------------------
+    # Issue #72 - fixed-size consent fingerprints
+    # ------------------------------------------------------------------
+
+    def test_consent_fingerprint_is_stable_and_case_sensitive(self) -> None:
+        """Issue #72: fingerprints are deterministic and preserve exact tuple identity."""
+        fingerprint = OAuthAuthorizeConsent.fingerprint_for(
+            "client-a",
+            "https://Example.com/callback",
+            "read",
+        )
+
+        assert len(fingerprint) == 64
+        assert set(fingerprint) <= set("0123456789abcdef")
+        assert fingerprint == OAuthAuthorizeConsent.fingerprint_for(
+            "client-a",
+            "https://Example.com/callback",
+            "read",
+        )
+        assert fingerprint != OAuthAuthorizeConsent.fingerprint_for(
+            "CLIENT-A",
+            "https://Example.com/callback",
+            "read",
+        )
+        assert fingerprint != OAuthAuthorizeConsent.fingerprint_for(
+            "client-a",
+            "https://example.com/callback",
+            "read",
+        )
+        assert OAuthAuthorizeConsent.fingerprint_for(
+            "ab",
+            "c",
+            "read",
+        ) != OAuthAuthorizeConsent.fingerprint_for(
+            "a",
+            "bc",
+            "read",
+        )
+
+    def test_case_distinct_redirect_uris_can_coexist(self) -> None:
+        """Issue #72: MySQL collation must not merge exact-case consent tuples."""
+        from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+            get_user_model,
+        )
+
+        user_model = get_user_model()
+        user = user_model.objects.create(
+            username="issue72-case-user",
+        )
+
+        first = OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id="case-client",
+            redirect_uri="https://Example.com/callback",
+            scope="read",
+        )
+
+        second = OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id="case-client",
+            redirect_uri="https://example.com/callback",
+            scope="read",
+        )
+
+        assert first.grant_fingerprint != second.grant_fingerprint
+        assert OAuthAuthorizeConsent.objects.filter(user=user).count() == 2
+
+    def test_consent_fingerprint_updates_with_source_field(self) -> None:
+        """Issue #72: updating a tuple field must persist its new fingerprint."""
+        from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+            get_user_model,
+        )
+
+        user_model = get_user_model()
+        user = user_model.objects.create(
+            username="issue72-case-user",
+        )
+
+        consent = OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id="update-client",
+            redirect_uri="https://example.com/old",
+            scope="read",
+        )
+        original_fingerprint = consent.grant_fingerprint
+
+        new_redirect_uri = "https://example.com/new"
+        consent.redirect_uri = new_redirect_uri
+        consent.save(update_fields=["redirect_uri"])
+        consent.refresh_from_db()
+
+        expect_fingerprint = OAuthAuthorizeConsent.fingerprint_for(
+            "update-client",
+            new_redirect_uri,
+            "read",
+        )
+        assert consent.grant_fingerprint == expect_fingerprint
+        assert consent.grant_fingerprint != original_fingerprint
+
+    def test_record_consent_fails_closed_on_fingerprint_collision(
+        self,
+        rf: RequestFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue #72: a fingerprint collision must never reuse another consent."""
+        from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+            get_user_model,
+        )
+
+        user_model = get_user_model()
+        user = user_model.objects.create(
+            username="issue72-collision-user",
+        )
+        request = rf.post("/oauth/authorize/")
+        request.user = user
+
+        def _forced_collision(
+            _client_id: str,
+            _redirect_uri: str,
+            _scope: str,
+        ) -> str:
+            return "0" * 64
+
+        monkeypatch.setattr(
+            OAuthAuthorizeConsent,
+            "fingerprint_for",
+            staticmethod(_forced_collision),
+        )
+
+        record_consent(
+            request,
+            "client-a",
+            "https://example.com/a",
+            "read",
+        )
+
+        with pytest.raises(
+            IntegrityError,
+            match="matched a different consent tuple",
+        ):
+            record_consent(
+                request,
+                "client-b",
+                "https://example.com/b",
+                "read",
+            )
+
+        assert OAuthAuthorizeConsent.objects.filter(user=user).count() == 1
+
+    def test_prior_consent_fails_closed_on_fingerprint_collision(
+        self,
+        rf: RequestFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue #72: fingerprint lookup must verify the stored raw tuple."""
+        from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+            get_user_model,
+        )
+
+        user_model = get_user_model()
+        user = user_model.objects.create(
+            username="issue72-collision-user",
+        )
+        client = OAuthClient.objects.create(
+            name="issue72-lookup-client",
+            permission="read",
+            redirect_uris=["https://example.com/expected"],
+        )
+
+        def _forced_collision(
+            _client_id: str,
+            _redirect_uri: str,
+            _scope: str,
+        ) -> str:
+            return "0" * 64
+
+        monkeypatch.setattr(
+            OAuthAuthorizeConsent,
+            "fingerprint_for",
+            staticmethod(_forced_collision),
+        )
+
+        _ = OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id=client.client_id,
+            redirect_uri="https://example.com/different",
+            scope="read",
+        )
+
+        request = rf.get("/oauth/authorize/")
+        request.user = user
+
+        assert (
+            has_prior_consent(
+                request,
+                client.client_id,
+                "https://example.com/expected",
+            )
+            is False
+        )
+
+    def test_long_high_entropy_redirect_uris_can_coexist(self) -> None:
+        """Issue #72: long incompressible redirect URIs remain exactly distinguishable."""
+        from django.contrib.auth import (  # pylint: disable=import-outside-toplevel
+            get_user_model,
+        )
+
+        user_model = get_user_model()
+        user = user_model.objects.create(
+            username="issue72-long-uri-user",
+        )
+        payload = "".join(
+            hashlib.sha256(f"issue72-long-uri-{index}".encode()).hexdigest() for index in range(40)
+        )
+        stem = f"https://example.com/{payload}"[:1999]
+        first_uri = f"{stem}a"
+        second_uri = f"{stem}b"
+
+        assert len(first_uri) == 2000
+        assert len(second_uri) == 2000
+
+        first = OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id="long-uri-client",
+            redirect_uri=first_uri,
+            scope="read",
+        )
+        second = OAuthAuthorizeConsent.objects.create(
+            user=user,
+            client_id="long-uri-client",
+            redirect_uri=second_uri,
+            scope="read",
+        )
+
+        assert first.grant_fingerprint != second.grant_fingerprint
+        assert (
+            OAuthAuthorizeConsent.objects.filter(
+                user=user,
+                client_id="long-uri-client",
+                scope="read",
+            ).count()
+            == 2
+        )
 
     # ------------------------------------------------------------------
     # Phase 3 stubs — T10 + T11 (still in flight on security's lane)

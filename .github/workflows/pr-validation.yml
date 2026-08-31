@@ -53,7 +53,7 @@ jobs:
           # Update this list when team membership changes:
           # https://github.com/orgs/Frisian-MCP/teams/core-maintainers
           case "$AUTHOR" in
-            Jeremy-Friese|PineapppleBun|drewelliott)
+            Jeremy-Friese|PineapppleBun|salehkabuawad|drewelliott)
               echo "✓ $AUTHOR is a Core Maintainer — workflow edit allowed."
               ;;
             *)
@@ -156,6 +156,125 @@ jobs:
         run: uv sync --all-extras
       - name: Pytest
         run: uv run pytest tests/ -q
+
+  test_mysql:
+    name: Tests (MySQL 8.4)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DJANGO_SETTINGS_MODULE: frisian_mcp.test_settings_mysql
+      FRISIAN_MCP_TEST_DB_NAME: frisian_mcp
+      FRISIAN_MCP_TEST_DB_USER: root
+      FRISIAN_MCP_TEST_DB_PASSWORD: frisian-test
+      FRISIAN_MCP_TEST_DB_HOST: 127.0.0.1
+      FRISIAN_MCP_TEST_DB_PORT: "3306"
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: frisian_mcp
+          MYSQL_ROOT_PASSWORD: frisian-test
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - "3306:3306"
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root
+          --password=frisian-test --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+          --health-start-period=10s
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install mysqlclient build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            default-libmysqlclient-dev \
+            pkg-config
+      - name: Sync dependencies
+        run: uv sync --all-extras --group test-mysql
+      - name: Verify database backend
+        run: >-
+          uv run django-admin shell -c
+          "from django.db import connection;
+          connection.ensure_connection();
+          assert connection.vendor == 'mysql', connection.vendor"
+      - name: Apply migrations from a fresh database
+        run: uv run django-admin migrate frisian_mcp_oauth --noinput --skip-checks
+      - name: Run OAuth database regressions
+        run: >-
+          uv run pytest
+          tests/test_contrib_oauth.py
+          tests/test_oauth_consent_migrations.py
+          --ds=frisian_mcp.test_settings_mysql
+          -q
+
+  test_postgresql:
+    name: Tests (PostgreSQL 16)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DJANGO_SETTINGS_MODULE: frisian_mcp.test_settings_postgresql
+      FRISIAN_MCP_TEST_DB_NAME: frisian_mcp
+      FRISIAN_MCP_TEST_DB_USER: postgres
+      FRISIAN_MCP_TEST_DB_PASSWORD: frisian-test
+      FRISIAN_MCP_TEST_DB_HOST: 127.0.0.1
+      FRISIAN_MCP_TEST_DB_PORT: "5432"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: frisian_mcp
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: frisian-test
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd="pg_isready --username=postgres --dbname=frisian_mcp"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-extras --group test-postgresql
+      - name: Verify database backend
+        run: >-
+          uv run django-admin shell -c
+          "from django.db import connection;
+          connection.ensure_connection();
+          assert connection.vendor == 'postgresql', connection.vendor"
+      - name: Apply migrations from a fresh database
+        run: uv run django-admin migrate frisian_mcp_oauth --noinput --skip-checks
+      - name: Run OAuth database regressions
+        run: >-
+          uv run pytest
+          tests/test_contrib_oauth.py
+          tests/test_oauth_consent_migrations.py
+          --ds=frisian_mcp.test_settings_postgresql
+          -q
 
   mcp-doctor:
     name: mcp_doctor (strict integration gate)

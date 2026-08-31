@@ -60,6 +60,14 @@ dev = [
     "djangorestframework-stubs",
 ]
 
+[dependency-groups]
+test-mysql = [
+    "mysqlclient>=2.2.8,<3",
+]
+test-postgresql = [
+    "psycopg[binary]>=3.3.4,<4"
+]
+
 [project.urls]
 Homepage = "https://frisian-mcp.com/"
 Repository = "https://github.com/Frisian-MCP/frisian-mcp"
