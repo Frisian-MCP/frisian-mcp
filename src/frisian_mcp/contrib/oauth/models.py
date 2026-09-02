@@ -302,6 +302,14 @@ class OAuthAuthorizeConsent(models.Model):
             "scope refactors do not require a migration."
         ),
     )
+    grant_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        editable=False,
+        help_text=(
+            "SHA-256 fingerprint of the exact (client_id, redirect_uri, scope) consent tuple."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -312,10 +320,45 @@ class OAuthAuthorizeConsent(models.Model):
         ordering = ["-created_at"]
         constraints = [
             models.UniqueConstraint(
-                fields=["user", "client_id", "redirect_uri", "scope"],
-                name="frisian_mcp_oac_unique_grant",
+                fields=["user", "grant_fingerprint"],
+                name="frisian_mcp_oac_user_fp_uniq",
             ),
         ]
+
+    @staticmethod
+    def fingerprint_for(client_id: str, redirect_uri: str, scope: str) -> str:
+        """Return a stable fingerprint for an exact consent tuple."""
+        digest = hashlib.sha256(b"frisian-mcp:oauth-consent:v1\0")
+        for value in (client_id, redirect_uri, scope):
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, byteorder="big"))
+            digest.update(encoded)
+        return digest.hexdigest()
+
+    def _refresh_grant_fingerprint(self) -> None:
+        """Synchronize the stored fingerprint with the consent tuple."""
+        self.grant_fingerprint = self.fingerprint_for(
+            self.client_id,
+            self.redirect_uri,
+            self.scope,
+        )
+
+    def clean(self) -> None:
+        """Refresh the derived fingerprint before model validation."""
+        super().clean()
+        self._refresh_grant_fingerprint()
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        """Refresh the derived fingerprint before persistence."""
+        self._refresh_grant_fingerprint()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            source_fields = {"client_id", "redirect_uri", "scope"}
+            if update_fields & source_fields:
+                update_fields.add("grant_fingerprint")
+            kwargs["update_fields"] = update_fields
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         """Return a human-readable representation."""

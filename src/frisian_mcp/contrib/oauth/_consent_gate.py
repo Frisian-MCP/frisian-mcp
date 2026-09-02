@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.db import IntegrityError
 from django.http import HttpRequest
 from django.shortcuts import render
 
@@ -64,7 +65,7 @@ def render_consent_form(
 
 
 def has_prior_consent(request: HttpRequest, client_id: str, redirect_uri: str) -> bool:
-    """Return ``True`` iff a stored consent matches ``(user, client_id, redirect_uri, scope)``.
+    """Return ``True`` if a stored consent matches ``(user, client_id, redirect_uri, scope)``.
 
     Scope is derived from the stored ``OAuthClient.permission`` value
     (post-T7, this is operator-set authority, never a request input).
@@ -80,12 +81,25 @@ def has_prior_consent(request: HttpRequest, client_id: str, redirect_uri: str) -
         client = OAuthClient.objects.get(client_id=client_id, is_active=True)
     except OAuthClient.DoesNotExist:
         return False
-    return OAuthAuthorizeConsent.objects.filter(
-        user_id=user.pk,
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        scope=client.permission,
-    ).exists()
+    scope = client.permission
+    grant_fingerprint = OAuthAuthorizeConsent.fingerprint_for(
+        client_id,
+        redirect_uri,
+        scope,
+    )
+    try:
+        consent: OAuthAuthorizeConsent = OAuthAuthorizeConsent.objects.get(
+            user_id=user.pk,
+            grant_fingerprint=grant_fingerprint,
+        )
+    except OAuthAuthorizeConsent.DoesNotExist:
+        return False
+    stored_tuple = (
+        consent.client_id,
+        consent.redirect_uri,
+        consent.scope,
+    )
+    return stored_tuple == (client_id, redirect_uri, scope)
 
 
 def record_consent(request: HttpRequest, client_id: str, redirect_uri: str, scope: str) -> None:
@@ -98,12 +112,27 @@ def record_consent(request: HttpRequest, client_id: str, redirect_uri: str, scop
     user = getattr(request, "user", None)
     if user is None or not user.is_authenticated:
         return
-    OAuthAuthorizeConsent.objects.get_or_create(
-        user_id=user.pk,
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        scope=scope,
+    grant_fingerprint = OAuthAuthorizeConsent.fingerprint_for(
+        client_id,
+        redirect_uri,
+        scope,
     )
+    consent, _created = OAuthAuthorizeConsent.objects.get_or_create(
+        user_id=user.pk,
+        grant_fingerprint=grant_fingerprint,
+        defaults={
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": scope,
+        },
+    )
+    stored_tuple = (
+        consent.client_id,
+        consent.redirect_uri,
+        consent.scope,
+    )
+    if stored_tuple != (client_id, redirect_uri, scope):
+        raise IntegrityError("OAuth consent fingerprint matched a different consent tuple.")
 
 
 def log_consent_required(client_id: str, redirect_uri: str, *, reason: str) -> None:
