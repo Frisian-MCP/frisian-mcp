@@ -17,10 +17,13 @@ class FrisianMcpNetBoxConfig(PluginConfig):
 
     def ready(self):
         import importlib
+        import logging
         import os
         import re as re_module
         from django.conf import settings
         from django.urls import clear_url_caches, get_resolver, include, path, re_path
+
+        logger = logging.getLogger(__name__)
 
         # Propagate FRISIAN_MCP_* settings from three sources (priority order):
         # 1. os.environ (docker-compose env vars), 2. netbox-docker loaded_configurations,
@@ -51,12 +54,70 @@ class FrisianMcpNetBoxConfig(PluginConfig):
             p for p in resolver.url_patterns
             if not getattr(p, _MCP_AUTO_ATTR, False)
         ]
-        mcp_path = re_module.escape(
-            getattr(settings, "FRISIAN_MCP_PATH", "mcp").strip("/")
-        )
-        auto_resolver = re_path(rf"^{mcp_path}/?", include("frisian_mcp.urls"))
-        setattr(auto_resolver, _MCP_AUTO_ATTR, True)
-        resolver.url_patterns.insert(0, auto_resolver)
+
+        # ─────────────────────────────────────────────────────────────────
+        # Mount EVERY configured route, not just one path.
+        #
+        # NetBox is the only supported host where frisian-mcp does not mount
+        # its own URLs: everywhere else `AppConfig.ready()` does it, and
+        # FRISIAN_MCP_ROUTES is honoured there for free. NetBox routes
+        # third-party URLs through PluginConfig instead, so THIS is the only
+        # thing that mounts anything — and it used to read FRISIAN_MCP_PATH
+        # and mount exactly one door.
+        #
+        # The failure that caused was silent and bad. With three routes
+        # configured, all three 404 while the default `/mcp/` answered 401:
+        # the settings were accepted, no warning was emitted, and a
+        # deployment believing it had a read-only door had an undifferentiated
+        # one at a different URL. Configuration that is plausible, accepted
+        # and inert is worse than configuration that fails.
+        #
+        # Each route gets the same `frisian_mcp.urls` include. The package
+        # resolves which route a request belongs to from the matched path, so
+        # mounting the paths is what makes the ceilings and carve-outs apply.
+        # ─────────────────────────────────────────────────────────────────
+        routes = getattr(settings, "FRISIAN_MCP_ROUTES", None) or {}
+        if routes:
+            # Delegate to the package's OWN route installer rather than
+            # mounting the paths here.
+            #
+            # ⚠️ DO NOT include("frisian_mcp.urls") PER ROUTE. It is the
+            # obvious implementation and it is wrong: that include mounts the
+            # LEGACY gateway view, which serves the full unfiltered registry.
+            # Mounting it three times gives three URLs that all behave
+            # identically — every tier ceiling and deny_list silently absent.
+            # Measured: the admin token on the read-only door was offered
+            # create, destroy, update, partial_update and the bulk_* actions.
+            #
+            # Three doors that look right and enforce nothing is a worse
+            # failure than the 404s this replaced, because nothing about it
+            # looks broken.
+            #
+            # `_install_route_urls()` builds one McpView subclass per route
+            # from the validated route configs, with exact-match patterns, and
+            # is idempotent via its own sentinel. It is the same code path
+            # every other host gets from AppConfig.ready(); NetBox just needs
+            # it invoked once the plugin is loaded and ROOT_URLCONF exists.
+            from frisian_mcp.apps import _install_route_urls
+
+            installed = _install_route_urls()
+            logger.info(
+                "frisian-mcp: mounted %d route(s): %s",
+                installed,
+                ", ".join(
+                    str((spec or {}).get("path", "?")).strip("/")
+                    for spec in routes.values()
+                ),
+            )
+        else:
+            # No routes configured — the original single-door behaviour.
+            mcp_path = re_module.escape(
+                getattr(settings, "FRISIAN_MCP_PATH", "mcp").strip("/")
+            )
+            auto_resolver = re_path(rf"^{mcp_path}/?", include("frisian_mcp.urls"))
+            setattr(auto_resolver, _MCP_AUTO_ATTR, True)
+            resolver.url_patterns.insert(0, auto_resolver)
+            logger.info("frisian-mcp: mounted single path %r", mcp_path)
 
         from django.contrib.auth import get_user_model
         NetBoxUser = get_user_model()
