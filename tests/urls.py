@@ -3,6 +3,8 @@
 # pylint: disable=abstract-method
 from __future__ import annotations
 
+from typing import Any
+
 from django.urls import include, path
 from rest_framework import serializers
 from rest_framework.decorators import action
@@ -10,6 +12,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.versioning import NamespaceVersioning, URLPathVersioning
 from rest_framework.viewsets import ViewSet
 
 from frisian_mcp.decorators import mcp_ignore
@@ -268,6 +271,113 @@ class IgnoredViewSet(ViewSet):
 
 
 # ---------------------------------------------------------------------------
+# Versioned fixtures (GH #79) — version resolution without route context
+# ---------------------------------------------------------------------------
+#
+# Discovery builds a synthetic request that never goes through URL resolution,
+# so URLPathVersioning finds no ``version`` URL kwarg and NamespaceVersioning
+# finds no ``resolver_match``.  A scheme carrying a ``default_version`` quietly
+# returns it; StrictItemPathVersioning carries none, so DRF raises ``NotFound``
+# instead — swallowed by discovery, surfaced by the dispatcher as a 404.  The
+# two serializers differ by one field so that a schema derived at ``v1`` is
+# distinguishable from one derived at ``v2``.
+
+
+class ItemV1Serializer(serializers.Serializer):  # type: ignore[type-arg]
+    """Version 1 item shape — name only."""
+
+    name = serializers.CharField(help_text="Item name")
+
+
+class ItemV2Serializer(serializers.Serializer):  # type: ignore[type-arg]
+    """Version 2 item shape — name plus description."""
+
+    name = serializers.CharField(help_text="Item name")
+    description = serializers.CharField(help_text="Item description")
+
+
+class ItemPathVersioning(URLPathVersioning):
+    """URL-path versioning with an explicit default and allow-list."""
+
+    default_version = "v1"
+    allowed_versions = {"v1", "v2"}
+
+
+class ItemNamespaceVersioning(NamespaceVersioning):
+    """Namespace versioning with an explicit default and allow-list."""
+
+    default_version = "v1"
+    allowed_versions = {"v1", "v2"}
+
+
+class StrictItemPathVersioning(URLPathVersioning):
+    """Allow-list with NO default — DRF raises NotFound when nothing resolves."""
+
+    default_version = None
+    allowed_versions = {"v1", "v2"}
+
+
+class VersionedCatalogViewSet(ViewSet):
+    """ViewSet whose serializer fields differ by the version resolved from the URL path."""
+
+    versioning_class = ItemPathVersioning
+
+    def get_serializer_class(self) -> type[serializers.Serializer]:
+        """Return the serializer matching the resolved version."""
+        if getattr(self.request, "version", None) == "v2":
+            return ItemV2Serializer
+        return ItemV1Serializer
+
+    def list(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """List catalog items."""
+        return Response({"version": request.version})
+
+    def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """Create a catalog item."""
+        return Response({"version": request.version}, status=201)
+
+
+class VersionedOrderViewSet(ViewSet):
+    """ViewSet whose serializer fields differ by the version resolved from the URL namespace."""
+
+    versioning_class = ItemNamespaceVersioning
+
+    def get_serializer_class(self) -> type[serializers.Serializer]:
+        """Return the serializer matching the resolved version."""
+        if getattr(self.request, "version", None) == "v2":
+            return ItemV2Serializer
+        return ItemV1Serializer
+
+    def list(self, request: Request) -> Response:
+        """List orders."""
+        return Response({"version": request.version})
+
+    def create(self, request: Request) -> Response:
+        """Create an order."""
+        return Response({"version": request.version}, status=201)
+
+
+class StrictVersionItemViewSet(ViewSet):
+    """ViewSet whose scheme allow-lists versions but declares no default.
+
+    Without a default, an unresolved version is outside ``allowed_versions`` and DRF
+    raises ``NotFound`` rather than falling back.
+    """
+
+    versioning_class = StrictItemPathVersioning
+
+    def get_serializer_class(self) -> type[serializers.Serializer]:
+        """Return the serializer matching the resolved version."""
+        if getattr(self.request, "version", None) == "v2":
+            return ItemV2Serializer
+        return ItemV1Serializer
+
+    def list(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """List strict-version items."""
+        return Response({"version": request.version})
+
+
+# ---------------------------------------------------------------------------
 # URL patterns (manual wiring — no DefaultRouter required)
 # ---------------------------------------------------------------------------
 
@@ -291,6 +401,19 @@ _filtersetclass_list = FilterSetClassViewSet.as_view({"get": "list"})
 _limited_list = LimitedViewSet.as_view({"get": "list", "post": "create"})
 _exclude_destroy_list = ExcludeDestroyViewSet.as_view({"get": "list"})
 _exclude_destroy_detail = ExcludeDestroyViewSet.as_view({"delete": "destroy"})
+_versioned_catalog_list = VersionedCatalogViewSet.as_view({"get": "list", "post": "create"})
+_versioned_order_list = VersionedOrderViewSet.as_view({"get": "list", "post": "create"})
+_strict_version_item_list = StrictVersionItemViewSet.as_view({"get": "list"})
+
+# NamespaceVersioning reads ``request.resolver_match.namespace``, so the routes
+# it versions have to be mounted through an ``include()`` carrying a namespace.
+# This is the only namespaced mount in this URL conf — every other entry below
+# is a flat ``path()``.  The same pattern list is included twice, once per
+# instance namespace, which is the standard Django shape for exactly this.
+_versioned_order_patterns = (
+    [path("order/", _versioned_order_list, name="order-list")],
+    "order",
+)
 
 urlpatterns = [
     path("api/users/", _user_list, name="user-list"),
@@ -306,5 +429,12 @@ urlpatterns = [
     path("api/limited/", _limited_list, name="limited-list"),
     path("api/excludedestroy/", _exclude_destroy_list, name="excludedestroy-list"),
     path("api/excludedestroy/<pk>/", _exclude_destroy_detail, name="excludedestroy-detail"),
+    # URLPathVersioning captures the version as a URL kwarg, so it must be
+    # mounted with the version as a path parameter.  This one route serves both
+    # ``api/v1/catalog/`` and ``api/v2/catalog/``.
+    path("api/<str:version>/catalog/", _versioned_catalog_list, name="catalog-list"),
+    path("api/<str:version>/strictitem/", _strict_version_item_list, name="strictitem-list"),
+    path("api/v1/", include(_versioned_order_patterns, namespace="v1")),
+    path("api/v2/", include(_versioned_order_patterns, namespace="v2")),
     path("mcp/", include("frisian_mcp.urls")),
 ]

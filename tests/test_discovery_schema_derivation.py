@@ -30,15 +30,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+from django.contrib.auth.models import AnonymousUser
+from django.test import Client, RequestFactory
 from rest_framework import serializers, viewsets
 from rest_framework.exceptions import NotAcceptable
 from rest_framework.versioning import AcceptHeaderVersioning, HostNameVersioning
 
+from frisian_mcp.backends.base import ToolDefinition
 from frisian_mcp.backends.discovery import (
     DRFSyncDiscovery,
     _apply_discovery_versioning,
     _build_discovery_stub_request,
 )
+from frisian_mcp.backends.invocation import SyncInvocation
+from tests.urls import StrictVersionItemViewSet, VersionedOrderViewSet
 
 
 class ThingSerializer(serializers.Serializer):  # type: ignore[type-arg]
@@ -383,3 +389,151 @@ class TestSchemeThatCannotReadTheStubRequest:
         scheme -> version ``None`` -> ``int(None)`` -> empty schema.
         """
         assert sorted(_derive(HostVersionedViewSet)["properties"]) == ["name", "status"]
+
+
+# GH #79 — the class above pins schemes that resolve from data the stub request
+# HAS (an Accept header, a hostname); the versioned mounts below resolve from
+# route context it structurally LACKS, so the same code path yields the wrong
+# version instead of the right one.
+
+
+@pytest.mark.usefixtures("use_test_urls")
+class TestVersionedMountsEachReachTheSurface:
+    """Every versioned mount of a resource should reach tools/list as its own tool.
+
+    The collapse measured here is NOT the versioning defect: ``discover_tools``
+    dedupes on ``(ViewSet, action)`` before the tool is named, so it discards
+    the second mount whatever version resolution does.
+    """
+
+    @pytest.mark.xfail(
+        reason="GH #79 — discover_tools() discards the second mount at "
+        "`if (cls, action_name) in seen`, which runs before `tool_name` is "
+        "built and before versioning is consulted, so the api/v2/ mount "
+        "reaches no tool at all. Independent of GH #77.",
+        strict=True,
+    )
+    def test_both_versioned_mounts_produce_a_list_tool(self) -> None:
+        """``api/v1/order/`` and ``api/v2/order/`` should each yield a list tool."""
+        tools = DRFSyncDiscovery().discover_tools()
+        paths = {
+            tool.url_path
+            for tool in tools
+            if tool.view_class is VersionedOrderViewSet and tool.action == "list"
+        }
+        assert paths == {"api/v1/order/", "api/v2/order/"}
+
+
+@pytest.mark.usefixtures("use_test_urls")
+class TestV2MountDerivesItsOwnSchema:
+    """The tool discovered for the v2 mount should carry the v2 field set.
+
+    Keyed on ``url_path`` rather than on the ViewSet, because the version a
+    mount serves is a property of the route and is not expressible from a
+    ViewSet alone.
+    """
+
+    @pytest.mark.xfail(
+        reason="GH #77 — discovery resolves default_version for every mount, so "
+        "no mount derives the v2 field set. Needs BOTH fixes: the "
+        "`seen: set[tuple[type, str]]` dedupe key must become version-aware so "
+        "the v2 mount gets its own tool, and version resolution must read the "
+        "route. The dedupe fix alone leaves this red.",
+        strict=True,
+    )
+    def test_v2_mount_tool_carries_the_v2_field_set(self) -> None:
+        """``api/v2/order/`` should yield a create tool exposing ``description``."""
+        by_path = {
+            tool.url_path: tool
+            for tool in DRFSyncDiscovery().discover_tools()
+            if tool.view_class is VersionedOrderViewSet and tool.action == "create"
+        }
+        v2_tool = by_path.get("api/v2/order/")
+        assert v2_tool is not None, f"no tool for the v2 mount; discovered {sorted(by_path)}"
+        assert "description" in v2_tool.input_schema["properties"]
+
+
+def _dispatch_tool(view_class: type, action: str = "list") -> ToolDefinition:
+    """Build a ToolDefinition naming the v2 mount.
+
+    Discovery cannot currently emit this tool -- the dedupe discards the v2
+    mount -- so it is built by hand to ask what dispatch does with a tool that
+    does name its route.
+    """
+    return ToolDefinition(
+        name=f"order_{action}",
+        description="stub",
+        input_schema={"type": "object", "properties": {}},
+        permission_classes=(),
+        source="auto",
+        view_class=view_class,
+        action=action,
+        url_path="api/v2/order/",
+        permission_tier="read",
+    )
+
+
+@pytest.mark.usefixtures("use_test_urls")
+class TestDispatchResolvesTheRouteVersion:
+    """A dispatched tool call should carry the version of the route it names."""
+
+    @pytest.mark.xfail(
+        reason="GH #77 — the inner request carries no `resolver_match`, so "
+        "NamespaceVersioning falls back to default_version. (URLPathVersioning "
+        'fails separately: `_split_arguments` only ever assigns `view_kwargs["pk"]`.) '
+        "The tool names api/v2/order/ in url_path, so a fix reading the tool's "
+        "own route flips this, without the dedupe key. NOTE: that tool is "
+        "hand-built — discovery cannot emit it while the dedupe discards the v2 "
+        "mount — so this going green proves dispatch resolves the route version "
+        "when handed a tool naming its route, NOT that any tool a real client "
+        "can reach is fixed.",
+        strict=True,
+    )
+    def test_dispatch_sees_the_same_version_as_a_direct_call(self, rf: RequestFactory) -> None:
+        """The dispatcher should see ``v2`` on the v2 route, as a direct client does."""
+        direct = Client().get("/api/v2/order/").json()["version"]
+
+        request = rf.post("/mcp/", content_type="application/json")
+        request.user = AnonymousUser()
+        request.auth = None
+        result = SyncInvocation().invoke(_dispatch_tool(VersionedOrderViewSet), {}, request)
+
+        assert (direct, result.content["version"]) == ("v2", "v2")
+
+
+@pytest.mark.usefixtures("use_test_urls")
+class TestAdvertisedToolsAreCallable:
+    """A tool discovery publishes should not be refused by every dispatch of it.
+
+    Asserted as an invariant rather than a fix: it holds whether discovery stops
+    advertising the tool or dispatch learns to resolve a version, so it does not
+    presuppose the design decision #77 defers.
+    """
+
+    @pytest.mark.xfail(
+        reason="GH #79 — discovery swallows the NotFound from determine_version "
+        "and publishes strictitem_list anyway, while every dispatch of it is "
+        "refused 'Invalid version in URL path.'. Flips if discovery stops "
+        "publishing it or if dispatch resolves a version; either satisfies it.",
+        strict=True,
+    )
+    def test_no_advertised_tool_fails_every_call(self, rf: RequestFactory) -> None:
+        """A published tool must be callable, whichever way the gap is closed."""
+        assert (
+            Client().get("/api/v1/strictitem/").status_code == 200
+        ), "fixture regression: the strict-version route is not mounted"
+
+        request = rf.post("/mcp/", content_type="application/json")
+        request.user = AnonymousUser()
+        request.auth = None
+
+        advertised = [
+            tool
+            for tool in DRFSyncDiscovery().discover_tools()
+            if tool.view_class is StrictVersionItemViewSet
+        ]
+        refused = [
+            tool.name for tool in advertised if SyncInvocation().invoke(tool, {}, request).is_error
+        ]
+
+        assert refused == [], f"advertised but refused on every call: {refused}"
