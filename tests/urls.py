@@ -10,6 +10,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.versioning import NamespaceVersioning, URLPathVersioning
 from rest_framework.viewsets import ViewSet
 
 from frisian_mcp.decorators import mcp_ignore
@@ -27,9 +28,78 @@ class UserSerializer(serializers.Serializer):  # type: ignore[type-arg]
     age = serializers.IntegerField(required=False)
 
 
+class CatalogV1Serializer(serializers.Serializer):  # type: ignore[type-arg]
+    """The first catalog version exposes only a name."""
+
+    name = serializers.CharField()
+
+
+class CatalogV2Serializer(serializers.Serializer):  # type: ignore[type-arg]
+    """The second catalog version adds a description."""
+
+    name = serializers.CharField()
+    description = serializers.CharField()
+
+
 # ---------------------------------------------------------------------------
 # ViewSets
 # ---------------------------------------------------------------------------
+
+
+class CatalogViewSet(ViewSet):
+    """URL-path-versioned fixture with visibly different version schemas."""
+
+    versioning_class = URLPathVersioning
+    default_version = "v1"
+    allowed_versions = {"v1", "v2"}
+
+    def get_serializer_class(self) -> type[serializers.Serializer]:
+        """Select fields from the version DRF put on the request."""
+        if self.request.version == "v2":
+            return CatalogV2Serializer
+        return CatalogV1Serializer
+
+    def list(self, request: Request) -> Response:
+        """Return the version observed during dispatch."""
+        return Response({"version": request.version})
+
+    def create(self, request: Request) -> Response:
+        """Expose the version-dependent serializer to schema discovery."""
+        return Response({}, status=201)
+
+
+class ItemViewSet(ViewSet):
+    """Namespace-versioned fixture with the same deliberately divergent schema."""
+
+    versioning_class = NamespaceVersioning
+    default_version = "v1"
+    allowed_versions = {"v1", "v2"}
+
+    def get_serializer_class(self) -> type[serializers.Serializer]:
+        """Select fields from the namespace version DRF put on the request."""
+        if self.request.version == "v2":
+            return CatalogV2Serializer
+        return CatalogV1Serializer
+
+    def list(self, request: Request) -> Response:
+        """Return the version observed during dispatch."""
+        return Response({"version": request.version})
+
+    def create(self, request: Request) -> Response:
+        """Expose the version-dependent serializer to schema discovery."""
+        return Response({}, status=201)
+
+
+class OrderViewSet(ViewSet):
+    """URL-path fixture whose missing default exercises DRF's NotFound branch."""
+
+    versioning_class = URLPathVersioning
+    default_version = None
+    allowed_versions = {"v1", "v2"}
+
+    def list(self, request: Request) -> Response:
+        """This action is unreachable without URL version kwargs."""
+        return Response({"version": request.version})
 
 
 class UserViewSet(ViewSet):
@@ -271,6 +341,9 @@ class IgnoredViewSet(ViewSet):
 # URL patterns (manual wiring — no DefaultRouter required)
 # ---------------------------------------------------------------------------
 
+_catalog_list = CatalogViewSet.as_view({"get": "list", "post": "create"})
+_item_list = ItemViewSet.as_view({"get": "list", "post": "create"})
+_order_list = OrderViewSet.as_view({"get": "list"})
 _user_list = UserViewSet.as_view({"get": "list", "post": "create"})
 _user_detail = UserViewSet.as_view(
     {
@@ -292,7 +365,15 @@ _limited_list = LimitedViewSet.as_view({"get": "list", "post": "create"})
 _exclude_destroy_list = ExcludeDestroyViewSet.as_view({"get": "list"})
 _exclude_destroy_detail = ExcludeDestroyViewSet.as_view({"delete": "destroy"})
 
+_item_patterns = [path("item/", _item_list, name="item-list")]
+
 urlpatterns = [
+    path("api/v1/catalog/", _catalog_list, name="catalog-v1-list"),
+    path("api/v2/catalog/", _catalog_list, name="catalog-v2-list"),
+    path("api/v1/order/", _order_list, name="order-v1-list"),
+    path("api/v2/order/", _order_list, name="order-v2-list"),
+    path("api/v1/", include((_item_patterns, "catalog"), namespace="v1")),
+    path("api/v2/", include((_item_patterns, "catalog"), namespace="v2")),
     path("api/users/", _user_list, name="user-list"),
     path("api/users/<pk>/", _user_detail, name="user-detail"),
     path("api/users/export/", _user_export, name="user-export"),
