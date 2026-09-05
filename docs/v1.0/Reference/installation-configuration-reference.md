@@ -130,6 +130,47 @@ FRISIAN_MCP_EXTRA_PATHS = ['api/mcp', 'v1/mcp']
 
 ---
 
+### FRISIAN_MCP_TRUSTED_PROXY_COUNT
+
+**Type:** non-negative `int` (**not** `bool`); **Default:** `0`
+
+The number of trusted reverse proxies in front of Django that append
+`X-Forwarded-*` headers. Leave it at `0` when Django is directly reachable.
+Set it to the exact proxy-hop count when deploying behind proxies you control:
+`1` for one nginx or Caddy proxy, `2` for a load balancer followed by nginx.
+
+The OAuth integration uses a positive value when it constructs issuer and
+metadata URLs from forwarded scheme and host headers (when
+`FRISIAN_MCP_OAUTH_ISSUER` is unset). IP-keyed rate-limit consumers use it to
+select the client entry from the trusted end of `X-Forwarded-For`; with `0`,
+they use `REMOTE_ADDR` and ignore forwarded headers. This includes OAuth token
+rate limiting and `FRISIAN_MCP_RATE_LIMIT` when its key is `ip`.
+
+The count is a trust boundary and must match reality in **both** directions:
+
+- Too low selects a trusted intermediary rather than the originating client,
+  so unrelated clients can share an IP rate-limit bucket.
+- Too high reaches an entry before the trusted proxy chain, which a caller can
+  forge in `X-Forwarded-For` and use to evade per-IP limits.
+
+`OAuthConfig.ready()` validates this setting at startup when `contrib.oauth` is
+installed. Strings, booleans (including `True`), and negative integers raise
+`ImproperlyConfigured`; use a real integer from your settings loader.
+`mcp_doctor` reports a positive configured count and warns in non-debug mode
+when it is `0`, because a reverse proxy may then produce incorrect OAuth URLs
+and IP resolution.
+
+```python
+# One trusted nginx proxy in front of gunicorn
+FRISIAN_MCP_TRUSTED_PROXY_COUNT = 1
+```
+
+> **Migration:** `FRISIAN_MCP_TRUST_PROXY` was a historical template setting
+> and was never read by the package. Replace it with this integer count;
+> leaving the old setting in place keeps forwarded-header trust disabled.
+
+---
+
 ### FRISIAN_MCP_AUTODISCOVER
 
 **Type:** `bool`  
