@@ -78,6 +78,7 @@ __all__ = [
     "W009_WORKING_CARVE_OUT",
     "W010_ANONYMOUS_SSE_REACHABLE",
     "W011_UNPROVABLE_PERMISSION_CLASS",
+    "W017_REQUIRED_FK_OUTSIDE_SURFACE",
     "audit_route_configs",
     "audit_route_surface",
     "force_tool_discovery",
@@ -133,6 +134,13 @@ W010_ANONYMOUS_SSE_REACHABLE = "frisian_mcp.W010"
 #: read; "FATAL unless IsAuthenticated present" is forbidden because it
 #: false-positives on legitimate custom auth.  WI-3 middle tier.
 W011_UNPROVABLE_PERMISSION_CLASS = "frisian_mcp.W011"
+
+#: LOUD — a write action requires a related model that its route does not
+#: expose.  The host's permission-filtered serializer queryset will commonly
+#: report this as a caller-data validation failure, making the carve's real
+#: cause invisible to an agent.  Discovery-time only because it needs both the
+#: populated registry and the route's resolved surface.
+W017_REQUIRED_FK_OUTSIDE_SURFACE = "frisian_mcp.W017"
 
 #: LOUD — a non-empty ``allow_list`` is fully zeroed by ``deny_list``: the
 #: route selected tools and then denied every one of them, so it exposes
@@ -638,6 +646,86 @@ def _build_tool_surface() -> Any:
     )
 
 
+def _required_fk_outside_surface_findings(route: RouteConfig, surface: Any) -> list[Any]:
+    """Return LOUD findings for required write FKs whose models are route-absent.
+
+    This intentionally audits configuration at discovery time rather than
+    changing the invocation error.  Re-probing a rejected related-object value
+    without the host's permission filter would create an existence oracle.
+    """
+    from rest_framework.relations import RelatedField  # pylint: disable=import-outside-toplevel
+
+    from frisian_mcp.registry import tool_registry  # pylint: disable=import-outside-toplevel
+    from frisian_mcp.route_grammar import (  # pylint: disable=import-outside-toplevel
+        Finding,
+        parse_lists,
+    )
+
+    visible = parse_lists(route.allow_list, route.deny_list, route_name=route.name).select(surface)
+    visible_models = {
+        (entry.perm_app_label, entry.perm_model)
+        for name in visible
+        if (entry := tool_registry.get_entry(name)) is not None
+        and entry.perm_app_label is not None
+        and entry.perm_model is not None
+    }
+    findings: list[Any] = []
+
+    for name in sorted(visible):
+        entry = tool_registry.get_entry(name)
+        if entry is None or not entry.is_write or entry.view_class is None:
+            continue
+        action = entry.perm_drf_action
+        if not action:
+            continue
+        serializer = None
+        try:
+            from frisian_mcp.backends.discovery import (  # pylint: disable=import-outside-toplevel
+                DRFSyncDiscovery,
+            )
+
+            serializer_class = DRFSyncDiscovery._serializer_class_for(  # noqa: SLF001
+                entry.view_class, action
+            )
+            serializer = serializer_class()
+        except Exception:  # noqa: BLE001 -- host serializers may need unavailable request state
+            logger.debug(
+                "Skipping FK route audit for %s: serializer is unavailable",
+                name,
+                exc_info=True,
+            )
+        if serializer is None:
+            continue
+
+        required = set(entry.input_schema.get("required", ()))
+        for field_name, field in serializer.fields.items():
+            # The published schema is authoritative for whether discovery says
+            # this action requires the field.  It includes DRF's required flag,
+            # the model-level fallback, and operator overrides.
+            if field_name not in required or not isinstance(field, RelatedField):
+                continue
+            model = getattr(getattr(field, "queryset", None), "model", None)
+            meta = getattr(model, "_meta", None)
+            target = (getattr(meta, "app_label", None), getattr(meta, "model_name", None))
+            if None in target or target in visible_models:
+                continue
+            label = getattr(meta, "label", ".".join(target))
+            findings.append(
+                Finding(
+                    severity="LOUD",
+                    code="W017",
+                    message=(
+                        f"route {route.name!r}: write action {name!r} requires related "
+                        f"model {label!r}, but that model is outside the route surface"
+                    ),
+                    entry=name,
+                    list_name="allow_list",
+                    route_name=route.name,
+                )
+            )
+    return findings
+
+
 def _surface_findings_for_route(route: RouteConfig, surface: Any) -> list[Any]:
     """
     Compute the surface-dependent findings for one route.
@@ -737,7 +825,9 @@ def audit_route_surface() -> list[Any]:
         configs = parse_route_configs(raw)
         surface = _build_tool_surface()
         for name in sorted(configs):
-            findings.extend(_surface_findings_for_route(configs[name], surface))
+            route = configs[name]
+            findings.extend(_surface_findings_for_route(route, surface))
+            findings.extend(_required_fk_outside_surface_findings(route, surface))
     except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         # The audit is advisory — a bug in it must never break tool discovery
         # or take down the gateway, so every failure is logged and swallowed.
