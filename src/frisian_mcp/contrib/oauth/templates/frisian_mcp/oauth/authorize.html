@@ -21,10 +21,7 @@
   <p>An application (<code>{{ client_id }}</code>) is requesting access to this MCP server.</p>
   <form method="post">
     {% csrf_token %}
-    <input type="hidden" name="client_id"     value="{{ client_id }}">
-    <input type="hidden" name="redirect_uri"  value="{{ redirect_uri }}">
-    <input type="hidden" name="code_challenge" value="{{ code_challenge }}">
-    <input type="hidden" name="state"          value="{{ state }}">
+    <input type="hidden" name="consent_context" value="{{ consent_context }}">
     <div class="actions">
       <button class="allow" type="submit" name="allow" value="true">Allow</button>
       <button class="deny"  type="submit" name="allow" value="false">Deny</button>

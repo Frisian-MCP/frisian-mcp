@@ -49,7 +49,11 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
-from frisian_mcp.route_resources import default_protected_resource, resource_for_path
+from frisian_mcp.route_resources import (
+    default_protected_resource,
+    protected_resources,
+    resource_for_path,
+)
 
 from ._consent_gate import (
     has_prior_consent,
@@ -72,6 +76,11 @@ _AUTH_CODE_CACHE_PREFIX = "frisian_mcp:oauth_code:"
 # T11: cache.add() on this separate key family is the atomic single-use gate.
 _AUTH_CODE_CONSUMED_PREFIX = "frisian_mcp:oauth_code_consumed:"
 _AUTH_CODE_TTL = 300  # 5 minutes
+# Consent contexts are opaque, server-side capabilities.  Keeping the request
+# tuple out of the browser prevents form fields from becoming authorization
+# inputs; the consumed marker provides an atomic, backend-agnostic replay gate.
+_CONSENT_CONTEXT_PREFIX = "frisian_mcp:oauth_consent_context:"
+_CONSENT_CONTEXT_CONSUMED_PREFIX = "frisian_mcp:oauth_consent_context_consumed:"
 
 #: Canonical log-event name emitted when a concurrent or replayed
 #: token-exchange loses the atomic-consume race for an authorization code.
@@ -245,6 +254,69 @@ def _get_base_url(request: HttpRequest) -> str:
         return f"{scheme}://{host}"
 
     return request.build_absolute_uri("/").rstrip("/")
+
+
+def _valid_resource_indicator(request: HttpRequest, resource: str) -> bool:
+    """Return whether *resource* exactly names a configured protected resource."""
+    base = _get_base_url(request)
+    return any(resource == candidate.resource_url(base) for candidate in protected_resources())
+
+
+def _consent_principal(request: HttpRequest) -> str:
+    """Return a stable identity for the current authenticated session state."""
+    user = getattr(request, "user", None)
+    if not getattr(user, "is_authenticated", False):
+        return "anonymous"
+    # Include the model label so custom user models cannot collide by PK.
+    return f"user:{user._meta.label_lower}:{user.pk}"
+
+
+def _sign_consent_context(
+    request: HttpRequest,
+    client_id: str,
+    redirect_uri: str,
+    code_challenge: str,
+    state: str,
+    resource: str | None,
+) -> str:
+    """Create a one-time, principal-bound opaque authorization context."""
+    context_id = secrets.token_urlsafe(32)
+    django_cache.set(
+        f"{_CONSENT_CONTEXT_PREFIX}{context_id}",
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "state": state,
+            "resource": resource,
+            "principal": _consent_principal(request),
+        },
+        _AUTH_CODE_TTL,
+    )
+    return context_id
+
+
+def _load_consent_context(request: HttpRequest, value: str) -> dict[str, str | None] | None:
+    """Atomically consume an opaque context bound to the current principal."""
+    if not value or len(value) > 255:
+        return None
+    context = django_cache.get(f"{_CONSENT_CONTEXT_PREFIX}{value}")
+    if not isinstance(context, dict) or set(context) != {
+        "client_id", "redirect_uri", "code_challenge", "state", "resource", "principal"
+    }:
+        return None
+    if not all(isinstance(context[key], str) for key in context if key != "resource"):
+        return None
+    if context["resource"] is not None and not isinstance(context["resource"], str):
+        return None
+    # Claim before inspecting the decision or issuing a code.  cache.add is
+    # atomic across Django cache backends, so concurrent POSTs cannot both win.
+    if not django_cache.add(f"{_CONSENT_CONTEXT_CONSUMED_PREFIX}{value}", True, _AUTH_CODE_TTL):
+        return None
+    django_cache.delete(f"{_CONSENT_CONTEXT_PREFIX}{value}")
+    if context["principal"] != _consent_principal(request):
+        return None
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +589,9 @@ class TokenView(View):
                     status=400,
                 )
 
-        access_token = OAuthAccessToken.objects.create(client=client, permission=client.permission)
+        access_token = OAuthAccessToken.objects.create(
+            client=client, permission=client.permission, resource=cached.get("resource")
+        )
         expiry: int = getattr(settings, "FRISIAN_MCP_OAUTH_TOKEN_EXPIRY_SECONDS", 3600)
 
         logger.info("oauth_token_issued_code_flow", extra={"client_name": client.name})
@@ -993,10 +1067,21 @@ class AuthorizeView(View):
         code_challenge = request.GET.get("code_challenge", "")
         code_challenge_method = request.GET.get("code_challenge_method", "")
         state = request.GET.get("state", "")
+        resources = request.GET.getlist("resource")
+        # This server issues a token for exactly one configured route; do not
+        # silently choose among duplicate RFC 8707 resource indicators.
+        resource = resources[0] if len(resources) == 1 else None
 
         error, just_auto_registered = self._validate_authorize_params(
             response_type, client_id, redirect_uri, code_challenge, code_challenge_method
         )
+        if len(resources) > 1:
+            error = "invalid_request"
+        elif resources and (not resource or not _valid_resource_indicator(request, resource)):
+            # An explicitly empty resource is not equivalent to omitting the
+            # indicator: accepting it would silently downgrade this request to
+            # a route-unbound legacy token.
+            error = "invalid_target"
         if error:
             # SEC-2: only redirect back to redirect_uri after we have CONFIRMED
             # it is a registered URI for the named client.  ``error`` is set
@@ -1025,27 +1110,65 @@ class AuthorizeView(View):
         )
         if just_auto_registered:
             log_consent_required(client_id, redirect_uri, reason="just_auto_registered")
-            return render_consent_form(request, client_id, redirect_uri, code_challenge, state)
-        if auto_approve and has_prior_consent(request, client_id, redirect_uri):
+            return render_consent_form(
+                request,
+                client_id,
+                redirect_uri,
+                code_challenge,
+                state,
+                resource,
+                _sign_consent_context(
+                    request, client_id, redirect_uri, code_challenge, state, resource
+                ),
+            )
+        if auto_approve and has_prior_consent(request, client_id, redirect_uri, resource):
             log_auto_approved_on_prior_consent(request, client_id, redirect_uri)
-            return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state)
+            return self._issue_code_redirect(
+                client_id, redirect_uri, code_challenge, state, resource
+            )
         if auto_approve:
             log_consent_required(client_id, redirect_uri, reason="no_prior_consent")
-        return render_consent_form(request, client_id, redirect_uri, code_challenge, state)
+        return render_consent_form(
+            request,
+            client_id,
+            redirect_uri,
+            code_challenge,
+            state,
+            resource,
+            _sign_consent_context(
+                request, client_id, redirect_uri, code_challenge, state, resource
+            ),
+        )
 
     def post(self, request: HttpRequest) -> Any:
-        """Handle the consent form submission (auto_approve=False path)."""
-        client_id = request.POST.get("client_id", "")
-        redirect_uri = request.POST.get("redirect_uri", "")
-        code_challenge = request.POST.get("code_challenge", "")
-        state = request.POST.get("state", "")
+        """Handle a consent decision for the exact request rendered on GET."""
+        # The opaque context is the sole source for the resource indicator.
+        # Reject resource form fields outright, including legacy templates,
+        # rather than treating a browser-controlled value as authorization data.
+        if "resource" in request.POST or len(request.POST.getlist("consent_context")) != 1:
+            return JsonResponse({"error": "invalid_request"}, status=400)
+        context = _load_consent_context(request, request.POST.get("consent_context", ""))
+        if context is None:
+            return JsonResponse({"error": "invalid_request"}, status=400)
+        # Other legacy hidden fields may remain temporarily, but must agree
+        # with the server-side context.
+        for field in ("client_id", "redirect_uri", "code_challenge", "state"):
+            if field in request.POST and request.POST.get(field, "") != context[field]:
+                return JsonResponse({"error": "invalid_request"}, status=400)
+        client_id = context["client_id"]
+        redirect_uri = context["redirect_uri"]
+        code_challenge = context["code_challenge"]
+        state = context["state"]
+        resource = context["resource"]
         allow = request.POST.get("allow", "false").lower() == "true"
 
-        # Re-validate on POST: a malicious form submitter cannot bypass the
-        # GET-side allowlist by hand-crafting the consent POST.
+        # Re-validate the server-side GET parameters: client registrations
+        # can change while a consent page is open.
         error, _just_auto_registered = self._validate_authorize_params(
             "code", client_id, redirect_uri, code_challenge, "S256"
         )
+        if not error and resource is not None and not _valid_resource_indicator(request, resource):
+            error = "invalid_target"
         if error:
             if redirect_uri and error not in {"invalid_redirect_uri", "invalid_client"}:
                 return self._error_redirect(redirect_uri, error, state)
@@ -1068,9 +1191,9 @@ class AuthorizeView(View):
             # AUTO_REGISTER will create the client on token exchange;
             # fall back to the operator default for the consent scope.
             scope = _pkce_default_permission()
-        record_consent(request, client_id, redirect_uri, scope)
+        record_consent(request, client_id, redirect_uri, scope, resource)
 
-        return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state)
+        return self._issue_code_redirect(client_id, redirect_uri, code_challenge, state, resource)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1174,6 +1297,7 @@ class AuthorizeView(View):
         redirect_uri: str,
         code_challenge: str,
         state: str,
+        resource: str | None,
     ) -> HttpResponseRedirect:
         """Generate an auth code, cache it, and redirect to redirect_uri."""
         code = secrets.token_urlsafe(32)
@@ -1183,6 +1307,7 @@ class AuthorizeView(View):
                 "client_id": client_id,
                 "redirect_uri": redirect_uri,
                 "code_challenge": code_challenge,
+                "resource": resource,
             },
             _AUTH_CODE_TTL,
         )

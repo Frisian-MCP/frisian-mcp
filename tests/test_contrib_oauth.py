@@ -1654,15 +1654,17 @@ class TestAuthorizeView:
 
         client = self._make_client()
         view = AuthorizeView.as_view()
-        request = rf.post(
-            "/oauth/authorize/",
-            data={
-                "client_id": client.client_id,
-                "redirect_uri": "https://example.com/cb",
-                "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-                "state": "xyz",
-                "allow": "true",
-            },
+        request = rf.post("/oauth/authorize/", data={"allow": "true"})
+        from frisian_mcp.contrib.oauth.views import _sign_consent_context
+
+        request.POST = request.POST.copy()
+        request.POST["consent_context"] = _sign_consent_context(
+            request,
+            client.client_id,
+            "https://example.com/cb",
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "xyz",
+            None,
         )
         response = view(request)
         assert response.status_code == 302
@@ -1676,15 +1678,12 @@ class TestAuthorizeView:
 
         client = self._make_client()
         view = AuthorizeView.as_view()
-        request = rf.post(
-            "/oauth/authorize/",
-            data={
-                "client_id": client.client_id,
-                "redirect_uri": "https://example.com/cb",
-                "code_challenge": "abc",
-                "state": "xyz",
-                "allow": "false",
-            },
+        request = rf.post("/oauth/authorize/", data={"allow": "false"})
+        from frisian_mcp.contrib.oauth.views import _sign_consent_context
+
+        request.POST = request.POST.copy()
+        request.POST["consent_context"] = _sign_consent_context(
+            request, client.client_id, "https://example.com/cb", "abc", "xyz", None
         )
         response = view(request)
         assert response.status_code == 302
@@ -3028,17 +3027,22 @@ class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-met
         user = user_model.objects.create_user(username="b7-user", password="x")  # noqa: S106
 
         def _consent_post() -> Any:
-            request = rf.post(
-                "/oauth/authorize/",
-                data={
-                    "client_id": client.client_id,
-                    "redirect_uri": "https://example.com/cb",
-                    "code_challenge": self._VALID_CHALLENGE,
-                    "state": "xyz",
-                    "allow": "true",
-                },
+            from frisian_mcp.contrib.oauth.views import (  # pylint: disable=import-outside-toplevel
+                _sign_consent_context,
             )
+
+            # The server-side one-time context is bound to this user.
+            request = rf.post("/oauth/authorize/", data={"allow": "true"})
             request.user = user
+            request.POST = request.POST.copy()
+            request.POST["consent_context"] = _sign_consent_context(
+                request,
+                client.client_id,
+                "https://example.com/cb",
+                self._VALID_CHALLENGE,
+                "xyz",
+                None,
+            )
             return self._view(request)
 
         first = _consent_post()
@@ -3176,6 +3180,7 @@ class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-met
             _client_id: str,
             _redirect_uri: str,
             _scope: str,
+            _resource: str | None = None,
         ) -> str:
             return "0" * 64
 
@@ -3229,6 +3234,7 @@ class TestT2AuthorizePathHardeningMatrix:  # pylint: disable=too-many-public-met
             _client_id: str,
             _redirect_uri: str,
             _scope: str,
+            _resource: str | None = None,
         ) -> str:
             return "0" * 64
 

@@ -150,15 +150,15 @@ class OAuthAuthorizeConsentAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     at once.
     """
 
-    list_display = ("user", "client_id", "redirect_uri", "scope", "created_at")
-    list_filter = ("scope", "created_at")
+    list_display = ("user", "client_id", "redirect_uri", "scope", "resource", "created_at")
+    list_filter = ("scope", "resource", "created_at")
     # ``AUTH_USER_MODEL`` is swappable.  Derive the username-lookup field so
     # admin search works on custom user models whose USERNAME_FIELD is e.g.
     # ``email``.  If USERNAME_FIELD is a relational field (unusual but not
     # forbidden by Django), ``_user_search_lookup`` returns None and the
     # user-side search is dropped rather than registering an invalid path.
     search_fields = tuple(
-        s for s in (_user_search_lookup(), "client_id", "redirect_uri") if s is not None
+        s for s in (_user_search_lookup(), "client_id", "redirect_uri", "resource") if s is not None
     )
     readonly_fields = ("created_at",)
     actions = ("revoke_selected_consents",)
@@ -170,7 +170,7 @@ class OAuthAuthorizeConsentAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         """Delete the selected ``OAuthAuthorizeConsent`` rows.
 
         A revoked consent means the user must approve the next authorize
-        request for that ``(client_id, redirect_uri, scope)`` tuple again.
+        request for that ``(client_id, redirect_uri, scope, resource)`` tuple again.
         """
         count = queryset.delete()[0]
         self.message_user(request, f"Revoked {count} consent grant(s).")
@@ -180,15 +180,15 @@ class OAuthAuthorizeConsentAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 class OAuthAccessTokenAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin interface for :class:`~frisian_mcp.contrib.oauth.models.OAuthAccessToken`."""
 
-    list_display = ("client", "permission", "expires_at", "created_at")
-    list_filter = ("client__is_active", "permission")
+    list_display = ("client", "permission", "resource", "expires_at", "created_at")
+    list_filter = ("client__is_active", "permission", "resource")
     search_fields = ("client__name",)
-    readonly_fields = ("token", "client", "expires_at", "permission", "created_at")
+    readonly_fields = ("token", "client", "expires_at", "permission", "resource", "created_at")
     fieldsets = (
         (
             None,
             {
-                "fields": ("client", "permission", "expires_at"),
+                "fields": ("client", "permission", "resource", "expires_at"),
             },
         ),
         (

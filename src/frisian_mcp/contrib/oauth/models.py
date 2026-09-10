@@ -217,6 +217,15 @@ class OAuthAccessToken(models.Model):
         blank=True,
         help_text="Timestamp of the most recent authenticated request using this token.",
     )
+    resource = models.CharField(
+        max_length=2000,
+        null=True,
+        blank=True,
+        help_text=(
+            "RFC 8707 resource requested during authorization. Null tokens are "
+            "compatible with every protected route."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -265,7 +274,7 @@ class OAuthAuthorizeConsent(models.Model):
     """Persisted approval of an OAuth authorize request.
 
     Records that a Django *user* has approved a specific
-    ``(client_id, redirect_uri, scope)`` tuple at least once.  Subsequent
+    ``(client_id, redirect_uri, scope, resource)`` tuple at least once.  Subsequent
     requests for the same tuple by the same user can be auto-approved without
     re-rendering the consent form when
     ``FRISIAN_MCP_OAUTH_AUTO_APPROVE`` is ``True``.
@@ -307,8 +316,15 @@ class OAuthAuthorizeConsent(models.Model):
         blank=True,
         editable=False,
         help_text=(
-            "SHA-256 fingerprint of the exact (client_id, redirect_uri, scope) consent tuple."
+            "SHA-256 fingerprint of the exact (client_id, redirect_uri, scope, resource) "
+            "consent tuple."
         ),
+    )
+    resource = models.CharField(
+        max_length=2000,
+        null=True,
+        blank=True,
+        help_text="RFC 8707 resource URL included in the approved authorization request.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -326,11 +342,17 @@ class OAuthAuthorizeConsent(models.Model):
         ]
 
     @staticmethod
-    def fingerprint_for(client_id: str, redirect_uri: str, scope: str) -> str:
-        """Return a stable fingerprint for an exact consent tuple."""
-        digest = hashlib.sha256(b"frisian-mcp:oauth-consent:v1\0")
-        for value in (client_id, redirect_uri, scope):
+    def fingerprint_for(
+        client_id: str, redirect_uri: str, scope: str, resource: str | None = None
+    ) -> str:
+        """Return a stable fingerprint for an exact, resource-bound consent tuple."""
+        digest = hashlib.sha256(b"frisian-mcp:oauth-consent:v2\0")
+        for value in (client_id, redirect_uri, scope, resource):
+            if value is None:
+                digest.update(b"\xff")
+                continue
             encoded = value.encode("utf-8")
+            digest.update(b"\x00")
             digest.update(len(encoded).to_bytes(4, byteorder="big"))
             digest.update(encoded)
         return digest.hexdigest()
@@ -341,6 +363,7 @@ class OAuthAuthorizeConsent(models.Model):
             self.client_id,
             self.redirect_uri,
             self.scope,
+            self.resource,
         )
 
     def clean(self) -> None:

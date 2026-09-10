@@ -31,6 +31,8 @@ from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
+from frisian_mcp.route_resources import resource_for_path
+
 from .models import OAuthAccessToken, _hmac_secret
 from .views import _get_base_url
 
@@ -305,6 +307,19 @@ class OAuthTokenAuthentication(BaseAuthentication):
 
         if access_token.is_expired():
             raise AuthenticationFailed("OAuth token has expired.")
+
+        # RFC 8707: a resource-bound token is an audience credential, not a
+        # server-wide Bearer token.  Legacy null-resource tokens predate this
+        # feature and intentionally remain compatible with every route.
+        requested_resource = resource_for_path(getattr(request, "path", ""))
+        if access_token.resource is not None and (
+            requested_resource is None
+            or access_token.resource != requested_resource.resource_url(_get_base_url(request))
+        ):
+            # A resource-bound token must fail closed outside configured protected
+            # routes too: accepting it at an unrecognised path would turn an
+            # audience credential back into a server-wide Bearer credential.
+            raise AuthenticationFailed("OAuth token is not valid for this resource.")
 
         OAuthAccessToken.objects.filter(pk=access_token.pk).update(last_used_at=timezone.now())
 

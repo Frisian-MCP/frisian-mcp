@@ -50,8 +50,10 @@ def render_consent_form(
     redirect_uri: str,
     code_challenge: str,
     state: str,
+    resource: str | None,
+    consent_context: str,
 ) -> Any:
-    """Render the consent template with the hidden form fields."""
+    """Render the consent template with an opaque authorization-request context."""
     return render(
         request,
         "frisian_mcp/oauth/authorize.html",
@@ -60,12 +62,16 @@ def render_consent_form(
             "redirect_uri": redirect_uri,
             "code_challenge": code_challenge,
             "state": state,
+            "resource": resource,
+            "consent_context": consent_context,
         },
     )
 
 
-def has_prior_consent(request: HttpRequest, client_id: str, redirect_uri: str) -> bool:
-    """Return ``True`` if a stored consent matches ``(user, client_id, redirect_uri, scope)``.
+def has_prior_consent(
+    request: HttpRequest, client_id: str, redirect_uri: str, resource: str | None = None
+) -> bool:
+    """Return ``True`` if a stored consent matches its resource-bound grant tuple.
 
     Scope is derived from the stored ``OAuthClient.permission`` value
     (post-T7, this is operator-set authority, never a request input).
@@ -86,6 +92,7 @@ def has_prior_consent(request: HttpRequest, client_id: str, redirect_uri: str) -
         client_id,
         redirect_uri,
         scope,
+        resource,
     )
     try:
         consent: OAuthAuthorizeConsent = OAuthAuthorizeConsent.objects.get(
@@ -98,11 +105,18 @@ def has_prior_consent(request: HttpRequest, client_id: str, redirect_uri: str) -
         consent.client_id,
         consent.redirect_uri,
         consent.scope,
+        consent.resource,
     )
-    return stored_tuple == (client_id, redirect_uri, scope)
+    return stored_tuple == (client_id, redirect_uri, scope, resource)
 
 
-def record_consent(request: HttpRequest, client_id: str, redirect_uri: str, scope: str) -> None:
+def record_consent(
+    request: HttpRequest,
+    client_id: str,
+    redirect_uri: str,
+    scope: str,
+    resource: str | None = None,
+) -> None:
     """Persist a consent grant for an authenticated user, no-op for anonymous.
 
     Idempotent via ``get_or_create``.  Anonymous and middleware-less
@@ -116,6 +130,7 @@ def record_consent(request: HttpRequest, client_id: str, redirect_uri: str, scop
         client_id,
         redirect_uri,
         scope,
+        resource,
     )
     consent, _created = OAuthAuthorizeConsent.objects.get_or_create(
         user_id=user.pk,
@@ -124,14 +139,16 @@ def record_consent(request: HttpRequest, client_id: str, redirect_uri: str, scop
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": scope,
+            "resource": resource,
         },
     )
     stored_tuple = (
         consent.client_id,
         consent.redirect_uri,
         consent.scope,
+        consent.resource,
     )
-    if stored_tuple != (client_id, redirect_uri, scope):
+    if stored_tuple != (client_id, redirect_uri, scope, resource):
         raise IntegrityError("OAuth consent fingerprint matched a different consent tuple.")
 
 

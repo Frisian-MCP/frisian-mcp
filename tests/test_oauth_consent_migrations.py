@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import pytest
@@ -11,14 +12,39 @@ from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.recorder import MigrationRecorder
 
-from frisian_mcp.contrib.oauth.models import OAuthAuthorizeConsent
-
 APP = "frisian_mcp_oauth"
 BASE = (APP, "0002_oauthclient_user")
 LEGACY = (APP, "0003_oauthauthorizeconsent")
 UPGRADE = (APP, "0004_consent_grant_fingerprint")
+RFC8707 = (APP, "0005_rfc8707_resource_indicators")
 SQUASH = (APP, "0003_squashed_0004_consent_grant_fingerprint")
 CONSENT_TABLE = "frisian_mcp_oauth_oauthauthorizeconsent"
+
+
+def _v1_fingerprint(client_id: str, redirect_uri: str, scope: str) -> str:
+    """Match the historical 0004 fingerprint before RFC 8707 added resource."""
+    digest = hashlib.sha256(b"frisian-mcp:oauth-consent:v1\0")
+    for value in (client_id, redirect_uri, scope):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, byteorder="big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _v2_fingerprint(
+    client_id: str, redirect_uri: str, scope: str, resource: str | None = None
+) -> str:
+    """Match the RFC 8707 migration's null-safe resource fingerprint."""
+    digest = hashlib.sha256(b"frisian-mcp:oauth-consent:v2\0")
+    for value in (client_id, redirect_uri, scope, resource):
+        if value is None:
+            digest.update(b"\xff")
+            continue
+        encoded = value.encode("utf-8")
+        digest.update(b"\x00")
+        digest.update(len(encoded).to_bytes(4, byteorder="big"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def _executor_without_replacements() -> MigrationExecutor:
@@ -105,12 +131,12 @@ def test_original_0003_upgrades_existing_consents() -> None:
         assert len(migrated) == 2
         assert migrated[0].redirect_uri == "https://one.example/callback"
         assert migrated[1].redirect_uri == "https://two.example/callback"
-        assert migrated[0].grant_fingerprint == OAuthAuthorizeConsent.fingerprint_for(
+        assert migrated[0].grant_fingerprint == _v1_fingerprint(
             "client-a",
             "https://one.example/callback",
             "read",
         )
-        assert migrated[1].grant_fingerprint == OAuthAuthorizeConsent.fingerprint_for(
+        assert migrated[1].grant_fingerprint == _v1_fingerprint(
             "client-a",
             "https://two.example/callback",
             "read",
@@ -118,6 +144,18 @@ def test_original_0003_upgrades_existing_consents() -> None:
 
         applied = set(MigrationRecorder(connection).applied_migrations())
         assert {LEGACY, UPGRADE, SQUASH} <= applied
+
+        rfc8707_executor = MigrationExecutor(connection)
+        rfc8707_state = rfc8707_executor.migrate([RFC8707])
+        rfc8707_consent_model: Any = rfc8707_state.apps.get_model(APP, "OAuthAuthorizeConsent")
+        rfc8707_rows = list(
+            rfc8707_consent_model.objects.filter(pk__in=[first_pk, second_pk]).order_by("pk")
+        )
+        assert [row.resource for row in rfc8707_rows] == [None, None]
+        assert [row.grant_fingerprint for row in rfc8707_rows] == [
+            _v2_fingerprint("client-a", "https://one.example/callback", "read"),
+            _v2_fingerprint("client-a", "https://two.example/callback", "read"),
+        ]
 
     finally:
         restore_executor = MigrationExecutor(connection)
