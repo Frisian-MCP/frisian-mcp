@@ -14,6 +14,11 @@ _WARN = "⚠"
 _ERR = "✗"
 _NOTE = "ℹ"
 
+#: Findings rendered by the dedicated cross-carve section below.  They are
+#: excluded from the generic route-surface rendering so that a finding reaching
+#: the doctor through both paths prints exactly once.
+_CROSS_CARVE_CODES = frozenset({"W017", "W019"})
+
 
 class Command(BaseCommand):
     """
@@ -79,6 +84,7 @@ class Command(BaseCommand):
         self._check_oauth_tier_permissions(warnings)
         self._check_oauth_pkce_redirect_tier_map(warnings)
         self._check_route_surface(warnings, errors, strict=strict, discovery_error=discovery_error)
+        self._check_cross_carve(warnings, errors, strict=strict, discovery_error=discovery_error)
 
         if options.get("security"):
             self.stdout.write("")
@@ -180,6 +186,12 @@ class Command(BaseCommand):
             self._audit_could_not_run(warnings, errors, strict=strict, exc=exc)
             return
 
+        # W017/W019 reach this list too, but :meth:`_check_cross_carve` owns
+        # them -- it is the only surface that can state the three outcomes.
+        # Rendering them here as well would print each one twice and inflate the
+        # warning tally, so they are dropped from this pass, not from the audit.
+        findings = [f for f in findings if f.code not in _CROSS_CARVE_CODES]
+
         if not findings:
             self._ok("Per-route surface audit clean (allow/deny lists resolve as intended)")
             return
@@ -196,6 +208,98 @@ class Command(BaseCommand):
                 self._fail(errors, message)
             else:
                 self._warn_msg(warnings, message)
+
+    def _check_cross_carve(
+        self,
+        warnings: list[str],
+        errors: list[str],
+        *,
+        strict: bool,
+        discovery_error: Exception | None = None,
+    ) -> None:
+        """
+        Report cross-carve required-FK discoverability -- three outcomes, never two.
+
+        With SOFT mapped to ``logging.INFO`` and not mirrored to stdout, a host
+        that pins the root logger to WARNING never sees these findings anywhere
+        else.  This command is not the primary operator surface for the check;
+        it is the only one.  That is why the scope limitation is printed on the
+        **clean** path as well and must not be trimmed as verbose: an operator
+        reading a clean run is exactly the person about to conclude something
+        this check cannot support.
+
+        The third outcome is the point.  A diagnostic that reports a posture it
+        never evaluated is worse than no diagnostic, and this command has shipped
+        that mistake before -- green-ticking a lockdown that was a no-op, and
+        naming a cache TTL on builds where the cache was disabled.  So
+        ``evaluated=False`` renders as *could not evaluate*, never as a pass, and
+        under ``--strict`` it is an error: a gate that could not evaluate has
+        proved nothing and must not exit zero.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from frisian_mcp import route_audit
+
+        if not getattr(settings, "FRISIAN_MCP_ROUTES", None):
+            self._ok(
+                "No FRISIAN_MCP_ROUTES configured — cross-carve discoverability audit "
+                "not applicable (nothing is carved, so no target can be off-surface)"
+            )
+            return
+
+        if discovery_error is not None:
+            self._cross_carve_unevaluated(warnings, errors, strict=strict, reason=discovery_error)
+            return
+
+        report = route_audit.audit_cross_carve_surface()
+        if not report.evaluated:
+            self._cross_carve_unevaluated(
+                warnings, errors, strict=strict, reason=report.reason or "unknown"
+            )
+            return
+
+        scope = (
+            "This does NOT mean writes will succeed: it does not evaluate any "
+            "principal's Django grants, and a principal lacking view on a target "
+            "model will still be refused by the host."
+        )
+        checked = (
+            f"{report.actions_checked} write action(s) across " f"{report.routes_checked} route(s)"
+        )
+        if not report.findings:
+            self._ok(
+                f"Cross-carve discoverability: {checked} examined, no findings. "
+                f"Every required FK target is discoverable through its route. {scope}"
+            )
+        else:
+            for finding in report.findings:
+                self._warn_msg(warnings, f"[{finding.code}] {finding.message}")
+            self._note(f"Cross-carve discoverability examined {checked}. {scope}")
+
+        # Never let a reader infer this ran under ``manage.py check``.  It cannot:
+        # the registry is empty there, and forcing discovery inside a check
+        # re-introduces the app-ordering bug the deferral exists to prevent.
+        self._note(
+            "Cross-carve discoverability is not evaluated by 'manage.py check' "
+            "(the tool registry is empty at check time) — only here."
+        )
+
+    def _cross_carve_unevaluated(
+        self,
+        warnings: list[str],
+        errors: list[str],
+        *,
+        strict: bool,
+        reason: object,
+    ) -> None:
+        """Record a cross-carve pass that never evaluated.  Never a pass."""
+        message = (
+            f"cross-carve discoverability audit could not run: {reason}. "
+            "This is NOT a clean result — the route surface was not examined."
+        )
+        if strict:
+            self._fail(errors, message)
+        else:
+            self._warn_msg(warnings, message)
 
     def _audit_could_not_run(
         self,

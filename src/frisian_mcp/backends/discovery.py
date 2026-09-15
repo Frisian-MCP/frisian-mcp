@@ -10,6 +10,12 @@ Tool names follow the ``{resource}.{action}`` convention, e.g.
 from the last literal path segment of the URL pattern.
 """
 
+# This module is over ``max-module-lines``; ``views.py`` carries the same pragma
+# for the same reason.  It is suppression, not a fix -- splitting this module is
+# a change of its own.  ``main`` already sat 2 lines under the cap, so the next
+# feature to touch this file inherits the problem whatever it is.
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import inspect
@@ -42,6 +48,7 @@ try:
 except ImportError:  # pragma: no cover
     _JSONRenderer = None  # type: ignore[assignment,misc]
 
+from frisian_mcp import _relations
 from frisian_mcp.backends.base import BaseDiscoveryBackend, ToolDefinition
 
 logger = logging.getLogger(__name__)
@@ -220,7 +227,11 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         return tools
 
     def get_input_schema(  # pylint: disable=too-many-locals
-        self, view_class: type, action: str
+        self,
+        view_class: type,
+        action: str,
+        relations_out: dict[str, _relations.RequiredRelation] | None = None,
+        tool_name: str | None = None,
     ) -> dict[str, Any]:
         """
         Derive a JSON Schema for a ViewSet action from its serializer.
@@ -235,6 +246,17 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
         Args:
             view_class: A DRF ViewSet class.
             action: The action name (e.g. ``"list"``, ``"create"``).
+            relations_out: Optional collector, populated in place with the
+                action's relational fields.  Narrowed here to the fields the
+                audit can act on -- those the emitted schema marks required,
+                plus any whose required-ness could not be determined.
+            tool_name: The fully-qualified tool name, when the caller knows it.
+                Supplying it applies ``FRISIAN_MCP_REQUIRED_FIELD_OVERRIDES``
+                *here* rather than after this method returns, so that the names
+                an operator forced required are part of the set *relations_out*
+                is narrowed against.  Omitting it leaves the overrides
+                unapplied, which is what a caller with no tool name in hand
+                would have got either way.
 
         Returns:
             A JSON Schema describing the expected tool arguments.
@@ -268,7 +290,7 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             action_mapping and any(m in ("post", "put", "patch") for m in action_mapping)
         )
         if has_body:
-            serializer_schema = self._schema_from_viewset(view_class, action)
+            serializer_schema = self._schema_from_viewset(view_class, action, relations_out)
             existing = schema.setdefault("properties", {})
             existing.update(serializer_schema.get("properties", {}))
             # Merge required lists, preserving id if present.
@@ -306,6 +328,20 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
                 if extra_req:
                     current_req: list[str] = schema.get("required", [])
                     schema["required"] = list({*current_req, *extra_req})
+
+        # Applied here rather than by the caller after we return, because
+        # ``narrow_relations`` below decides what the audit will ever see and it
+        # decides on the required set.  An override-forced name arriving
+        # afterwards is in the emitted schema but has already been dropped from
+        # the collector, so a relation the operator themselves declared required
+        # produces neither W017 nor W019 -- a silent clean, the one outcome this
+        # pass exists to prevent.  What the schema ends up carrying is unchanged:
+        # the overrides are applied to it exactly once, only earlier.
+        if tool_name is not None:
+            _apply_required_overrides(schema, tool_name)
+
+        if relations_out is not None:
+            _relations.narrow_relations(relations_out, set(schema.get("required", ())))
 
         return schema
 
@@ -434,8 +470,12 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             permission_tier = "read_write" if is_write else "read"
 
             tool_name = f"{resource}{_tool_name_separator()}{action_name}"
-            input_schema = self.get_input_schema(cls, action_name)
-            _apply_required_overrides(input_schema, tool_name)
+            # ``record_write_relations`` drops actions whose method cannot be
+            # made unsatisfiable.  An empty dict is still recorded: "examined,
+            # nothing to report" must not read as "never examined".
+            collected: dict[str, _relations.RequiredRelation] = {}
+            input_schema = self.get_input_schema(cls, action_name, collected, tool_name)
+            _relations.record_write_relations(tool_name, http_method, collected)
 
             if is_write:
                 input_schema = {
@@ -585,10 +625,17 @@ class DRFSyncDiscovery(BaseDiscoveryBackend):
             return False
         return action_serializer is not create_serializer
 
-    def _schema_from_viewset(self, view_class: type, action: str) -> dict[str, Any]:
+    def _schema_from_viewset(
+        self,
+        view_class: type,
+        action: str,
+        relations_out: dict[str, _relations.RequiredRelation] | None = None,
+    ) -> dict[str, Any]:
         """Attempt to derive a JSON Schema from a ViewSet's serializer."""
         try:
-            return _schema_from_serializer(self._serializer_class_for(view_class, action))
+            return _schema_from_serializer(
+                self._serializer_class_for(view_class, action), relations_out
+            )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # Name the actual exception.  The previous message asserted a cause
             # it had not established — "check that get_serializer_class() does
@@ -1080,64 +1127,11 @@ def _infer_required(field: Any, field_name: str) -> bool:
     """
     Infer whether a ``RelatedField`` that declares ``required=False`` is effectively required.
 
-    Inspects the underlying Django model field to detect the create/partial_update
-    mismatch — serializers often set ``required=False`` so one serializer works for
-    both verbs, but the model field may be ``NOT NULL`` / no default.
-
-    Many DRF host apps set ``required=False`` on FK serializer fields so the
-    same serializer works for both ``create`` and ``partial_update`` (PATCH).
-    The model field, however, may be ``NOT NULL`` with no default, meaning any
-    ``create`` that omits the field will fail at the DB layer with a cryptic
-    constraint error.  This function catches that mismatch so the dispatcher
-    schema marks the field as required.
-
-    Returns ``True`` when **all** of the following hold:
-
-    * *field* is a :class:`~rest_framework.relations.RelatedField` but NOT a
-      :class:`~rest_framework.relations.SlugRelatedField` (slug fields work
-      with bare strings and are handled separately).
-    * The field has a Django QuerySet with an accessible ``.model`` attribute.
-    * The corresponding model field is ``NOT NULL`` (``null=False``) and has
-      no Django-level default (``has_default()`` returns ``False``).
-
-    Falls back to ``False`` on any introspection failure so that a non-standard
-    queryset or computed field never raises during discovery.
-
-    The repeated paragraph above is intentional — it duplicates the lead-in for
-    the docstring body so both the module-level and inline readers get full
-    context.  DRF apps commonly set ``required=False`` on FK fields so the same
-    serializer works for both ``create`` and ``partial_update`` (PATCH).  The
-    model field, however, may be ``NOT NULL`` with no default, meaning any
-    ``create`` that omits the field will fail at the DB layer with a cryptic
-    constraint error.  This function catches that
-    mismatch so the dispatcher schema marks the field as required.
-
-    Returns ``True`` when **all** of the following hold:
-
-    * *field* is a :class:`~rest_framework.relations.RelatedField` but NOT a
-      :class:`~rest_framework.relations.SlugRelatedField` (slug fields work
-      with bare strings and are handled separately).
-    * The field has a Django QuerySet with an accessible ``.model`` attribute.
-    * The corresponding model field is ``NOT NULL`` (``null=False``) and has
-      no Django-level default (``has_default()`` returns ``False``).
-
-    Falls back to ``False`` on any introspection failure so that a non-standard
-    queryset or computed field never raises during discovery.
+    Thin accessor over :func:`~frisian_mcp._relations.resolve_relation`, which
+    owns the rationale, the derivation, and the discrepancy between what this
+    required-ness purports to mean and how it is computed.
     """
-    if not isinstance(field, RelatedField) or isinstance(field, SlugRelatedField):
-        return False
-    queryset = getattr(field, "queryset", None)
-    if queryset is None or not hasattr(queryset, "model"):
-        return False
-    model = queryset.model
-    # Use field.source when set (e.g. source="device_role"); fall back to the
-    # serializer field name which matches the model attribute in the common case.
-    source = getattr(field, "source", None) or field_name
-    try:
-        model_field = model._meta.get_field(source)  # pylint: disable=protected-access
-        return not getattr(model_field, "null", True) and not model_field.has_default()
-    except Exception:  # pylint: disable=broad-exception-caught
-        return False
+    return _relations.resolve_relation(field, field_name).required
 
 
 def _apply_required_overrides(schema: dict[str, Any], tool_name: str) -> None:
@@ -1154,8 +1148,9 @@ def _apply_required_overrides(schema: dict[str, Any], tool_name: str) -> None:
     queryset is resolved at runtime rather than declared on the serializer).
 
     Args:
-        schema: The JSON Schema dict produced by :func:`get_input_schema`.
-            Modified in place.
+        schema: The JSON Schema being built by
+            :meth:`DRFSyncDiscovery.get_input_schema`, which calls this before
+            it narrows the relation collector.  Modified in place.
         tool_name: The fully-qualified tool name (``"resource.action"``).
 
     """
@@ -1168,8 +1163,30 @@ def _apply_required_overrides(schema: dict[str, Any], tool_name: str) -> None:
         schema["required"] = sorted(set(current) | set(extra))
 
 
-def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
-    """Convert a DRF serializer class to a JSON Schema properties dict."""
+def _schema_from_serializer(
+    serializer_class: type,
+    relations_out: dict[str, _relations.RequiredRelation] | None = None,
+) -> dict[str, Any]:
+    """
+    Convert a DRF serializer class to a JSON Schema properties dict.
+
+    When *relations_out* is supplied it is populated, in place, with one
+    :class:`~frisian_mcp._relations.RequiredRelation` per relational field.  The
+    serializer is already instantiated here, so collecting them on this pass is
+    free; deriving them later means instantiating every serializer again, which
+    is the cost the route audit must not pay on the cold-start path.  Omitting
+    it leaves the behaviour unchanged.
+
+    Args:
+        serializer_class: The DRF serializer class to introspect.
+        relations_out: Optional collector, keyed by serializer field name.
+            Narrowed to the fields that matter by
+            :meth:`DRFSyncDiscovery.get_input_schema`.
+
+    Returns:
+        A JSON Schema ``object`` describing the serializer's writable fields.
+
+    """
     try:
         serializer = serializer_class()
     except Exception:  # pylint: disable=broad-exception-caught
@@ -1189,8 +1206,13 @@ def _schema_from_serializer(serializer_class: type) -> dict[str, Any]:
         # PKG-25: also mark a field required when the serializer says required=False
         # but the underlying model field is NOT NULL with no default — a common
         # pattern in host apps that share one serializer for create and partial_update.
-        if getattr(field, "required", False) or _infer_required(field, field_name):
+        # One resolution, reused for both answers.  ``.required`` is exactly what
+        # ``_infer_required`` returns, so the emitted schema is unchanged; the
+        # target and the outcome are extra facts this pass already has.
+        relation = _relations.resolve_relation(field, field_name)
+        if getattr(field, "required", False) or relation.required:
             required.append(field_name)
+        _relations.collect_relation(relations_out, field_name, relation)
 
     schema: dict[str, Any] = {"type": "object", "properties": properties}
     if required:

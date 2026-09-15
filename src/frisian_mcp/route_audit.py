@@ -30,13 +30,21 @@ apps appended to ``INSTALLED_APPS`` after ours have run their own
 ``ready()``).  Django system checks run under ``manage.py check`` with no
 request, so **the tool registry is empty while these checks execute**.
 
-Every trigger in this module is therefore *config-only*: it reads settings
-and never consults :data:`~frisian_mcp.registry.tool_registry`.  The three
+Every trigger evaluated at *check* time is therefore config-only: it reads
+settings and never consults :data:`~frisian_mcp.registry.tool_registry`.  The
 triggers that require a populated tool surface — net-empty exposure, a
-carve-out that leaves survivors, and an allow/deny entry that matches no
-tool — cannot be evaluated here.  Evaluated against an empty registry they do
-not merely miss; they *invert*, reporting an empty surface for every route.
-Those land in the discovery-time pass instead (see :func:`audit_route_surface`).
+carve-out that leaves survivors, an allow/deny entry that matches no tool, and
+the cross-carve discoverability pair W017/W019 — cannot be evaluated here.
+Evaluated against an empty registry they do not merely miss; they *invert*,
+reporting an empty surface for every route.  Those land in the discovery-time
+pass instead (see :func:`audit_route_surface`).
+
+Note that the surface pass is no longer purely name-level.  W017/W019 read
+per-field relation targets, resolved during discovery and looked up here by
+tool name through :mod:`frisian_mcp._relations`.  This module still resolves
+*nothing* from a serializer itself and touches no queryset — the enumeration
+above said "three triggers" before GH #67 added the pair, and the sentence is
+updated rather than left to imply the surface pass is name-only.
 
 Legacy hosts
 ------------
@@ -48,6 +56,7 @@ speaks when an operator has opted into the per-route surface.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -78,6 +87,10 @@ __all__ = [
     "W009_WORKING_CARVE_OUT",
     "W010_ANONYMOUS_SSE_REACHABLE",
     "W011_UNPROVABLE_PERMISSION_CLASS",
+    "W017_REQUIRED_FK_UNREADABLE",
+    "W019_CROSS_CARVE_UNEVALUATED",
+    "CrossCarveReport",
+    "audit_cross_carve_surface",
     "audit_route_configs",
     "audit_route_surface",
     "force_tool_discovery",
@@ -603,6 +616,15 @@ def _cap_names(names: frozenset[str] | set[str]) -> str:
     return rendered
 
 
+def _tool_registry() -> Any:
+    """Return the live tool registry.  Imported lazily, as everything here is."""
+    from frisian_mcp.registry import (  # pylint: disable=import-outside-toplevel
+        tool_registry,
+    )
+
+    return tool_registry
+
+
 def _build_tool_surface() -> Any:
     """
     Snapshot the live tool registry into a :class:`~frisian_mcp.route_grammar.ToolSurface`.
@@ -703,7 +725,354 @@ def _surface_findings_for_route(route: RouteConfig, surface: Any) -> list[Any]:
 
     # S2 — per-entry grammar findings, wrapped verbatim (severity not re-derived).
     findings.extend(matcher.audit(surface, route_name=route.name))
+
+    # GH #67 — cross-carve discoverability, guarded separately and on purpose.
+    # The whole-audit try in ``audit_route_surface`` is not enough: a raise in
+    # here would discard W008, W009 and every wrapped W110–W113 finding for
+    # every route, so a bug in the newest check could silence the established
+    # security findings wholesale.  Failures here cost this route's W017/W019
+    # and nothing else.
+    try:
+        cross_carve, _ = _cross_carve_findings_for_route(route, net, _tool_registry())
+        findings.extend(cross_carve)
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "frisian_mcp: cross-carve check failed for route %r; "
+            "other findings for this route are unaffected (non-fatal)",
+            route.name,
+        )
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Cross-carve required-FK discoverability (GH #67)
+# ---------------------------------------------------------------------------
+#
+# What this checks, and what it deliberately does not.
+#
+# A route carve removes **tools from a door**.  It does not remove a
+# **permission from a principal** -- ``allow_list``/``deny_list`` are resolved
+# against tool *names* and never reach a queryset, a serializer, or a
+# permission class.  So this cannot predict the host's
+# ``422 "Related object not found"``, which comes from a permission-filtered
+# queryset inside serializer validation and turns on the principal's ``view``
+# grant on the target model.  On the normal deployment -- operators carve
+# routes to mirror grants -- writes through a flagged route succeed.
+#
+# What it *can* determine soundly, from configuration alone and with no
+# principal involved, is a property of the carve itself: whether a write's
+# required FK points at a model this door exposes no readable action for.
+# That is a fact about the configured surface, and it is the whole of the
+# claim.  It does not establish that the value is out of reach: nested FK
+# representations are not permission-filtered, so another list's rows may
+# still hand the identifier back.  Whether they do is runtime state this
+# pass does not read -- see W017 below, and the 28-of-34 measurement there.
+
+
+#: SOFT -- a write on this route requires a relation whose target model has no
+#: ``list``/``retrieve`` action on the route's net surface.
+#:
+#: That is the whole claim, and it is deliberately weaker than the one this code
+#: used to make.  It said the caller "cannot look up a valid value", which was
+#: measured false on **28 of 34** findings on a real host: nested FK
+#: representations are not permission-filtered, so an identifier the route
+#: exposes no read for is still handed back inside another list's rows.  Whether
+#: that happens depends on what those rows contain at the time, which is runtime
+#: state this pass does not read -- so the finding reports the carve and stops.
+W017_REQUIRED_FK_UNREADABLE = "frisian_mcp.W017"
+
+#: SOFT -- the check ran but could not reach a verdict for one or more write
+#: actions.  Emitted rather than staying silent because an unexamined action is
+#: not a clean one, and a check that reports the two identically tells an
+#: operator their configuration was inspected when it was not.
+W019_CROSS_CARVE_UNEVALUATED = "frisian_mcp.W019"
+
+#: DRF's standard actions mapped to the HTTP method the router binds them to.
+#: Custom ``@action`` handlers are not here; their methods come from the
+#: decorator's own ``mapping``, which is why *view_class* is needed as well as
+#: the action name.
+_STANDARD_ACTION_HTTP = {
+    "create": "post",
+    "update": "put",
+    "partial_update": "patch",
+    "destroy": "delete",
+    "list": "get",
+    "retrieve": "get",
+}
+
+#: The actions that let a caller discover a valid value for a relation.  A
+#: write on the target model is not discovery -- you cannot learn an id by
+#: being allowed to create one -- so write-reachability is deliberately not
+#: accepted here.
+_READ_ACTIONS = frozenset({"list", "retrieve"})
+
+#: The acting side.  PATCH is ``partial_update`` and does not enforce
+#: ``required``: the stored object already holds the relation, so an
+#: unreachable target cannot make the call unsatisfiable.  DELETE carries no
+#: body.  Both are therefore out.
+_UNSATISFIABLE_METHODS = frozenset({"post", "put"})
+
+
+@dataclasses.dataclass(frozen=True)
+class CrossCarveReport:
+    """
+    The outcome of one cross-carve pass -- three states, never two.
+
+    An empty ``findings`` list cannot say whether the check ran and found
+    nothing or failed and found nothing, and those must not print the same.
+    ``mcp_doctor`` reads *evaluated* before it reads *findings*.
+
+    Attributes:
+        evaluated: ``True`` when the pass completed.  ``False`` means it could
+            not run at all; *reason* says why and *findings* is empty.
+        reason: Why the pass did not complete, or ``None`` when it did.  Never
+            populated alongside ``evaluated=True``.
+        routes_checked: How many routes were examined.
+        actions_checked: How many write actions were examined across them.
+        findings: The W017/W019 findings, ready to log beside W008/W009.
+
+    """
+
+    evaluated: bool
+    reason: str | None = None
+    routes_checked: int = 0
+    actions_checked: int = 0
+    findings: tuple[Any, ...] = ()
+
+
+def _http_methods_for_entry(entry: Any) -> frozenset[str]:
+    """
+    Return the HTTP methods *entry* is reachable by, or empty when undecidable.
+
+    Standard DRF actions resolve from the action name alone.  A custom
+    ``@action`` does not: the decorator parks its methods on the function as
+    ``mapping``, so the ViewSet class is needed to reach them.  An empty result
+    means "could not tell" -- it is never silently read as "not a write".
+    """
+    action = getattr(entry, "perm_drf_action", None)
+    if not action:
+        return frozenset()
+    standard = _STANDARD_ACTION_HTTP.get(action)
+    if standard is not None:
+        return frozenset({standard})
+    view_class = getattr(entry, "view_class", None)
+    if view_class is None:
+        return frozenset()
+    mapping = getattr(getattr(view_class, action, None), "mapping", None)
+    if isinstance(mapping, dict):
+        return frozenset(str(method).lower() for method in mapping)
+    return frozenset()
+
+
+def _readable_model_labels(net: frozenset[str], registry: Any) -> set[str]:
+    """
+    Return the ``"app_label.model_name"`` set this net surface exposes a read for.
+
+    Metadata only: this reads ``perm_app_label`` and ``perm_model``, which the
+    registry already carries as plain strings.  It never touches a queryset --
+    no ``.all()``, no ``.exists()``, no iteration -- so it constructs nothing,
+    issues no query, and stays safe on the app-ready path where the database
+    may not be migrated yet.
+    """
+    labels: set[str] = set()
+    for name in net:
+        entry = registry.get_entry(name)
+        if entry is None:
+            continue
+        if getattr(entry, "perm_drf_action", None) not in _READ_ACTIONS:
+            continue
+        app_label = getattr(entry, "perm_app_label", None)
+        model = getattr(entry, "perm_model", None)
+        if app_label and model:
+            labels.add(f"{app_label}.{model}")
+    return labels
+
+
+def _scan_route_writes(
+    net: frozenset[str], registry: Any, readable: set[str]
+) -> tuple[set[str], set[str], int]:
+    """
+    Walk one route's net surface and sort its write relations into two buckets.
+
+    Returns ``(unreadable, unevaluated, actions_checked)`` -- relations whose
+    target this route exposes no read for, relations we could not reach a
+    verdict on, and how many write actions were examined.  The two buckets are
+    kept apart all the way to the message: a relation we did not evaluate is
+    not a relation we cleared.
+    """
+    from frisian_mcp._relations import (  # pylint: disable=import-outside-toplevel
+        RelationOutcome,
+        required_relations_for,
+    )
+
+    unreadable: set[str] = set()
+    unevaluated: set[str] = set()
+    actions_checked = 0
+
+    for tool_name in sorted(net):
+        entry = registry.get_entry(tool_name)
+        if entry is None or not getattr(entry, "is_write", False):
+            continue
+        if not getattr(entry, "perm_drf_action", None):
+            # Not a DRF ViewSet action -- a hand-registered ``@mcp_tool`` write
+            # with an author-written schema.  There is no serializer behind it
+            # and so no relation to resolve: the question does not apply, which
+            # is different from a question we failed to answer.  Reporting it as
+            # unevaluated would be a false could-not-evaluate, and an operator
+            # who chases one and finds nothing there stops reading the rest.
+            continue
+        methods = _http_methods_for_entry(entry)
+        if not methods:
+            # A DRF action we cannot place on an HTTP method -- a custom
+            # ``@action`` whose ``view_class`` did not survive registration, so
+            # its decorator ``mapping`` is out of reach.  Silence here would be
+            # a guess dressed as a clean result.
+            actions_checked += 1
+            unevaluated.add(f"{tool_name} (method undetermined)")
+            continue
+        if not methods & _UNSATISFIABLE_METHODS:
+            continue
+        actions_checked += 1
+        relations = required_relations_for(tool_name)
+        if relations is None:
+            # Discovery never built a schema for this tool -- a manually
+            # registered write, or a custom discovery backend that does not
+            # collect relations.  Unknown, not clean.
+            unevaluated.add(f"{tool_name} (not examined)")
+            continue
+        for relation in relations:
+            # The emitted schema's ``required`` array decides this, not the
+            # resolver's outcome.  A field the schema obliges the caller to send
+            # has a discoverability question whatever introspection made of the
+            # model field behind it -- and on a real host the inference declines
+            # to answer for most of them, so reading the outcome first files the
+            # whole population as could-not-evaluate and W017 never fires.  Only
+            # a relation the schema does not require AND whose required-ness came
+            # back unevaluated is genuinely one we failed to examine.
+            undecidable = (
+                relation.outcome is RelationOutcome.UNEVALUATED and not relation.schema_required
+            )
+            if undecidable or relation.target_label is None:
+                unevaluated.add(f"{tool_name}.{relation.field_name}")
+            elif relation.target_label not in readable:
+                unreadable.add(f"{tool_name}.{relation.field_name} -> {relation.target_label}")
+    return unreadable, unevaluated, actions_checked
+
+
+def _cross_carve_findings_for_route(
+    route: RouteConfig, net: frozenset[str], registry: Any
+) -> tuple[list[Any], int]:
+    """
+    Compute W017/W019 for one route's net surface.
+
+    Returns the findings and the number of write actions examined.  Findings are
+    aggregated -- one W017 and at most one W019 per route -- because the
+    *intended* configuration is what makes this large: a single resource carve
+    can put several cross-carve relations on one create action, and a
+    per-relation finding would emit hundreds of lines per boot, multiplied by
+    every worker process.  A finding class that floods gets silenced whatever
+    its severity.
+    """
+    from frisian_mcp.route_grammar import Finding  # pylint: disable=import-outside-toplevel
+
+    readable = _readable_model_labels(net, registry)
+    unreadable, unevaluated, actions_checked = _scan_route_writes(net, registry, readable)
+
+    findings: list[Any] = []
+    if unreadable:
+        findings.append(
+            Finding(
+                severity="SOFT",
+                code="W017",
+                message=(
+                    f"route {route.name!r}: {len(unreadable)} required relation(s) on write "
+                    f"actions point at a model this route exposes no list/retrieve action "
+                    f"for ({_cap_names(unreadable)}). A valid value may still be obtainable: "
+                    "another response on this route may embed the identifier, and this check "
+                    "does not examine response shapes. This reads the route's carve only, "
+                    "never a principal's Django grants, so it neither predicts nor rules out "
+                    "a write failing."
+                ),
+                entry=None,
+                list_name="allow_list",
+                route_name=route.name,
+            )
+        )
+    if unevaluated:
+        findings.append(
+            Finding(
+                severity="SOFT",
+                code="W019",
+                message=(
+                    f"route {route.name!r}: {len(unevaluated)} write relation(s) could not be "
+                    f"evaluated for discoverability ({_cap_names(unevaluated)}). These were "
+                    "not checked, which is not the same as checked and clean."
+                ),
+                entry=None,
+                list_name="allow_list",
+                route_name=route.name,
+            )
+        )
+    return findings, actions_checked
+
+
+def audit_cross_carve_surface() -> CrossCarveReport:
+    """
+    Run the cross-carve discoverability pass and return its three-state report.
+
+    Companion to :func:`audit_route_surface`, which logs findings and returns a
+    bare list.  A list cannot carry three outcomes -- it is empty both when the
+    pass found nothing and when it could not run -- so ``mcp_doctor`` reads this
+    instead and prints "clean", "found", or "could not evaluate" accordingly.
+    It must never print a green tick for an unevaluated posture.
+
+    Like the rest of the surface audit this never raises: it is advisory and
+    must not be able to break discovery or the gateway.  A failure comes back as
+    ``evaluated=False`` with a *reason*.
+
+    Silent -- ``evaluated=True`` over zero routes -- when ``FRISIAN_MCP_ROUTES``
+    is unset, matching the rest of the audit: the implicit legacy route carves
+    nothing, so nothing can be off-surface.
+
+    Returns:
+        A :class:`CrossCarveReport`.
+
+    """
+    raw = _routes_setting()
+    if raw is None:
+        return CrossCarveReport(evaluated=True)
+
+    try:
+        from frisian_mcp.route_config import (  # pylint: disable=import-outside-toplevel
+            parse_route_configs,
+        )
+        from frisian_mcp.route_grammar import (  # pylint: disable=import-outside-toplevel
+            parse_lists,
+        )
+
+        configs = parse_route_configs(raw)
+        surface = _build_tool_surface()
+        registry = _tool_registry()
+        findings: list[Any] = []
+        actions = 0
+        for name in sorted(configs):
+            route = configs[name]
+            net = parse_lists(route.allow_list, route.deny_list, route_name=route.name).select(
+                surface
+            )
+            route_findings, route_actions = _cross_carve_findings_for_route(route, net, registry)
+            findings.extend(route_findings)
+            actions += route_actions
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        logger.exception("frisian_mcp: cross-carve audit failed (non-fatal)")
+        return CrossCarveReport(evaluated=False, reason=f"{type(exc).__name__}: {exc}")
+
+    return CrossCarveReport(
+        evaluated=True,
+        routes_checked=len(configs),
+        actions_checked=actions,
+        findings=tuple(findings),
+    )
 
 
 def audit_route_surface() -> list[Any]:
