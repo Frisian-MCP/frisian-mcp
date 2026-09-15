@@ -14,7 +14,7 @@ push a tag, the workflow takes over.  No manual upload, no API tokens, no
 > nothing on its own — the workflow triggers on `push:` of a `v*.*.*` tag and on
 > nothing else. A merged release PR with no tag pushed afterwards is the quiet
 > failure mode here: everything looks green, and no release happened.
-
+>
 > **`main` is protected.** A pull request and one approving review are required,
 > and the rule is enforced for administrators, so the version bump cannot be
 > pushed straight to `main`. Each release therefore takes two steps: land the
