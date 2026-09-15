@@ -10,6 +10,18 @@ The release pipeline is in `.github/workflows/release.yml`.  It is **tag-driven*
 push a tag, the workflow takes over.  No manual upload, no API tokens, no
 `twine` from a laptop.
 
+> **The tag is what fires the pipeline.** Merging the version bump publishes
+> nothing on its own — the workflow triggers on `push:` of a `v*.*.*` tag and on
+> nothing else. A merged release PR with no tag pushed afterwards is the quiet
+> failure mode here: everything looks green, and no release happened.
+>
+> **`main` is protected.** A pull request and one approving review are required,
+> and the rule is enforced for administrators, so the version bump cannot be
+> pushed straight to `main`. Each release therefore takes two steps: land the
+> bump by PR, then tag the resulting merge commit. Tags themselves carry no
+> protection rule today, so a tag push goes direct — see
+> [Tag protection](#tag-protection-recommended).
+
 ## How tags map to publishes
 
 | Tag pattern        | TestPyPI       | Smoke install + import | PyPI (prod) |
@@ -81,11 +93,25 @@ grep '__version__' src/frisian_mcp/__init__.py
 grep '"version"' server.json
 grep -A1 'name = "frisian-mcp"' uv.lock | grep version
 
-# 2. Commit + tag.  The tag itself can be the prettier dash form — the
-#    workflow normalises both to PEP 440 before comparing or installing.
+# 2. Land the bump through a pull request.  `main` is protected: a pull
+#    request and one approving review are required, and the rule is enforced
+#    for administrators too, so `git push origin main` is rejected.
+git checkout -b release/1.0.12rc1
 git commit -am "Release v1.0.12rc1"
-git tag v1.0.12-rc.1   # or v1.0.12rc1, both work
-git push origin main --tags
+git push -u origin release/1.0.12rc1
+gh pr create --base main --title "Release v1.0.12rc1" --body "Closes #123"
+
+#    The PR body must carry `Closes #<issue>` — the require-linked-issue check
+#    fails a body that is empty or has no linked issue.  Open a release issue
+#    first if one does not exist.
+
+# 3. Tag the merge commit, on `main`, after the PR has merged.  The tag itself
+#    can be the prettier dash form — the workflow normalises both to PEP 440
+#    before comparing or installing.
+git checkout main
+git pull --ff-only origin main
+git tag -a v1.0.12-rc.1 -m "v1.0.12-rc.1"   # or v1.0.12rc1, both work
+git push origin v1.0.12-rc.1
 ```
 
 The workflow runs through `build → testpypi-publish → testpypi-smoke` and
@@ -102,9 +128,16 @@ sed -i '' 's/^__version__ = .*/__version__ = "1.0.12"/' src/frisian_mcp/__init__
 sed -i '' 's/"version": ".*"/"version": "1.0.12"/' server.json
 uv lock   # regenerates uv.lock; never hand-edit it
 
+git checkout -b release/1.0.12
 git commit -am "Release v1.0.12"
-git tag v1.0.12
-git push origin main --tags
+git push -u origin release/1.0.12
+gh pr create --base main --title "Release v1.0.12" --body "Closes #124"
+
+# After the PR merges, tag the merge commit on `main`:
+git checkout main
+git pull --ff-only origin main
+git tag -a v1.0.12 -m "v1.0.12"
+git push origin v1.0.12
 ```
 
 The pipeline runs `build → testpypi-publish → testpypi-smoke`, then **pauses
