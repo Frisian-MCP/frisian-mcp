@@ -4,6 +4,11 @@ frisian-mcp is built on published, widely-adopted specifications. The tables bel
 
 ---
 
+For an operator-focused crosswalk from gateway controls to SOC 2 Trust Services
+Criteria, including supporting HIPAA audit-controls and PCI-DSS access-logging
+documentation, see [Controls-to-TSC Mapping](controls-to-tsc-mapping.md). The
+crosswalk describes supporting features and evidence; it is not an attestation.
+
 ## Model Context Protocol
 
 | Spec | Title | Where Used |
