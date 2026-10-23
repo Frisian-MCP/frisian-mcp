@@ -2,6 +2,7 @@
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13298/badge)](https://www.bestpractices.dev/projects/13298)
 [![Slack](https://img.shields.io/badge/slack-join-4A154B?logo=slack&logoColor=white)](https://join.slack.com/t/frisianmcp/shared_invite/zt-407txg7aa-EVs9SsExux7A1MCUcm2F4Q)
+[![MCP Queen operational grade](https://mcpqueen.com/badge/com.frisian-mcp/django.svg)](https://mcpqueen.com/s/com.frisian-mcp/django)
 
 **The Django MCP gateway that discovers your API automatically.**
 
