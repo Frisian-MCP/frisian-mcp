@@ -55,11 +55,17 @@ frisian-mcp has no Go code and ships no certificate files of its own.
   download its vocabulary file over HTTPS when it isn't already cached. That
   connection uses `requests`, so it trusts the `certifi` bundle.
 - **`mcp_doctor`'s OAuth URL check** uses the Python standard library HTTP
-  client. It trusts the **operating system** certificate store, not `certifi`,
-  so neither frisian-mcp 1.1.1 nor a `certifi` upgrade covers it.
+  client. It trusts **Python's default CA file and directory**, not the
+  `certifi` package in your environment. On most Linux systems that default is
+  the operating system store. On macOS installations from python.org it is
+  usually a `certifi` bundle inside the Python framework, linked there by the
+  installer's *Install Certificates* step, and upgrading `certifi` in a virtual
+  environment doesn't change it. Neither frisian-mcp 1.1.1 nor a `certifi`
+  upgrade in your environment covers this check; step 4 below shows how to find
+  and update the store it uses.
 
 Your own application code and other dependencies may make TLS connections too;
-the same two trust stores apply to them.
+they use one of these same trust stores.
 
 ---
 
@@ -91,10 +97,27 @@ the same two trust stores apply to them.
 
    Run it with the same interpreter and virtual environment as the service.
 
-4. **Update the operating system CA store.** Install your OS vendor's latest CA
-   certificates package (for example `ca-certificates` on Debian, Ubuntu and
-   Alpine, or the vendor's update for RHEL). Follow your vendor's guidance,
-   since some distributions also handle cross-signed paths to the affected root.
+4. **Update the store Python trusts by default.** Find it with the same
+   interpreter as the service:
+
+   ```bash
+   python -c "import ssl; print(ssl.get_default_verify_paths())"
+   ```
+
+   `cafile` and `capath` show the CA file and directory in use (`None` means
+   that one isn't present). Update whatever they point to:
+
+   - **An operating system store** (for example under `/etc/ssl`): install your
+     OS vendor's latest CA certificates package (for example `ca-certificates`
+     on Debian, Ubuntu and Alpine, or the vendor's update for RHEL). Follow your
+     vendor's guidance, since some distributions also handle cross-signed paths
+     to the affected root.
+   - **A `certifi` bundle inside a python.org macOS installation:** run
+     *Install Certificates.command* from that Python version's folder in
+     Applications. It upgrades the framework's own `certifi` and relinks the
+     default CA file to it.
+   - **A bundle from another package manager** (for example Homebrew or conda):
+     upgrade that package manager's `ca-certificates` package.
 
 5. **Check for overridden trust stores.** If you set `SSL_CERT_FILE`,
    `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE` or `CURL_CA_BUNDLE`, or mount a custom

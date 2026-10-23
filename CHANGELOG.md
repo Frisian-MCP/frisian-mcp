@@ -131,10 +131,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   install does not gain a certifi dependency. `uv.lock` moves certifi from 2026.7.22 to
   2026.10.19 and changes no other package. Environments that install frisian-mcp without the
   `usage` extra but still carry certifi through other dependencies must upgrade it themselves
-  (for example `pip install --upgrade "certifi>=2026.10.19"`). This does not remediate
-  operating system or custom CA trust stores: `mcp_doctor`'s OAuth URL check uses the
-  standard library HTTP client and therefore the system trust store, which must be updated
-  separately.
+  (for example `pip install --upgrade "certifi>=2026.10.19"`). This does not remediate the
+  CA bundle that Python's `ssl` module loads by default: `mcp_doctor`'s OAuth URL check uses
+  the standard library HTTP client, which trusts the paths reported by
+  `ssl.get_default_verify_paths()`. That is usually the operating system store, but on
+  python.org macOS installs it can be a separate framework-level certifi bundle that neither
+  a virtual-environment certifi upgrade nor an OS CA update changes, and Homebrew or conda
+  Pythons use their own package manager's bundle. Check those paths and update the bundle
+  they select.
 
 - **Authorize-path hardening: request inputs are never authority.** The unknown-client
   variant of the OAuth authorize endpoint (`AUTO_REGISTER`) is, by design, a walk-up surface
