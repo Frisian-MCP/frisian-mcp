@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "frisian-mcp"
-version = "1.1.0"
+version = "1.1.1"
 description = "The Django MCP gateway that discovers your API automatically — zero boilerplate, auto-discovery, dispatcher pattern, OAuth 2.0"
 readme = "README.md"
 license = "Apache-2.0"
@@ -45,6 +45,7 @@ dependencies = [
 # frisian_mcp/usage/counter.py.
 usage = [
     "tiktoken>=0.7,<1",
+    "certifi>=2026.10.19",
 ]
 dev = [
     "black",
