@@ -45,6 +45,7 @@ dependencies = [
 # frisian_mcp/usage/counter.py.
 usage = [
     "tiktoken>=0.7,<1",
+    "certifi>=2026.10.19",
 ]
 dev = [
     "black",

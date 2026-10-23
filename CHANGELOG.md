@@ -124,6 +124,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **eMudhra CA trust incident ([GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)):
+  `certifi>=2026.10.19` floor in the `usage` extra.** The `usage` extra reaches certifi
+  through tiktoken → requests, and certifi releases before 2026.10.18 trust the affected
+  `emSign ECC Root CA - G3` root. The floor applies to `frisian-mcp[usage]` only; the base
+  install does not gain a certifi dependency. `uv.lock` moves certifi from 2026.7.22 to
+  2026.10.19 and changes no other package. Environments that install frisian-mcp without the
+  `usage` extra but still carry certifi through other dependencies must upgrade it themselves
+  (for example `pip install --upgrade "certifi>=2026.10.19"`). This does not remediate
+  operating system or custom CA trust stores: `mcp_doctor`'s OAuth URL check uses the
+  standard library HTTP client and therefore the system trust store, which must be updated
+  separately.
+
 - **Authorize-path hardening: request inputs are never authority.** The unknown-client
   variant of the OAuth authorize endpoint (`AUTO_REGISTER`) is, by design, a walk-up surface
   that accepts an unauthenticated browser. Three coordinated changes restore the invariant
