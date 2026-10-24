@@ -1,8 +1,9 @@
 # eMudhra certificate incident: security update available
 
 **Status:** fixed in frisian-mcp 1.1.1, released 2026-10-23. The hosted
-Frisian-MCP service is remediated and verified for the components listed under
-**Status** below; the remaining items are named there. Last updated 2026-10-24.
+Frisian-MCP service is remediated and verified for the components listed in
+the **Status** section at the end of this page; the remaining items are named
+there. Last updated 2026-10-24.
 
 ---
 
@@ -23,9 +24,9 @@ it may accept TLS certificates it should reject.
   affected workloads. See **What to do now** below.
 - **External MCP clients** that connect to a frisian-mcp server need their own
   updates. This release doesn't change them.
-- **The hosted Frisian-MCP service:** the MCP API service and the Slack bot run
-  on frisian-mcp 1.1.1 with updated CA bundles, and the hosts' operating system
-  trust stores are updated, verified on 2026-10-23. Some host-level components
+- **The hosted Frisian-MCP service:** the MCP API service runs on frisian-mcp
+  1.1.1; it and the Slack bot both have updated CA bundles; and the hosts'
+  operating system trust stores are updated, verified on 2026-10-23. Some host-level components
   are still pending; see **Status** below.
   Remediating the hosted service doesn't update self-hosted installations.
 
@@ -81,8 +82,9 @@ they use one of these same trust stores.
    python -m pip install --upgrade "frisian-mcp[usage]>=1.1.1"
    ```
 
-   Step 2 protects you on any frisian-mcp version, including when 1.1.1 hasn't
-   reached your package mirror yet.
+   Step 2 covers the `certifi` bundle on any frisian-mcp version, including
+   when 1.1.1 hasn't reached your package mirror yet. Connections that use
+   Python's default store, such as `mcp_doctor`'s OAuth check, also need step 4.
 
 2. **Upgrade `certifi` explicitly in every environment that runs frisian-mcp:**
 
@@ -169,7 +171,7 @@ fingerprint in every trust store it uses. The checks finished on
 - **Container runtime and system agent services on the hosts.** These
   long-running services loaded their trust store before it was updated and
   need a restart or upgrade to pick up the change.
-- **The web proxy and cache containers** in front of the service. They have
+- **The web proxy and cache containers** that support the service. They have
   not been updated yet.
 
 This page will be updated when these items are complete.
