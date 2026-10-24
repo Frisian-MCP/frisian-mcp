@@ -1,7 +1,9 @@
-# eMudhra certificate incident: Frisian-MCP assessment and update guidance
+# eMudhra certificate incident: security update available
 
-**Status:** package fix in frisian-mcp 1.1.1; hosted-service remediation in
-progress. Last updated 2026-10-23.
+**Status:** fixed in frisian-mcp 1.1.1, released 2026-10-23. The hosted
+Frisian-MCP service is remediated and verified for the components listed in
+the **Status** section at the end of this page; the remaining items are named
+there. Last updated 2026-10-24.
 
 ---
 
@@ -19,11 +21,14 @@ it may accept TLS certificates it should reject.
   extra, so a fresh install or upgrade no longer resolves an affected bundle.
 - **Self-hosted operators** should also update their Python CA bundles and
   their operating system and custom trust stores, then rebuild and restart
-  affected workloads. See [What to do now](#what-to-do-now).
+  affected workloads. See **What to do now** below.
 - **External MCP clients** that connect to a frisian-mcp server need their own
   updates. This release doesn't change them.
-- **The hosted Frisian-MCP service:** remediation is in progress and has not yet
-  been verified. This page will be updated when it has.
+- **The hosted Frisian-MCP service:** the MCP API service runs on frisian-mcp
+  1.1.1; it and the Slack bot both have updated CA bundles; and the hosts'
+  operating system trust stores are updated, verified on 2026-10-23. Some host-level components
+  are still pending; see **Status** below.
+  Remediating the hosted service doesn't update self-hosted installations.
 
 ---
 
@@ -77,8 +82,9 @@ they use one of these same trust stores.
    python -m pip install --upgrade "frisian-mcp[usage]>=1.1.1"
    ```
 
-   Step 2 protects you on any frisian-mcp version, including before 1.1.1
-   reaches your package index or mirror.
+   Step 2 covers the `certifi` bundle on any frisian-mcp version, including
+   when 1.1.1 hasn't reached your package mirror yet. Connections that use
+   Python's default store, such as `mcp_doctor`'s OAuth check, also need step 4.
 
 2. **Upgrade `certifi` explicitly in every environment that runs frisian-mcp:**
 
@@ -141,9 +147,31 @@ protection this update restores.
 
 ## Status
 
-| Item | Status |
-|---|---|
-| frisian-mcp 1.1.1: `certifi>=2026.10.19` in the `usage` extra | Fixed in 1.1.1 |
-| Hosted Frisian-MCP service | Remediation in progress, not yet verified |
+### frisian-mcp package
 
-This page will be updated when the hosted service has been verified.
+| Release | Change | Published |
+|---|---|---|
+| frisian-mcp 1.1.1 | `usage` extra requires `certifi>=2026.10.19` | 2026-10-23 15:47 UTC, PyPI |
+
+### Hosted Frisian-MCP service
+
+Each component below was checked for the affected root by certificate
+fingerprint in every trust store it uses. The checks finished on
+2026-10-23 at 23:54 UTC.
+
+| Component | Change | Completed (UTC) |
+|---|---|---|
+| MCP API service | Redeployed on frisian-mcp 1.1.1, `certifi` 2026.10.19 and updated OS CA certificates | 2026-10-23 20:52 |
+| Slack bot | Redeployed with `certifi` 2026.10.23 and updated OS CA certificates | 2026-10-23 21:31 |
+| Database host OS trust store | Vendor CA certificates update | 2026-10-23 20:19 |
+| Application host OS trust store | Vendor CA certificates update | 2026-10-21 06:20 |
+
+**Still pending:**
+
+- **Container runtime and system agent services on the hosts.** These
+  long-running services loaded their trust store before it was updated and
+  need a restart or upgrade to pick up the change.
+- **The web proxy and cache containers** that support the service. They have
+  not been updated yet.
+
+This page will be updated when these items are complete.
